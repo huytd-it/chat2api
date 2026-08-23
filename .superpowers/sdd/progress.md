@@ -1,7 +1,0 @@
-﻿Task 1: complete (commits 95e51e2..ba604c0, review clean; minor: non-constant-time key compare / error-shape untested / unused FastAPI import in test)
-Task 2: complete (commits ba604c0..104f383, review clean; minor: unknown role -> Assistant fallback, content:str only)
-Task 3: complete (commits 104f383..9388660, review clean; minor: id-without-slash IndexError risk, failures dict survives reload, try/except style in test)
-Task 4: complete (commits 9388660..36675f8, review clean; approved deviation: raw_decode parser fix; minor: StopIteration on unknown model id, JSONDecoder re-instantiated, _client never closed)
-Task 5: complete (commits 36675f8..e662deb, review clean; approved deviation: lazy _api_key() env resolution; minor: double _api_key() call, fresh AsyncClient per call, non-stream assumes upstream honors stream:false)
-Task 6: complete (commits e662deb..62cd25b, review clean; minor: max_contexts<=0 KeyError, concurrent context_for race, cloak path untested by design)
-Task 7: complete (commits 62cd25b..c6fb636, review clean; minor: echo-prompt deltas can stream to client, innerText shrink drops data, validate_recipe AttributeError on wrong-typed yaml fields, unused import sys, selector_disappear dead-wait)
