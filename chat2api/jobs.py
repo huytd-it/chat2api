@@ -47,6 +47,10 @@ async def _login_timeout(job: dict, login_manager) -> None:
     current = asyncio.current_task()
     try:
         await asyncio.sleep(LOGIN_TIMEOUT_SECONDS)
+        async with job["lock"]:
+            if job["status"] != "waiting_login":
+                return
+            job["login_timeout_claimed"] = True
         await login_manager.cancel(job["id"])
         async with job["lock"]:
             if job["status"] == "waiting_login":
@@ -137,6 +141,7 @@ def start_integrate(url: str, cfg, pool, router=None, login_manager=None) -> str
         "task": None,
         "timeout_task": None,
         "login_attempts": 0,
+        "login_timeout_claimed": False,
         "login_manager": login_manager,
         "lock": asyncio.Lock(),
     }
@@ -153,12 +158,12 @@ async def complete_login(job_id: str, cfg, pool, router, login_manager) -> dict:
         raise JobNotFound
 
     async with job["lock"]:
-        if job["status"] != "waiting_login":
+        if job["status"] != "waiting_login" or job.get("login_timeout_claimed", False):
             raise InvalidJobState
     if not await login_manager.has(job_id):
         raise InvalidJobState
     async with job["lock"]:
-        if job["status"] != "waiting_login":
+        if job["status"] != "waiting_login" or job.get("login_timeout_claimed", False):
             raise InvalidJobState
         job["status"] = "resuming"
         _cancel_timeout(job)
@@ -202,6 +207,8 @@ async def cancel_job(job_id: str, login_manager) -> dict:
     async with job["lock"]:
         if job["status"] == "cancelled":
             return {"ok": True, "status": "cancelled"}
+        if job.get("login_timeout_claimed", False):
+            raise InvalidJobState
         if job["status"] not in CANCELLABLE_STATUSES:
             raise InvalidJobState
         job["status"] = "cancelled"
@@ -255,10 +262,10 @@ async def get(job_id: str) -> dict | None:
             "can_complete_login": False,
         }
         manager = job.get("login_manager")
-        waiting = job["status"] == "waiting_login"
+        waiting = job["status"] == "waiting_login" and not job.get("login_timeout_claimed", False)
     if waiting and manager is not None and await manager.has(job_id):
         async with job["lock"]:
-            if job["status"] == "waiting_login":
+            if job["status"] == "waiting_login" and not job.get("login_timeout_claimed", False):
                 snapshot = {
                     "id": job["id"],
                     "url": job["url"],

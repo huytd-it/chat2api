@@ -264,7 +264,7 @@ async def test_cancel_waiting_login(monkeypatch, tmp_path):
     assert await jobs.cancel_job(job_id, manager) == {"ok": True, "status": "cancelled"}
 
 
-async def test_login_timeout_publishes_terminal_only_after_cancel(monkeypatch, tmp_path):
+async def test_login_timeout_claims_job_before_session_cleanup(monkeypatch, tmp_path):
     cancel_started = asyncio.Event()
     release_cancel = asyncio.Event()
 
@@ -284,7 +284,15 @@ async def test_login_timeout_publishes_terminal_only_after_cancel(monkeypatch, t
     job_id = jobs.start_integrate("https://example.test", cfg, FakePool(), FakeRouter(), manager)
 
     await cancel_started.wait()
-    assert (await jobs.get(job_id))["status"] == "waiting_login"
+    snapshot = await jobs.get(job_id)
+    assert snapshot["status"] == "waiting_login"
+    assert snapshot["can_complete_login"] is False
+    with pytest.raises(jobs.InvalidJobState):
+        await jobs.complete_login(job_id, cfg, FakePool(), FakeRouter(), manager)
+    assert manager.completed == []
+    with pytest.raises(jobs.InvalidJobState):
+        await jobs.cancel_job(job_id, manager)
+
     release_cancel.set()
     await wait_for_status(job_id, "login_timeout")
     assert manager.cancelled == [job_id]

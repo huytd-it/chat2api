@@ -304,3 +304,11 @@ git commit -m "feat: interactive login controls in playground"
 - Concurrent starts retain manager-owned Playwright until `close_all()`.
 - Targeted: `python -m pytest tests/unit/test_login_sessions.py -q` — 15 passed.
 - Full: `python -m pytest -q` — 72 passed.
+
+## 2026-08-24 Task 2 login-timeout claim verification
+
+- Timeout claims `waiting_login` under the job lock before session cleanup; completion and cancellation reject the claimed window.
+- Public status remains `waiting_login` with `can_complete_login=false` until cleanup publishes `login_timeout`.
+- Deterministic race: `python -m pytest tests/integration/test_integrate_login_flow.py::test_login_timeout_claims_job_before_session_cleanup -q` — 1 passed.
+- Targeted: `python -m pytest tests/integration/test_integrate_login_flow.py tests/integration/test_chat_endpoints.py -q` — 31 passed.
+- Full: `python -m pytest tests -q` — 94 passed.
