@@ -109,8 +109,11 @@ async def test_playground_has_login_controls(app_client):
     assert "ticks > 300" in r.text
     assert '["ok", "failed", "cancelled", "login_timeout"]' in r.text
     assert "function resetLoginButtons()" in r.text
-    assert "actionGeneration" in r.text
-    assert "actionInFlightFor" in r.text
+    assert "actionGeneration++;" in r.text
+    assert "actionInFlightFor = generation;" in r.text
+    assert "if (actionInFlightFor !== pollGeneration) resetLoginButtons();" in r.text
+    assert "generation !== pollGeneration || jobId !== activeJobId || actionToken !== actionGeneration" in r.text
+    assert "resetLoginButtons();" in r.text
 
 
 async def test_auth_enforced_when_keys_set(app_client):

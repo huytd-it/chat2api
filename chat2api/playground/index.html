@@ -259,9 +259,9 @@ async function postJobAction(action) {
   try {
     const r = await fetch("/admin/integrate/" + jobId + "/" + action,
       {method: "POST", headers: headers()});
-    if (generation !== pollGeneration || jobId !== activeJobId) return;
+    if (generation !== pollGeneration || jobId !== activeJobId || actionToken !== actionGeneration) return;
     const data = await r.json();
-    if (generation !== pollGeneration || jobId !== activeJobId) return;
+    if (generation !== pollGeneration || jobId !== activeJobId || actionToken !== actionGeneration) return;
     if (!r.ok) throw new Error(data.error?.message || r.statusText);
     if (action === "login-complete") {
       startPolling(jobId);
