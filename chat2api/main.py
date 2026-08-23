@@ -58,6 +58,7 @@ def create_app(cfg: Config) -> FastAPI:
     app.state.pool = pool
     app.state.login_manager = login_manager
     app.state.router = router
+    app.state.recipe_publish_lock = asyncio.Lock()
 
     @app.get("/health")
     async def health(request: Request):
@@ -185,9 +186,12 @@ def register_admin(app: FastAPI, admin) -> None:
             raise OpenAIError(503, "agent_not_configured",
                               "Đặt AGENT_LLM_BASE_URL, AGENT_LLM_API_KEY, AGENT_LLM_MODEL "
                               "để dùng tính năng tích hợp tự động.")
-        job_id = jobs.start_integrate(body.url, cfg, request.app.state.pool,
-                                      router=request.app.state.router,
-                                      login_manager=request.app.state.login_manager)
+        job_id = jobs.start_integrate(
+            body.url, cfg, request.app.state.pool,
+            router=request.app.state.router,
+            login_manager=request.app.state.login_manager,
+            publish_lock=request.app.state.recipe_publish_lock,
+        )
         return {"job_id": job_id}
 
     @admin.get("/integrate/{job_id}")

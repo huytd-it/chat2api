@@ -1,4 +1,8 @@
-import shutil
+import asyncio
+import os
+import re
+import uuid
+from copy import deepcopy
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -73,8 +77,23 @@ async def _looks_like_login(page) -> bool:
         return False
 
 
+def _trial_slug(analyze_key: str) -> str:
+    clean = re.sub(r"[^a-z0-9]+", "-", analyze_key.lower()).strip("-")
+    return f"trial-{clean[:48]}" if clean else f"trial-{uuid.uuid4().hex[:12]}"
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp.write_bytes(data)
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
 async def integrate(url: str, pool, cfg, log, storage_state: Path | None = None,
-                    analyze_key: str | None = None) -> dict:
+                    analyze_key: str | None = None, publish_lock=None) -> dict:
     from ..config import Config  # noqa: F401  (type hint)
 
     slug = _domain_slug(url)
@@ -107,38 +126,46 @@ async def integrate(url: str, pool, cfg, log, storage_state: Path | None = None,
                 fix_ctx = f"Lần {rnd}: Recipe sai schema: {errs}. Sửa và trả lại JSON."
                 continue
 
-            slug = str(recipe["slug"])
-            base_dir, slug = _resolve_dir(cfg, slug, url)
-            recipe["slug"] = slug
-            base_dir.mkdir(parents=True, exist_ok=True)
+            desired_slug = str(recipe["slug"])
+            trial_recipe = deepcopy(recipe)
+            trial_slug = _trial_slug(analyze_key)
+            trial_recipe["slug"] = trial_slug
+            trial_dir = storage_state.parents[1] if storage_state is not None else cfg.recipes_dir / ".login" / trial_slug
             if storage_state is not None:
-                target_state = base_dir / "auth" / "state.json"
-                target_state.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(storage_state, target_state)
-                recipe.setdefault("login", {})["storage_state"] = "auth/state.json"
-                await pool.drop(slug)
-
-            runner = BrowserRecipe(recipe, base_dir, pool)
+                trial_recipe.setdefault("login", {})["storage_state"] = "auth/state.json"
+            trial_dir.mkdir(parents=True, exist_ok=True)
+            await pool.drop(trial_slug)
+            runner = BrowserRecipe(trial_recipe, trial_dir, pool)
             trial = [{"role": "user", "content": "Reply with exactly: OK"}]
             try:
                 log(f"Lần {rnd}: thử round-trip ...")
                 parts = []
-                async for d in runner.stream(trial, recipe["models"][0]["id"]):
+                async for d in runner.stream(trial, trial_recipe["models"][0]["id"]):
                     parts.append(d)
                 reply = "".join(parts).strip()
                 if reply and reply.lower() != "reply with exactly: ok":
-                    if (base_dir / "auth" / "state.json").exists():
-                        recipe.setdefault("login", {})["storage_state"] = "auth/state.json"
-                    (base_dir / "recipe.yaml").write_text(
-                        yaml.safe_dump(recipe, allow_unicode=True, sort_keys=False),
-                        encoding="utf-8")
-                    model_id = f"{slug}/{recipe['models'][0]['id']}"
+                    lock = publish_lock or asyncio.Lock()
+                    async with lock:
+                        base_dir, slug = _resolve_dir(cfg, desired_slug, url)
+                        final_recipe = deepcopy(recipe)
+                        final_recipe["slug"] = slug
+                        if storage_state is not None:
+                            final_recipe.setdefault("login", {})["storage_state"] = "auth/state.json"
+                            _atomic_write(base_dir / "auth" / "state.json", storage_state.read_bytes())
+                        recipe_data = yaml.safe_dump(
+                            final_recipe, allow_unicode=True, sort_keys=False
+                        ).encode("utf-8")
+                        _atomic_write(base_dir / "recipe.yaml", recipe_data)
+                        await pool.drop(slug)
+                    model_id = f"{slug}/{final_recipe['models'][0]['id']}"
                     log(f"Thành công: {model_id}")
                     return {"status": "ok", "slug": slug, "model_id": model_id}
                 fix_ctx = f"Lần {rnd}: Reply thu được rỗng hoặc trùng prompt: {reply!r}. Snapshot sau chạy:\n{await dom.snapshot(page)}"
             except Exception as e:
                 fix_ctx = (f"Lần {rnd}: Chạy recipe lỗi: {e}. "
                            f"Snapshot DOM sau tương tác:\n{await dom.snapshot(page)}")
+            finally:
+                await pool.drop(trial_slug)
             log(fix_ctx)
         return {"status": "failed", "slug": slug,
                 "hint": "Hết vòng thử. Xem log, chỉnh recipes/<slug>/recipe.yaml tay."}

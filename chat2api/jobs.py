@@ -14,6 +14,17 @@ CANCELLABLE_STATUSES = {"running", "waiting_login", "resuming"}
 JOBS: dict[str, dict] = {}
 
 
+async def _critical(coro):
+    task = coro if isinstance(coro, asyncio.Task) else asyncio.create_task(coro)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        finally:
+            raise
+
+
 class JobNotFound(LookupError):
     pass
 
@@ -51,6 +62,18 @@ def _cleanup_staging(job: dict) -> None:
         shutil.rmtree(staging_dir, ignore_errors=True)
 
 
+async def _finish_login_timeout(job: dict, login_manager) -> None:
+    try:
+        await login_manager.cancel(job["id"])
+    finally:
+        _cleanup_staging(job)
+    async with job["lock"]:
+        if job["status"] == "waiting_login" and job.get("login_timeout_claimed"):
+            job["status"] = "login_timeout"
+            job["log"].append("Hết thời gian chờ đăng nhập.")
+            job["timeout_task"] = None
+
+
 async def _login_timeout(job: dict, login_manager) -> None:
     current = asyncio.current_task()
     try:
@@ -59,14 +82,11 @@ async def _login_timeout(job: dict, login_manager) -> None:
             if job["status"] != "waiting_login":
                 return
             job["login_timeout_claimed"] = True
-        await login_manager.cancel(job["id"])
-        async with job["lock"]:
-            if job["status"] == "waiting_login":
-                job["status"] = "login_timeout"
-                job["log"].append("Hết thời gian chờ đăng nhập.")
-                _cleanup_staging(job)
+        await _critical(_finish_login_timeout(job, login_manager))
     except asyncio.CancelledError:
-        pass
+        if not job.get("login_timeout_claimed"):
+            return
+        raise
     finally:
         async with job["lock"]:
             if job.get("timeout_task") is current:
@@ -115,7 +135,8 @@ async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, logi
         try:
             result = await integrate(
                 job["url"], pool, cfg, job["log"].append,
-                storage_state=storage_state, analyze_key=analyze_key
+                storage_state=storage_state, analyze_key=analyze_key,
+                publish_lock=job["publish_lock"]
             )
         finally:
             try:
@@ -125,7 +146,7 @@ async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, logi
             except Exception as error:
                 raise ContextResetFailed from error
         async with job["lock"]:
-            if job["status"] != expected_status:
+            if job["status"] != expected_status or job.get("cancel_claimed", False):
                 return
             job["slug"] = result.get("slug", job.get("slug"))
             open_login = result.get("status") == "login_required"
@@ -134,20 +155,17 @@ async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, logi
             await _open_login(job, expected_status, cfg, login_manager)
             return
 
-        if result.get("status") == "ok" and router is not None:
-            try:
-                router.reload()
-            except Exception:
-                async with job["lock"]:
-                    if job["status"] == expected_status:
-                        job["log"].append("Không thể tải recipe mới.")
-                        job["status"] = "failed"
-                        _cleanup_staging(job)
-                return
-
         async with job["lock"]:
-            if job["status"] != expected_status:
+            if job["status"] != expected_status or job.get("cancel_claimed", False):
                 return
+            if result.get("status") == "ok" and router is not None:
+                try:
+                    router.reload()
+                except Exception:
+                    job["log"].append("Không thể tải recipe mới.")
+                    job["status"] = "failed"
+                    _cleanup_staging(job)
+                    return
             job.update({key: value for key, value in result.items()
                         if key not in {"task", "timeout_task", "lock"}})
             job["status"] = result.get("status", "failed")
@@ -169,7 +187,8 @@ async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, logi
                 _cleanup_staging(job)
 
 
-def start_integrate(url: str, cfg, pool, router=None, login_manager=None) -> str:
+def start_integrate(url: str, cfg, pool, router=None, login_manager=None,
+                    publish_lock=None) -> str:
     job_id = uuid.uuid4().hex[:12]
     job = {
         "id": job_id,
@@ -181,7 +200,9 @@ def start_integrate(url: str, cfg, pool, router=None, login_manager=None) -> str
         "timeout_task": None,
         "login_attempts": 0,
         "login_timeout_claimed": False,
+        "cancel_claimed": False,
         "login_manager": login_manager,
+        "publish_lock": publish_lock or asyncio.Lock(),
         "staging_dir": cfg.recipes_dir / ".login" / job_id,
         "lock": asyncio.Lock(),
     }
@@ -190,6 +211,25 @@ def start_integrate(url: str, cfg, pool, router=None, login_manager=None) -> str
         _run_analyzer(job, "running", cfg, pool, router, login_manager)
     )
     return job_id
+
+
+async def _complete_login(job: dict, cfg, pool, router, login_manager) -> dict:
+    try:
+        state_path = await login_manager.complete(job["id"])
+    except Exception:
+        async with job["lock"]:
+            if job["status"] == "resuming":
+                _login_failure(job, "Không thể lưu session đăng nhập.")
+        raise LoginSaveFailed
+
+    analyzer = asyncio.create_task(
+        _run_analyzer(job, "resuming", cfg, pool, router, login_manager,
+                      storage_state=state_path)
+    )
+    async with job["lock"]:
+        job["task"] = analyzer
+    await analyzer
+    return {"ok": True, "status": "resuming"}
 
 
 async def complete_login(job_id: str, cfg, pool, router, login_manager) -> dict:
@@ -207,25 +247,32 @@ async def complete_login(job_id: str, cfg, pool, router, login_manager) -> dict:
             raise InvalidJobState
         job["status"] = "resuming"
         _cancel_timeout(job)
-
-    try:
-        state_path = await login_manager.complete(job_id)
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        async with job["lock"]:
-            if job["status"] == "resuming":
-                _login_failure(job, "Không thể lưu session đăng nhập.")
-        raise LoginSaveFailed
-
-    async with job["lock"]:
-        if job["status"] != "resuming":
-            return {"ok": True, "status": job["status"]}
-        job["task"] = asyncio.create_task(
-            _run_analyzer(job, "resuming", cfg, pool, router, login_manager,
-                          storage_state=state_path)
+        continuation = asyncio.create_task(
+            _complete_login(job, cfg, pool, router, login_manager)
         )
-    return {"ok": True, "status": "resuming"}
+        job["task"] = continuation
+    try:
+        return await _critical(continuation)
+    except asyncio.CancelledError:
+        if continuation.cancelled() and not asyncio.current_task().cancelling():
+            return {"ok": True, "status": job["status"]}
+        raise
+
+
+async def _cancel_job(job: dict, login_manager, task) -> dict:
+    try:
+        await login_manager.cancel(job["id"])
+        if task and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+        if task and task is not asyncio.current_task():
+            with suppress(asyncio.CancelledError):
+                await task
+    finally:
+        _cleanup_staging(job)
+    async with job["lock"]:
+        if job.get("cancel_claimed"):
+            job["status"] = "cancelled"
+    return {"ok": True, "status": "cancelled"}
 
 
 async def cancel_job(job_id: str, login_manager) -> dict:
@@ -236,22 +283,24 @@ async def cancel_job(job_id: str, login_manager) -> dict:
     async with job["lock"]:
         if job["status"] == "cancelled":
             return {"ok": True, "status": "cancelled"}
-        if job.get("login_timeout_claimed", False):
+        if (job.get("login_timeout_claimed", False) or job.get("cancel_claimed", False)
+                or job["status"] not in CANCELLABLE_STATUSES):
             raise InvalidJobState
-        if job["status"] not in CANCELLABLE_STATUSES:
-            raise InvalidJobState
-        job["status"] = "cancelled"
+        job["cancel_claimed"] = True
         _cancel_timeout(job)
         task = job.get("task")
-        if task and task is not asyncio.current_task() and not task.done():
-            task.cancel()
+    return await _critical(_cancel_job(job, login_manager, task))
 
-    await login_manager.cancel(job_id)
-    if task and task is not asyncio.current_task():
-        with suppress(asyncio.CancelledError):
-            await task
-    _cleanup_staging(job)
-    return {"ok": True, "status": "cancelled"}
+
+async def _finish_shutdown(login_manager, waiting_ids, tasks) -> None:
+    cleanup = [login_manager.cancel(job_id) for job_id in waiting_ids]
+    cleanup.extend(tasks)
+    try:
+        if cleanup:
+            await asyncio.gather(*cleanup, return_exceptions=True)
+    finally:
+        for job in list(JOBS.values()):
+            _cleanup_staging(job)
 
 
 async def shutdown(login_manager) -> None:
@@ -271,12 +320,7 @@ async def shutdown(login_manager) -> None:
                     task.cancel()
                     tasks.add(task)
                 job[key] = None
-    cleanup = [login_manager.cancel(job_id) for job_id in waiting_ids]
-    cleanup.extend(tasks)
-    if cleanup:
-        await asyncio.gather(*cleanup, return_exceptions=True)
-    for job in list(JOBS.values()):
-        _cleanup_staging(job)
+    await _critical(_finish_shutdown(login_manager, waiting_ids, tasks))
 
 
 async def get(job_id: str) -> dict | None:
