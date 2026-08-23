@@ -4,6 +4,15 @@ from pathlib import Path
 import asyncio
 
 
+async def _finish_cleanup(cleanup) -> None:
+    task = asyncio.create_task(cleanup)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await task
+        raise
+
+
 class BrowserPool:
     """Một BrowserContext dài hạn cho mỗi slug.
 
@@ -64,10 +73,13 @@ class BrowserPool:
         async with self._lock:
             context = self._contexts.pop(slug, None)
         if context:
-            try:
-                await context.close()
-            except Exception:
-                pass
+            async def close() -> None:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+
+            await _finish_cleanup(close())
 
     async def aclose(self):
         for ctx in self._contexts.values():
