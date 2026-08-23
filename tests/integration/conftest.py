@@ -31,3 +31,31 @@ def fixture_recipe(site):
         },
         "models": [{"id": "fixture-web"}],
     }
+
+@pytest.fixture
+async def app_client(tmp_path, site):
+    from httpx import ASGITransport, AsyncClient
+
+    from chat2api.config import Config
+    from chat2api.main import create_app
+    from chat2api.providers.base import ModelInfo, Provider
+
+    class FakeProvider(Provider):
+        slug = "fake"
+
+        def models(self):
+            return [ModelInfo(id="fake/m1", slug="fake")]
+
+        async def stream(self, messages, model_id):
+            for word in ("Hello ", "world"):
+                yield word
+
+    cfg = Config()
+    cfg.recipes_dir = tmp_path / "recipes"
+    cfg.recipes_dir.mkdir()
+    app = create_app(cfg)
+    app.state.router.providers["fake"] = FakeProvider()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        yield client
