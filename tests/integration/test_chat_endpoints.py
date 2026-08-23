@@ -58,3 +58,18 @@ async def test_auth_enforced_when_keys_set(app_client):
         assert r2.status_code == 200
     finally:
         app.state.cfg.api_keys = []
+
+
+async def test_admin_recipes_and_auth_guard(app_client):
+    r = await app_client.post("/admin/integrate", json={"url": "https://x.example"})
+    # chưa cấu hình LLM → 503 agent_not_configured
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "agent_not_configured"
+
+    r2 = await app_client.get("/admin/recipes")
+    assert r2.status_code == 200 and isinstance(r2.json(), list)
+
+
+async def test_admin_delete_recipe_guard(app_client):
+    r = await app_client.delete("/admin/recipes/gemini")
+    assert r.status_code == 400

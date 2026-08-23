@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 import uuid
@@ -151,8 +152,76 @@ def create_app(cfg: Config) -> FastAPI:
 
 
 def register_admin(app: FastAPI, admin) -> None:
-    """Điền ở Task 12 (analyzer/jobs/recipes). Tạo sẵn để Task 8 compile."""
-    pass
+    import re
+    import shutil
+
+    from .agents import llm
+    from .jobs import get as job_get
+    from .jobs import start_integrate
+    from .schemas import IntegrateRequest
+
+    @admin.post("/integrate")
+    async def integrate(body: IntegrateRequest, request: Request):
+        cfg = request.app.state.cfg
+        if not llm.configured(cfg):
+            raise OpenAIError(503, "agent_not_configured",
+                              "Đặt AGENT_LLM_BASE_URL, AGENT_LLM_API_KEY, AGENT_LLM_MODEL "
+                              "để dùng tính năng tích hợp tự động.")
+        job_id = start_integrate(body.url, cfg, request.app.state.pool)
+        return {"job_id": job_id}
+
+    @admin.get("/integrate/{job_id}")
+    async def integrate_status(job_id: str):
+        job = job_get(job_id)
+        if not job:
+            raise OpenAIError(404, "not_found", "Job không tồn tại")
+        return job
+
+    @admin.get("/integrate/{job_id}/log")
+    async def integrate_log(job_id: str):
+        async def gen():
+            cursor = 0
+            while True:
+                job = job_get(job_id)
+                if not job:
+                    yield "event: error\ndata: job not found\n\n"
+                    return
+                while cursor < len(job["log"]):
+                    line = job["log"][cursor]
+                    cursor += 1
+                    yield f"data: {line}\n\n"
+                if job["status"] != "running":
+                    yield f"event: done\ndata: {job['status']}\n\n"
+                    return
+                await asyncio.sleep(0.5)
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @admin.get("/recipes")
+    async def recipes(request: Request):
+        rt = request.app.state.router
+        out = []
+        for slug, provider in sorted(rt.providers.items()):
+            out.append({"slug": slug,
+                        "models": [m.id.split("/", 1)[1] for m in provider.models()],
+                        "unhealthy": rt.is_unhealthy(slug),
+                        "type": type(provider).__name__})
+        return out
+
+    @admin.post("/recipes/{slug}/reload")
+    async def reload_recipes(slug: str, request: Request):
+        request.app.state.router.reload()
+        return {"ok": True}
+
+    @admin.delete("/recipes/{slug}")
+    async def delete_recipe(slug: str, request: Request):
+        if not re.fullmatch(r"[a-z0-9-]+", slug or "") or slug in {"gemini", "openai"}:
+            raise OpenAIError(400, "invalid_slug", "Slug không được xóa")
+        target = request.app.state.cfg.recipes_dir / slug
+        if target.exists():
+            shutil.rmtree(target)
+        request.app.state.router.reload()
+        return {"ok": True}
 
 
 app = create_app(Config())
