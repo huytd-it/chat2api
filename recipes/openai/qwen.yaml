@@ -1,0 +1,7 @@
+slug: qwen
+# Upstream chuẩn OpenAI /v1 (dịch vụ host của dự án qwen-api).
+# Lấy key theo README qwen-api rồi đặt vào env QWEN_API_KEY.
+base_url: https://qwen.aikit.club/v1
+api_key_env: QWEN_API_KEY
+stream: true
+models: [qwen-max, qwen-plus]

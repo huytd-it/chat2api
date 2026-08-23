@@ -71,3 +71,21 @@ def _gemini_loader(directory: Path, pool):
 
 
 LOADERS.append(_gemini_loader)
+
+
+def _passthrough_loader(directory: Path, pool):
+    if directory.name != "openai":
+        return None
+    import yaml
+
+    from .providers.openai_passthrough import OpenAIPassthrough
+
+    out = []
+    for yml in sorted(directory.glob("*.yaml")):
+        cfg = yaml.safe_load(yml.read_text(encoding="utf-8"))
+        if cfg:
+            out.append(OpenAIPassthrough(cfg))
+    return out or None
+
+
+LOADERS.append(_passthrough_loader)
