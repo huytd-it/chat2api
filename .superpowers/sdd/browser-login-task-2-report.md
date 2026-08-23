@@ -74,3 +74,43 @@ Baseline before Task 2 was `72 passed in 45.97s`.
 
 - No headed-browser manual acceptance test was run; automated tests use fake login managers and browser pools as required for CI.
 - The in-memory job registry remains process-local, matching the existing jobs contract.
+
+## 2026-08-24 review fixes
+
+Implemented the Task 2 review findings:
+
+- analyzer results are published only while the job still has the expected active status (`running` or `resuming`)
+- cancellation remains terminal and prevents login opening or router reload
+- job snapshots and login-completion capability are race-consistent
+- timeout publishes `login_timeout` only after manager cleanup and clears its task reference by identity
+- shutdown atomically cancels nonterminal jobs, drains background tasks, cancels waiting sessions, and preserves pool cleanup through nested `finally` blocks
+- login-save and analyzer-context-reset failures are separate sanitized error paths (`login_save_failed` vs `context_reset_failed`)
+- every login manager start exception is sanitized
+
+RED command:
+
+```text
+python -m pytest tests/integration/test_integrate_login_flow.py tests/integration/test_chat_endpoints.py -q
+```
+
+Result before fixes:
+
+```text
+5 failed, 25 passed in 9.78s
+```
+
+Fresh targeted verification:
+
+```text
+python -m pytest tests/integration/test_integrate_login_flow.py tests/integration/test_chat_endpoints.py -q
+31 passed in 9.44s
+```
+
+Fresh full-suite verification:
+
+```text
+python -m pytest tests -q
+94 passed in 50.77s
+```
+
+Review-fix test delta: 6 added tests; full-suite delta from the original Task 2 report: 88 to 94 tests.

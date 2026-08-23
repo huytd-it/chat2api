@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 
 from chat2api import jobs
-from chat2api.login_sessions import LoginSessionError
 
 
 class FakeLoginManager:
@@ -43,11 +42,14 @@ class FakeLoginManager:
 
 
 class FakePool:
-    def __init__(self):
+    def __init__(self, drop_error: Exception | None = None):
         self.dropped: list[str] = []
+        self.drop_error = drop_error
 
     async def drop(self, slug: str) -> None:
         self.dropped.append(slug)
+        if self.drop_error:
+            raise self.drop_error
 
 
 class FakeRouter:
@@ -151,6 +153,66 @@ async def test_duplicate_complete_cannot_save_twice(monkeypatch, tmp_path):
     assert manager.completed == [job_id]
 
 
+async def test_cancel_as_analyzer_returns_is_terminal_and_does_not_reload(monkeypatch, tmp_path):
+    analyzer_returned = asyncio.Event()
+    release_analyzer = asyncio.Event()
+
+    async def fake_integrate(url, pool, cfg, log, storage_state=None):
+        analyzer_returned.set()
+        try:
+            await release_analyzer.wait()
+        except asyncio.CancelledError:
+            pass
+        return {"status": "ok", "slug": "example"}
+
+    monkeypatch.setattr(jobs, "integrate", fake_integrate)
+    cfg = SimpleNamespace(recipes_dir=tmp_path / "recipes")
+    manager = FakeLoginManager(tmp_path / "state.json")
+    router = FakeRouter()
+    job_id = jobs.start_integrate("https://example.test", cfg, FakePool(), router, manager)
+    await analyzer_returned.wait()
+
+    cancelling = asyncio.create_task(jobs.cancel_job(job_id, manager))
+    await wait_for_status(job_id, "cancelled")
+    release_analyzer.set()
+    await cancelling
+    await asyncio.sleep(0)
+
+    assert (await jobs.get(job_id))["status"] == "cancelled"
+    assert router.reloads == 0
+    assert manager.started == []
+
+
+async def test_get_never_returns_terminal_status_with_complete_capability(tmp_path):
+    has_started = asyncio.Event()
+    release_has = asyncio.Event()
+
+    class BlockingHasManager(FakeLoginManager):
+        async def has(self, job_id: str) -> bool:
+            has_started.set()
+            await release_has.wait()
+            return True
+
+    manager = BlockingHasManager(tmp_path / "state.json")
+    job = {
+        "id": "job", "url": "https://example.test", "slug": "example",
+        "status": "waiting_login", "log": [], "login_attempts": 1,
+        "login_manager": manager, "lock": asyncio.Lock(), "task": None,
+        "timeout_task": None,
+    }
+    jobs.JOBS["job"] = job
+
+    reading = asyncio.create_task(jobs.get("job"))
+    await has_started.wait()
+    async with job["lock"]:
+        job["status"] = "cancelled"
+    release_has.set()
+
+    snapshot = await reading
+    assert snapshot["status"] == "cancelled"
+    assert snapshot["can_complete_login"] is False
+
+
 async def test_cancel_while_saving_does_not_resume(monkeypatch, tmp_path):
     release = asyncio.Event()
     calls = 0
@@ -202,18 +264,31 @@ async def test_cancel_waiting_login(monkeypatch, tmp_path):
     assert await jobs.cancel_job(job_id, manager) == {"ok": True, "status": "cancelled"}
 
 
-async def test_login_timeout(monkeypatch, tmp_path):
+async def test_login_timeout_publishes_terminal_only_after_cancel(monkeypatch, tmp_path):
+    cancel_started = asyncio.Event()
+    release_cancel = asyncio.Event()
+
     async def fake_integrate(url, pool, cfg, log, storage_state=None):
         return {"status": "login_required", "slug": "example"}
+
+    class BlockingCancelManager(FakeLoginManager):
+        async def cancel(self, job_id: str) -> None:
+            cancel_started.set()
+            await release_cancel.wait()
+            await super().cancel(job_id)
 
     monkeypatch.setattr(jobs, "integrate", fake_integrate)
     monkeypatch.setattr(jobs, "LOGIN_TIMEOUT_SECONDS", 0.01)
     cfg = SimpleNamespace(recipes_dir=tmp_path / "recipes")
-    manager = FakeLoginManager(tmp_path / "state.json")
+    manager = BlockingCancelManager(tmp_path / "state.json")
     job_id = jobs.start_integrate("https://example.test", cfg, FakePool(), FakeRouter(), manager)
 
+    await cancel_started.wait()
+    assert (await jobs.get(job_id))["status"] == "waiting_login"
+    release_cancel.set()
     await wait_for_status(job_id, "login_timeout")
     assert manager.cancelled == [job_id]
+    assert jobs.JOBS[job_id]["timeout_task"] is None
 
 
 async def test_login_open_failure_sets_failed_without_secret(monkeypatch, tmp_path):
@@ -223,7 +298,7 @@ async def test_login_open_failure_sets_failed_without_secret(monkeypatch, tmp_pa
     monkeypatch.setattr(jobs, "integrate", fake_integrate)
     cfg = SimpleNamespace(recipes_dir=tmp_path / "recipes")
     manager = FakeLoginManager(
-        tmp_path / "state.json", start_error=LoginSessionError("cookie=top-secret")
+        tmp_path / "state.json", start_error=RuntimeError("cookie=top-secret")
     )
     job_id = jobs.start_integrate("https://example.test", cfg, FakePool(), FakeRouter(), manager)
 
@@ -240,7 +315,7 @@ async def test_login_save_failure_is_terminal_and_sanitized(monkeypatch, tmp_pat
     monkeypatch.setattr(jobs, "integrate", fake_integrate)
     cfg = SimpleNamespace(recipes_dir=tmp_path / "recipes")
     manager = FakeLoginManager(
-        tmp_path / "state.json", complete_error=LoginSessionError("cookie=top-secret")
+        tmp_path / "state.json", complete_error=RuntimeError("cookie=top-secret")
     )
     job_id = jobs.start_integrate("https://example.test", cfg, FakePool(), FakeRouter(), manager)
     await wait_for_status(job_id, "waiting_login")
@@ -252,6 +327,53 @@ async def test_login_save_failure_is_terminal_and_sanitized(monkeypatch, tmp_pat
     text = "\n".join(job["log"])
     assert "python -m chat2api login example" in text
     assert "top-secret" not in text
+
+
+async def test_pool_drop_failure_is_not_login_save_failure(monkeypatch, tmp_path):
+    async def fake_integrate(url, pool, cfg, log, storage_state=None):
+        return {"status": "login_required", "slug": "example"}
+
+    monkeypatch.setattr(jobs, "integrate", fake_integrate)
+    cfg = SimpleNamespace(recipes_dir=tmp_path / "recipes")
+    manager = FakeLoginManager(tmp_path / "state.json")
+    pool = FakePool(RuntimeError("context secret"))
+    job_id = jobs.start_integrate("https://example.test", cfg, pool, FakeRouter(), manager)
+    await wait_for_status(job_id, "waiting_login")
+
+    with pytest.raises(jobs.ContextResetFailed):
+        await jobs.complete_login(job_id, cfg, pool, FakeRouter(), manager)
+
+    job = await jobs.get(job_id)
+    assert job["status"] == "failed"
+    assert "Không thể reset analyzer context" in "\n".join(job["log"])
+    assert "context secret" not in "\n".join(job["log"])
+
+
+async def test_shutdown_cancels_jobs_and_waiting_sessions(tmp_path):
+    manager = FakeLoginManager(tmp_path / "state.json")
+    waiting = {
+        "id": "waiting", "url": "https://example.test", "slug": "example",
+        "status": "waiting_login", "log": [], "login_attempts": 1,
+        "login_manager": manager, "lock": asyncio.Lock(), "task": None,
+        "timeout_task": None,
+    }
+    running_release = asyncio.Event()
+    running_task = asyncio.create_task(running_release.wait())
+    running = {
+        "id": "running", "url": "https://example.test", "slug": None,
+        "status": "running", "log": [], "login_attempts": 0,
+        "login_manager": manager, "lock": asyncio.Lock(), "task": running_task,
+        "timeout_task": None,
+    }
+    manager.sessions.add("waiting")
+    jobs.JOBS.update(waiting=waiting, running=running)
+
+    await jobs.shutdown(manager)
+
+    assert waiting["status"] == "cancelled"
+    assert running["status"] == "cancelled"
+    assert running_task.done()
+    assert manager.cancelled == ["waiting"]
 
 
 async def test_fails_after_two_incomplete_login_attempts(monkeypatch, tmp_path):

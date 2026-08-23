@@ -38,12 +38,19 @@ def create_app(cfg: Config) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        from . import jobs
+
         await pool.start()
         try:
             yield
         finally:
-            await login_manager.close_all()
-            await pool.aclose()
+            try:
+                try:
+                    await jobs.shutdown(login_manager)
+                finally:
+                    await login_manager.close_all()
+            finally:
+                await pool.aclose()
 
     app = FastAPI(title="chat2api", lifespan=lifespan)
     errors.register_error_handler(app)
@@ -202,6 +209,8 @@ def register_admin(app: FastAPI, admin) -> None:
             raise OpenAIError(409, "invalid_job_state", "Job không chờ đăng nhập")
         except jobs.LoginSaveFailed:
             raise OpenAIError(500, "login_save_failed", "Không thể lưu session đăng nhập")
+        except jobs.ContextResetFailed:
+            raise OpenAIError(500, "context_reset_failed", "Không thể reset analyzer context")
 
     @admin.post("/integrate/{job_id}/cancel")
     async def integrate_cancel(job_id: str, request: Request):

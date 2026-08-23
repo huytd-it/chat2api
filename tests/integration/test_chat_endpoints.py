@@ -1,6 +1,45 @@
 import json
 
 
+async def test_lifespan_closes_manager_and_pool_when_job_shutdown_raises(monkeypatch, tmp_path):
+    from chat2api import jobs
+    from chat2api.config import Config
+    from chat2api.main import create_app
+
+    cfg = Config()
+    cfg.recipes_dir = tmp_path
+    app = create_app(cfg)
+    calls = []
+
+    async def start():
+        calls.append("pool.start")
+
+    async def fail_shutdown(manager):
+        calls.append("jobs.shutdown")
+        raise RuntimeError("shutdown failed")
+
+    async def close_manager():
+        calls.append("manager.close_all")
+
+    async def close_pool():
+        calls.append("pool.aclose")
+
+    monkeypatch.setattr(app.state.pool, "start", start)
+    monkeypatch.setattr(jobs, "shutdown", fail_shutdown)
+    monkeypatch.setattr(app.state.login_manager, "close_all", close_manager)
+    monkeypatch.setattr(app.state.pool, "aclose", close_pool)
+
+    try:
+        async with app.router.lifespan_context(app):
+            pass
+    except RuntimeError as error:
+        assert str(error) == "shutdown failed"
+    else:
+        raise AssertionError("lifespan should preserve the shutdown error")
+
+    assert calls == ["pool.start", "jobs.shutdown", "manager.close_all", "pool.aclose"]
+
+
 async def test_health(app_client):
     r = await app_client.get("/health")
     assert r.status_code == 200
@@ -111,6 +150,17 @@ async def test_login_complete_save_failure(app_client, monkeypatch):
     r = await app_client.post("/admin/integrate/job/login-complete")
     assert r.status_code == 500
     assert r.json()["error"]["code"] == "login_save_failed"
+
+
+async def test_login_complete_context_reset_failure(app_client, monkeypatch):
+    async def fake_complete(*args):
+        from chat2api.jobs import ContextResetFailed
+        raise ContextResetFailed
+
+    monkeypatch.setattr("chat2api.jobs.complete_login", fake_complete)
+    r = await app_client.post("/admin/integrate/job/login-complete")
+    assert r.status_code == 500
+    assert r.json()["error"]["code"] == "context_reset_failed"
 
 
 async def test_cancel_terminal_job_conflicts(app_client, monkeypatch):
