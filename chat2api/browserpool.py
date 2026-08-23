@@ -60,6 +60,15 @@ class BrowserPool:
             self._contexts[slug] = ctx
             return ctx
 
+    async def drop(self, slug: str) -> None:
+        async with self._lock:
+            context = self._contexts.pop(slug, None)
+        if context:
+            try:
+                await context.close()
+            except Exception:
+                pass
+
     async def aclose(self):
         for ctx in self._contexts.values():
             try:
