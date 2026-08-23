@@ -168,7 +168,13 @@ let pollGeneration = 0;
 let pollTimer = null;
 let pollAbort = null;
 let operationGeneration = 0;
+let actionGeneration = 0;
+let actionInFlightFor = null;
 const terminalStatuses = ["ok", "failed", "cancelled", "login_timeout"];
+
+function resetLoginButtons() {
+  [$("#logincomplete"), $("#canceljob")].forEach(button => { button.disabled = false; });
+}
 
 function stopPolling() {
   pollGeneration++;
@@ -183,6 +189,7 @@ function showJobStatus(status) {
   const actions = $("#loginactions");
   actions.hidden = status !== "waiting_login";
   if (status === "waiting_login") {
+    if (actionInFlightFor !== pollGeneration) resetLoginButtons();
     $("#jobstatus").textContent = "Chrome đã mở — hãy đăng nhập trong cửa sổ đó";
   } else if (status === "resuming") {
     $("#jobstatus").textContent = "Đang lưu session và tiếp tục…";
@@ -245,6 +252,8 @@ async function postJobAction(action) {
   if (!activeJobId) return;
   const jobId = activeJobId;
   const generation = pollGeneration;
+  const actionToken = ++actionGeneration;
+  actionInFlightFor = generation;
   const buttons = [$("#logincomplete"), $("#canceljob")];
   buttons.forEach(button => { button.disabled = true; });
   try {
@@ -256,6 +265,7 @@ async function postJobAction(action) {
     if (!r.ok) throw new Error(data.error?.message || r.statusText);
     if (action === "login-complete") {
       startPolling(jobId);
+      actionInFlightFor = null;
       showJobStatus("resuming");
     } else {
       showJobStatus(data.status);
@@ -266,9 +276,13 @@ async function postJobAction(action) {
       }
     }
   } catch (e) {
-    if (generation === pollGeneration && jobId === activeJobId) {
+    if (generation === pollGeneration && jobId === activeJobId && actionToken === actionGeneration) {
       $("#jobstatus").textContent = "lỗi: " + e;
-      buttons.forEach(button => { button.disabled = false; });
+      resetLoginButtons();
+    }
+  } finally {
+    if (generation === pollGeneration && jobId === activeJobId && actionToken === actionGeneration) {
+      actionInFlightFor = null;
     }
   }
 }
@@ -278,6 +292,9 @@ $("#canceljob").onclick = () => postJobAction("cancel");
 
 $("#integrate").onclick = async () => {
   const operation = ++operationGeneration;
+  actionGeneration++;
+  actionInFlightFor = null;
+  resetLoginButtons();
   $("#integrate").disabled = true;
   stopPolling();
   $("#loginactions").hidden = true;
@@ -290,6 +307,7 @@ $("#integrate").onclick = async () => {
     if (operation !== operationGeneration) return;
     if (!r.ok) { $("#jobstatus").textContent = data.error?.message || r.statusText; return; }
     $("#jobstatus").textContent = "đang chạy job " + data.job_id + "...";
+    resetLoginButtons();
     startPolling(data.job_id);
   } catch (e) {
     if (operation === operationGeneration) $("#jobstatus").textContent = "lỗi: " + e;

@@ -99,8 +99,18 @@ async def test_playground_has_login_controls(app_client):
     assert '"Chrome đã mở — hãy đăng nhập trong cửa sổ đó"' in r.text
     assert '"Đang lưu session và tiếp tục…"' in r.text
     assert "setInterval(" not in r.text
-    assert "pollGeneration" in r.text
-    assert "pollAbort" in r.text
+    assert "setTimeout(poll, 1000)" in r.text
+    assert "new AbortController()" in r.text
+    assert "signal: controller.signal" in r.text
+    assert "generation !== pollGeneration" in r.text
+    assert "jobId !== activeJobId" in r.text
+    assert "operation !== operationGeneration" in r.text
+    assert "operation === operationGeneration" in r.text
+    assert "ticks > 300" in r.text
+    assert '["ok", "failed", "cancelled", "login_timeout"]' in r.text
+    assert "function resetLoginButtons()" in r.text
+    assert "actionGeneration" in r.text
+    assert "actionInFlightFor" in r.text
 
 
 async def test_auth_enforced_when_keys_set(app_client):

@@ -200,7 +200,7 @@ async def test_browser_pool_drop_closes_fake_context():
     assert pool.size == 0
 
 
-async def test_cancel_during_goto_cleans_browser_and_driver(tmp_path):
+async def test_cancelling_pending_start_during_goto_cleans_resources(tmp_path):
     goto_started = asyncio.Event()
     allow_goto = asyncio.Event()
     pw = FakePW(goto_started=goto_started, allow_goto=allow_goto)
