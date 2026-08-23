@@ -164,11 +164,19 @@ async function delRecipe(slug) {
 }
 
 let activeJobId = null;
+let pollGeneration = 0;
 let pollTimer = null;
+let pollAbort = null;
+let operationGeneration = 0;
+const terminalStatuses = ["ok", "failed", "cancelled", "login_timeout"];
 
 function stopPolling() {
-  if (pollTimer !== null) clearInterval(pollTimer);
+  pollGeneration++;
+  if (pollTimer !== null) clearTimeout(pollTimer);
+  if (pollAbort !== null) pollAbort.abort();
   pollTimer = null;
+  pollAbort = null;
+  activeJobId = null;
 }
 
 function showJobStatus(status) {
@@ -183,26 +191,85 @@ function showJobStatus(status) {
   }
 }
 
+function startPolling(jobId) {
+  stopPolling();
+  const generation = pollGeneration;
+  activeJobId = jobId;
+  let ticks = 0;
+
+  const poll = async () => {
+    if (generation !== pollGeneration || jobId !== activeJobId) return;
+    if (++ticks > 300) {
+      $("#loginactions").hidden = true;
+      $("#jobstatus").textContent = "timeout: job quá lâu, kiểm tra lại sau";
+      stopPolling();
+      return;
+    }
+
+    const controller = new AbortController();
+    pollAbort = controller;
+    let terminal = false;
+    try {
+      if (generation !== pollGeneration || jobId !== activeJobId) return;
+      const r = await fetch("/admin/integrate/" + jobId,
+        {headers: headers(), signal: controller.signal});
+      if (generation !== pollGeneration || jobId !== activeJobId) return;
+      const j = await r.json();
+      if (generation !== pollGeneration || jobId !== activeJobId) return;
+      if (!r.ok) throw new Error(j.error?.message || r.statusText);
+      $("#joblog").textContent = j.log.join("\n");
+      $("#joblog").scrollTop = $("#joblog").scrollHeight;
+      showJobStatus(j.status);
+      terminal = terminalStatuses.includes(j.status);
+      if (terminal) {
+        stopPolling();
+        loadModels();
+        loadRecipes();
+      }
+    } catch (e) {
+      if (generation === pollGeneration && jobId === activeJobId && e.name !== "AbortError") {
+        $("#jobstatus").textContent = "poll lỗi: " + e;
+      }
+    } finally {
+      if (pollAbort === controller) pollAbort = null;
+      if (!terminal && generation === pollGeneration && jobId === activeJobId) {
+        pollTimer = setTimeout(poll, 1000);
+      }
+    }
+  };
+
+  pollTimer = setTimeout(poll, 1000);
+}
+
 async function postJobAction(action) {
   if (!activeJobId) return;
+  const jobId = activeJobId;
+  const generation = pollGeneration;
   const buttons = [$("#logincomplete"), $("#canceljob")];
   buttons.forEach(button => { button.disabled = true; });
   try {
-    const r = await fetch("/admin/integrate/" + activeJobId + "/" + action,
+    const r = await fetch("/admin/integrate/" + jobId + "/" + action,
       {method: "POST", headers: headers()});
+    if (generation !== pollGeneration || jobId !== activeJobId) return;
     const data = await r.json();
+    if (generation !== pollGeneration || jobId !== activeJobId) return;
     if (!r.ok) throw new Error(data.error?.message || r.statusText);
-    showJobStatus(data.status);
-    if (["ok", "failed", "cancelled", "login_timeout"].includes(data.status)) {
-      stopPolling();
-      activeJobId = null;
-      loadModels();
-      loadRecipes();
+    if (action === "login-complete") {
+      startPolling(jobId);
+      showJobStatus("resuming");
+    } else {
+      showJobStatus(data.status);
+      if (terminalStatuses.includes(data.status)) {
+        stopPolling();
+        loadModels();
+        loadRecipes();
+      }
     }
   } catch (e) {
-    $("#jobstatus").textContent = "lỗi: " + e;
-  } finally {
-    buttons.forEach(button => { button.disabled = false; });
+    if (generation === pollGeneration && jobId === activeJobId) {
+      $("#jobstatus").textContent = "lỗi: " + e;
+      buttons.forEach(button => { button.disabled = false; });
+    }
   }
 }
 
@@ -210,43 +277,24 @@ $("#logincomplete").onclick = () => postJobAction("login-complete");
 $("#canceljob").onclick = () => postJobAction("cancel");
 
 $("#integrate").onclick = async () => {
+  const operation = ++operationGeneration;
+  $("#integrate").disabled = true;
   stopPolling();
-  activeJobId = null;
   $("#loginactions").hidden = true;
   $("#joblog").textContent = "";
   try {
     const r = await fetch("/admin/integrate", {method: "POST", headers: headers(),
       body: JSON.stringify({url: $("#siteurl").value})});
+    if (operation !== operationGeneration) return;
     const data = await r.json();
+    if (operation !== operationGeneration) return;
     if (!r.ok) { $("#jobstatus").textContent = data.error?.message || r.statusText; return; }
-    activeJobId = data.job_id;
-    $("#jobstatus").textContent = "đang chạy job " + activeJobId + "...";
-    let ticks = 0;
-    pollTimer = setInterval(async () => {
-      ticks++;
-      try {
-        if (ticks > 300) {
-          stopPolling();
-          $("#loginactions").hidden = true;
-          $("#jobstatus").textContent = "timeout: job quá lâu, kiểm tra lại sau";
-          return;
-        }
-        const r = await fetch("/admin/integrate/" + activeJobId, {headers: headers()});
-        const j = await r.json();
-        if (!r.ok) throw new Error(j.error?.message || r.statusText);
-        $("#joblog").textContent = j.log.join("\n");
-        $("#joblog").scrollTop = $("#joblog").scrollHeight;
-        showJobStatus(j.status);
-        if (["ok", "failed", "cancelled", "login_timeout"].includes(j.status)) {
-          stopPolling();
-          activeJobId = null;
-          loadModels();
-          loadRecipes();
-        }
-      } catch (e) { $("#jobstatus").textContent = "poll lỗi: " + e; }
-    }, 1000);
+    $("#jobstatus").textContent = "đang chạy job " + data.job_id + "...";
+    startPolling(data.job_id);
   } catch (e) {
-    $("#jobstatus").textContent = "lỗi: " + e;
+    if (operation === operationGeneration) $("#jobstatus").textContent = "lỗi: " + e;
+  } finally {
+    if (operation === operationGeneration) $("#integrate").disabled = false;
   }
 };
 

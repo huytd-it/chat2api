@@ -312,3 +312,10 @@ git commit -m "feat: interactive login controls in playground"
 - Deterministic race: `python -m pytest tests/integration/test_integrate_login_flow.py::test_login_timeout_claims_job_before_session_cleanup -q` — 1 passed.
 - Targeted: `python -m pytest tests/integration/test_integrate_login_flow.py tests/integration/test_chat_endpoints.py -q` — 31 passed.
 - Full: `python -m pytest tests -q` — 94 passed.
+
+## 2026-08-24 Task 3 UI review verification
+
+- Replaced async interval polling with generation-guarded recursive timeouts and abortable, serialized GET requests.
+- Guarded concurrent integrate/action requests so stale responses cannot mutate the active job UI.
+- Targeted: `python -m pytest tests/integration/test_chat_endpoints.py::test_playground_has_login_controls -q` — 1 passed.
+- Full: `python -m pytest -q` — 95 passed.

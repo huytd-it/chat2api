@@ -89,9 +89,18 @@ async def test_index_serves_playground(app_client):
 
 async def test_playground_has_login_controls(app_client):
     r = await app_client.get("/")
-    assert "Đã đăng nhập" in r.text
-    assert "Hủy" in r.text
-    assert "login-complete" in r.text
+    assert r.status_code == 200
+    assert """<span id="loginactions" hidden>
+       <button id="logincomplete">Đã đăng nhập</button>
+       <button id="canceljob" class="secondary">Hủy</button>
+     </span>""" in r.text
+    assert 'postJobAction("login-complete")' in r.text
+    assert 'postJobAction("cancel")' in r.text
+    assert '"Chrome đã mở — hãy đăng nhập trong cửa sổ đó"' in r.text
+    assert '"Đang lưu session và tiếp tục…"' in r.text
+    assert "setInterval(" not in r.text
+    assert "pollGeneration" in r.text
+    assert "pollAbort" in r.text
 
 
 async def test_auth_enforced_when_keys_set(app_client):
