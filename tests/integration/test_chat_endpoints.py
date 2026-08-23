@@ -87,6 +87,13 @@ async def test_index_serves_playground(app_client):
     assert "chat2api" in r.text and "Integrate" in r.text
 
 
+async def test_playground_has_login_controls(app_client):
+    r = await app_client.get("/")
+    assert "Đã đăng nhập" in r.text
+    assert "Hủy" in r.text
+    assert "login-complete" in r.text
+
+
 async def test_auth_enforced_when_keys_set(app_client):
     app = app_client._transport.app
     app.state.cfg.api_keys = ["secret"]
