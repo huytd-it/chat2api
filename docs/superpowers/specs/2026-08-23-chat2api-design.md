@@ -18,7 +18,6 @@ Biến web chat AI bất kỳ thành API tương thích OpenAI, thay việc con 
 - Session reuse đa lượt trên UI của site đích (history flatten vào 1 prompt)
 - Upload file/ảnh multimodal qua recipe browser
 - Hệ thống plugin/catalog phân phối recipe
-- Chống bot-detect chủ động (nếu cần, dùng CloakBrowser thay Playwright sau này — cùng API)
 
 ## Kiến trúc
 
@@ -178,6 +177,7 @@ Không framework, không build step.
 | `AGENT_LLM_MODEL` | rỗng | Model cho agent |
 | `ENABLE_AGENT_FALLBACK` | `false` | Bật fallback khi recipe lỗi |
 | `POOL_MAX_CONTEXTS` | `3` | Số context browser tối đa |
+| `BROWSER_ENGINE` | `playwright` | `playwright` hoặc `cloak` (CloakBrowser, cần `pip install cloakbrowser`) — dùng cho site có bot-detect |
 | `RECIPE_TIMEOUT_MS` | `120000` | Timeout tổng một request recipe |
 
 Cookie Gemini khai báo trong `recipes/gemini/config.yaml`
@@ -197,3 +197,8 @@ Cookie Gemini khai báo trong `recipes/gemini/config.yaml`
 
 Python 3.12 · FastAPI · uvicorn · Playwright (chromium) · httpx · PyYAML · pydantic.
 Không thêm SDK OpenAI (gọi LLM agent bằng httpx thuần).
+
+Browser engine qua `browserpool.py`: import Playwright mặc định; nếu
+`BROWSER_ENGINE=cloak` thì import `cloakbrowser` (drop-in cùng API — chỉ đổi
+import, không đổi code chạy page). CloakBrowser là dependency tùy chọn: chưa
+cài mà bật `cloak` → lỗi khởi động với thông báo cài rõ ràng.
