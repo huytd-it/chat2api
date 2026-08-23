@@ -73,3 +73,87 @@ async def test_admin_recipes_and_auth_guard(app_client):
 async def test_admin_delete_recipe_guard(app_client):
     r = await app_client.delete("/admin/recipes/gemini")
     assert r.status_code == 400
+
+
+async def test_login_complete_unknown_job(app_client):
+    r = await app_client.post("/admin/integrate/missing/login-complete")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
+async def test_login_complete_wrong_state(app_client, monkeypatch):
+    async def fake_complete(*args):
+        from chat2api.jobs import InvalidJobState
+        raise InvalidJobState
+
+    monkeypatch.setattr("chat2api.jobs.complete_login", fake_complete)
+    r = await app_client.post("/admin/integrate/job/login-complete")
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "invalid_job_state"
+
+
+async def test_login_complete_waiting_returns_resuming(app_client, monkeypatch):
+    async def fake_complete(*args):
+        return {"ok": True, "status": "resuming"}
+
+    monkeypatch.setattr("chat2api.jobs.complete_login", fake_complete)
+    r = await app_client.post("/admin/integrate/job/login-complete")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "status": "resuming"}
+
+
+async def test_login_complete_save_failure(app_client, monkeypatch):
+    async def fake_complete(*args):
+        from chat2api.jobs import LoginSaveFailed
+        raise LoginSaveFailed
+
+    monkeypatch.setattr("chat2api.jobs.complete_login", fake_complete)
+    r = await app_client.post("/admin/integrate/job/login-complete")
+    assert r.status_code == 500
+    assert r.json()["error"]["code"] == "login_save_failed"
+
+
+async def test_cancel_terminal_job_conflicts(app_client, monkeypatch):
+    async def fake_cancel(*args):
+        from chat2api.jobs import InvalidJobState
+        raise InvalidJobState
+
+    monkeypatch.setattr("chat2api.jobs.cancel_job", fake_cancel)
+    r = await app_client.post("/admin/integrate/job/cancel")
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "invalid_job_state"
+
+
+async def test_cancel_job_returns_cancelled(app_client, monkeypatch):
+    async def fake_cancel(*args):
+        return {"ok": True, "status": "cancelled"}
+
+    monkeypatch.setattr("chat2api.jobs.cancel_job", fake_cancel)
+    r = await app_client.post("/admin/integrate/job/cancel")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "status": "cancelled"}
+
+
+async def test_integrate_log_stays_open_until_terminal(app_client, monkeypatch):
+    states = iter([
+        {"id": "job", "status": "waiting_login", "log": ["waiting"]},
+        {"id": "job", "status": "resuming", "log": ["waiting", "resuming"]},
+        {"id": "job", "status": "ok", "log": ["waiting", "resuming", "done"]},
+    ])
+
+    async def fake_get(job_id):
+        return next(states)
+
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr("chat2api.jobs.get", fake_get)
+    monkeypatch.setattr("chat2api.main.asyncio.sleep", no_sleep)
+    r = await app_client.get("/admin/integrate/job/log")
+
+    assert r.status_code == 200
+    assert "data: waiting" in r.text
+    assert "data: resuming" in r.text
+    assert "data: done" in r.text
+    assert r.text.count("event: done") == 1
+    assert "event: done\ndata: ok" in r.text

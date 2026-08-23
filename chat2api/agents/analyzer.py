@@ -46,6 +46,8 @@ def _resolve_dir(cfg, slug: str, url: str) -> tuple[Path, str]:
     if not d.exists():
         return d, slug
     ry = d / "recipe.yaml"
+    if not ry.exists() and (d / "auth" / "state.json").exists():
+        return d, slug
     if ry.exists():
         try:
             old = yaml.safe_load(ry.read_text(encoding="utf-8")) or {}
@@ -70,12 +72,12 @@ async def _looks_like_login(page) -> bool:
         return False
 
 
-async def integrate(url: str, pool, cfg, log) -> dict:
+async def integrate(url: str, pool, cfg, log, storage_state: Path | None = None) -> dict:
     from ..config import Config  # noqa: F401  (type hint)
 
     slug = _domain_slug(url)
     analyze_key = f"{slug}__analyze"
-    ctx = await pool.context_for(analyze_key)
+    ctx = await pool.context_for(analyze_key, storage_state)
     page = await ctx.new_page()
 
     fix_ctx = ""
