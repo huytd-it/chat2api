@@ -1,4 +1,5 @@
 import asyncio
+import re
 import sys
 import time
 from pathlib import Path
@@ -16,6 +17,9 @@ def validate_recipe(d: dict) -> list[str]:
             errs.append(f"missing/invalid field: {name}")
 
     need("slug", bool(d.get("slug")))
+    slug = d.get("slug")
+    if slug and not re.fullmatch(r"[a-z0-9-]+", str(slug)):
+        errs.append("invalid field: slug (chỉ [a-z0-9-])")
     need("url", bool(d.get("url")))
     need("prompt.input_selector", bool((d.get("prompt") or {}).get("input_selector")))
     resp = d.get("response") or {}

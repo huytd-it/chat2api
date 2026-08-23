@@ -23,3 +23,10 @@ def test_selector_done_signal_needs_selector():
     d = {**MINIMAL, "response": {**MINIMAL["response"],
          "done_signal": {"type": "selector_appear"}}}
     assert any("selector" in e for e in validate_recipe(d))
+
+
+def test_invalid_slug_charset():
+    d = {**MINIMAL, "slug": "../evil"}
+    assert any("slug" in e for e in validate_recipe(d))
+    d2 = {**MINIMAL, "slug": "Copilot Web"}
+    assert any("slug" in e for e in validate_recipe(d2))

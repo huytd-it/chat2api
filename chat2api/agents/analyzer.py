@@ -1,4 +1,5 @@
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yaml
 
@@ -30,6 +31,32 @@ def _domain_slug(url: str) -> str:
     host = url.split("//", 1)[-1].split("/", 1)[0]
     name = host.removeprefix("www.").split(".")[0]
     return "".join(c for c in name if c.isalnum() or c == "-") or "site"
+
+
+def _host(u) -> str:
+    try:
+        return (urlparse(str(u)).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _resolve_dir(cfg, slug: str, url: str) -> tuple[Path, str]:
+    # ponytail: trùng slug nhưng khác host thì đánh số -2, -3...; cùng host thì reuse
+    d = cfg.recipes_dir / slug
+    if not d.exists():
+        return d, slug
+    ry = d / "recipe.yaml"
+    if ry.exists():
+        try:
+            old = yaml.safe_load(ry.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError:
+            old = None
+        if isinstance(old, dict) and _host(old.get("url")) == _host(url) and _host(url):
+            return d, slug
+    n = 2
+    while (cfg.recipes_dir / f"{slug}-{n}").exists():
+        n += 1
+    return cfg.recipes_dir / f"{slug}-{n}", f"{slug}-{n}"
 
 
 async def _looks_like_login(page) -> bool:
@@ -77,7 +104,7 @@ async def integrate(url: str, pool, cfg, log) -> dict:
                 continue
 
             slug = str(recipe["slug"])
-            base_dir = cfg.recipes_dir / slug
+            base_dir, slug = _resolve_dir(cfg, slug, url)
             base_dir.mkdir(parents=True, exist_ok=True)
 
             runner = BrowserRecipe(recipe, base_dir, pool)

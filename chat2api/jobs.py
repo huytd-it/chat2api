@@ -20,8 +20,8 @@ def start_integrate(url: str, cfg, pool) -> str:
             job.update(result)
             job["status"] = result["status"]
         except Exception as e:
-            job["status"] = "failed"
             job["log"].append(f"error: {e}")
+            job["status"] = "failed"
 
     job["task"] = asyncio.create_task(run())
     return job_id
