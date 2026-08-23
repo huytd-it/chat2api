@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+<body>
+<textarea id="prompt"></textarea>
+<button id="send">Send</button>
+<div id="messages"></div>
+<script>
+document.getElementById("send").onclick = () => {
+  const m = document.createElement("div");
+  m.className = "msg";
+  document.getElementById("messages").appendChild(m);
+  const full = "This is the reply.";
+  let i = 0;
+  const t = setInterval(() => {
+    i += 2;
+    m.textContent = full.slice(0, i);
+    if (i >= full.length) clearInterval(t);
+  }, 100);
+};
+</script>
+</body>
+</html>

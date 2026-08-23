@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 from .providers.base import ModelInfo, Provider
@@ -89,3 +90,25 @@ def _passthrough_loader(directory: Path, pool):
 
 
 LOADERS.append(_passthrough_loader)
+
+
+def _recipe_loader(directory: Path, pool):
+    if directory.name in {"gemini", "openai"}:
+        return None
+    yml = directory / "recipe.yaml"
+    if not yml.exists():
+        return None
+    import yaml
+
+    from .providers.browser_recipe import BrowserRecipe, validate_recipe
+
+    recipe = yaml.safe_load(yml.read_text(encoding="utf-8")) or {}
+    recipe.setdefault("slug", directory.name)
+    errs = validate_recipe(recipe)
+    if errs:
+        print(f"[chat2api] invalid recipe {directory.name}: {errs}", file=sys.stderr)
+        return None
+    return BrowserRecipe(recipe, directory, pool)
+
+
+LOADERS.append(_recipe_loader)
