@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chat2api"
+version = "0.1.0"
+description = "Turn any web chat into an OpenAI-compatible API"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+  "httpx>=0.27",
+  "playwright>=1.44",
+  "PyYAML>=6",
+  "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+cloak = ["cloakbrowser"]
+
+[tool.setuptools.packages.find]
+include = ["chat2api*"]
+
+[tool.setuptools.package-data]
+chat2api = ["playground/*.html"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
