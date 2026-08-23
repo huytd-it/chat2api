@@ -112,8 +112,7 @@ async def test_playground_has_login_controls(app_client):
     assert "actionGeneration++;" in r.text
     assert "actionInFlightFor = generation;" in r.text
     assert "if (actionInFlightFor !== pollGeneration) resetLoginButtons();" in r.text
-    assert "generation !== pollGeneration || jobId !== activeJobId || actionToken !== actionGeneration" in r.text
-    assert "resetLoginButtons();" in r.text
+    assert r.text.count("if (generation !== pollGeneration || jobId !== activeJobId || actionToken !== actionGeneration) return;") == 2
 
 
 async def test_auth_enforced_when_keys_set(app_client):
