@@ -51,6 +51,9 @@ async def app_client(tmp_path, site):
                 yield word
 
     cfg = Config()
+    cfg.agent_llm_base_url = ""
+    cfg.agent_llm_api_key = ""
+    cfg.agent_llm_model = ""
     cfg.recipes_dir = tmp_path / "recipes"
     cfg.recipes_dir.mkdir()
     app = create_app(cfg)

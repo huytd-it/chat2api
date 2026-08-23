@@ -25,6 +25,25 @@ def test_config_parse(monkeypatch):
     assert cfg.enable_fallback is True
 
 
+def test_config_loads_dotenv_without_overriding_process_env(monkeypatch, tmp_path):
+    (tmp_path / ".env").write_text(
+        "AGENT_LLM_BASE_URL=https://llm.example/v1\n"
+        "AGENT_LLM_API_KEY=from-dotenv\n"
+        "AGENT_LLM_MODEL=dotenv-model\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    for name in ("AGENT_LLM_BASE_URL", "AGENT_LLM_API_KEY", "AGENT_LLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AGENT_LLM_MODEL", "process-model")
+
+    cfg = Config()
+
+    assert cfg.agent_llm_base_url == "https://llm.example/v1"
+    assert cfg.agent_llm_api_key == "from-dotenv"
+    assert cfg.agent_llm_model == "process-model"
+
+
 def make_request(path: str, api_keys: list[str]):
     cfg = Config()
     cfg.api_keys = api_keys

@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
@@ -8,6 +10,7 @@ def _env(name: str, default: str = "") -> str:
 
 class Config:
     def __init__(self) -> None:
+        load_dotenv(Path.cwd() / ".env", override=False)
         self.api_keys = [k.strip() for k in _env("CHAT2API_KEYS").split(",") if k.strip()]
         self.recipes_dir = Path(_env("RECIPES_DIR", "./recipes"))
         self.agent_llm_base_url = _env("AGENT_LLM_BASE_URL").rstrip("/")
