@@ -106,7 +106,11 @@ async def test_playground_has_login_controls(app_client):
     assert "jobId !== activeJobId" in r.text
     assert "operation !== operationGeneration" in r.text
     assert "operation === operationGeneration" in r.text
-    assert "ticks > 300" in r.text
+    assert "ticks > 660" in r.text
+    assert "function showJobStatus(j)" in r.text
+    assert 'j.status === "waiting_login" && j.can_complete_login === true' in r.text
+    assert '"Đang đóng phiên đăng nhập hết hạn…"' in r.text
+    assert "showJobStatus(j);" in r.text
     assert '["ok", "failed", "cancelled", "login_timeout"]' in r.text
     assert "function resetLoginButtons()" in r.text
     assert "actionGeneration++;" in r.text
@@ -140,6 +144,21 @@ async def test_admin_recipes_and_auth_guard(app_client):
 async def test_admin_delete_recipe_guard(app_client):
     r = await app_client.delete("/admin/recipes/gemini")
     assert r.status_code == 400
+
+
+async def test_login_actions_inherit_admin_auth(app_client):
+    app = app_client._transport.app
+    app.state.cfg.api_keys = ["secret"]
+    try:
+        for action in ("login-complete", "cancel"):
+            path = f"/admin/integrate/missing/{action}"
+            assert (await app_client.post(path)).status_code == 401
+            authorized = await app_client.post(
+                path, headers={"Authorization": "Bearer secret"}
+            )
+            assert authorized.status_code == 404
+    finally:
+        app.state.cfg.api_keys = []
 
 
 async def test_login_complete_unknown_job(app_client):

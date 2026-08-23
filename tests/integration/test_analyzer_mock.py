@@ -1,4 +1,7 @@
+from pathlib import Path
+
 import pytest
+import yaml
 
 pytest.importorskip("playwright.async_api")
 
@@ -83,3 +86,94 @@ async def test_analyzer_login_required(tmp_path, monkeypatch):
     result = await analyzer.integrate("https://accounts.google.com/x",
                                       FakePool(), cfg, lambda m: None)
     assert result["status"] == "login_required"
+
+
+async def test_resumed_analyzer_copies_auth_before_final_slug_trial(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from chat2api.agents import analyzer
+
+    recipes_dir = tmp_path / "recipes"
+    existing = recipes_dir / "example"
+    existing.mkdir(parents=True)
+    (existing / "recipe.yaml").write_text(
+        "slug: example\nurl: https://other.test\n", encoding="utf-8"
+    )
+    staging_state = recipes_dir / ".login" / "job" / "auth" / "state.json"
+    staging_state.parent.mkdir(parents=True)
+    staging_state.write_text('{"cookies": [{"name": "session"}]}', encoding="utf-8")
+    cfg = SimpleNamespace(recipes_dir=recipes_dir, integrate_max_rounds=1)
+    recipe_yaml = """
+slug: example
+url: https://example.test/chat
+prompt:
+  input_selector: '#prompt'
+response:
+  last_message_selector: '.message'
+  done_signal:
+    type: stable_text
+models:
+  - id: web
+"""
+
+    async def fake_chat_json(*args, **kwargs):
+        return {"recipe_yaml": recipe_yaml}
+
+    class Page:
+        url = "https://example.test/chat"
+        async def goto(self, *args, **kwargs): ...
+        async def close(self): ...
+        def locator(self, selector):
+            return SimpleNamespace(count=lambda: None)
+
+    class Context:
+        async def new_page(self):
+            return Page()
+
+    class Pool:
+        def __init__(self):
+            self.dropped = []
+        async def context_for(self, key, storage_state=None):
+            assert key == "job__analyze"
+            assert storage_state == staging_state
+            return Context()
+        async def drop(self, key):
+            self.dropped.append(key)
+
+    observed = {}
+
+    class FakeBrowserRecipe:
+        def __init__(self, recipe, base_dir, pool):
+            observed["recipe"] = dict(recipe)
+            observed["base_dir"] = base_dir
+            final_state = base_dir / recipe["login"]["storage_state"]
+            observed["state_at_init"] = final_state.read_text(encoding="utf-8")
+        async def stream(self, messages, model_id):
+            yield "OK"
+
+    async def no_login(page):
+        return False
+
+    async def snapshot(page):
+        return "dom"
+
+    monkeypatch.setattr(analyzer.llm, "chat_json", fake_chat_json)
+    monkeypatch.setattr(analyzer.dom, "snapshot", snapshot)
+    monkeypatch.setattr(analyzer, "_looks_like_login", no_login)
+    monkeypatch.setattr(analyzer, "BrowserRecipe", FakeBrowserRecipe)
+    pool = Pool()
+
+    result = await analyzer.integrate(
+        "https://example.test/chat", pool, cfg, lambda message: None,
+        storage_state=staging_state, analyze_key="job__analyze"
+    )
+
+    final_dir = recipes_dir / "example-2"
+    saved = yaml.safe_load((final_dir / "recipe.yaml").read_text(encoding="utf-8"))
+    assert result == {"status": "ok", "slug": "example-2", "model_id": "example-2/web"}
+    assert observed["base_dir"] == final_dir
+    assert observed["recipe"]["slug"] == "example-2"
+    assert observed["recipe"]["login"]["storage_state"] == "auth/state.json"
+    assert observed["state_at_init"] == staging_state.read_text(encoding="utf-8")
+    assert pool.dropped == ["example-2"]
+    assert saved["slug"] == "example-2"
+    assert saved["login"]["storage_state"] == "auth/state.json"

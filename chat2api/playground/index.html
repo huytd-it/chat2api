@@ -185,16 +185,19 @@ function stopPolling() {
   activeJobId = null;
 }
 
-function showJobStatus(status) {
+function showJobStatus(j) {
   const actions = $("#loginactions");
-  actions.hidden = status !== "waiting_login";
-  if (status === "waiting_login") {
+  const canLogin = j.status === "waiting_login" && j.can_complete_login === true;
+  actions.hidden = !canLogin;
+  if (canLogin) {
     if (actionInFlightFor !== pollGeneration) resetLoginButtons();
     $("#jobstatus").textContent = "Chrome đã mở — hãy đăng nhập trong cửa sổ đó";
-  } else if (status === "resuming") {
+  } else if (j.status === "waiting_login") {
+    $("#jobstatus").textContent = "Đang đóng phiên đăng nhập hết hạn…";
+  } else if (j.status === "resuming") {
     $("#jobstatus").textContent = "Đang lưu session và tiếp tục…";
   } else {
-    $("#jobstatus").textContent = "trạng thái: " + status;
+    $("#jobstatus").textContent = "trạng thái: " + j.status;
   }
 }
 
@@ -206,7 +209,7 @@ function startPolling(jobId) {
 
   const poll = async () => {
     if (generation !== pollGeneration || jobId !== activeJobId) return;
-    if (++ticks > 300) {
+    if (++ticks > 660) {
       $("#loginactions").hidden = true;
       $("#jobstatus").textContent = "timeout: job quá lâu, kiểm tra lại sau";
       stopPolling();
@@ -226,7 +229,7 @@ function startPolling(jobId) {
       if (!r.ok) throw new Error(j.error?.message || r.statusText);
       $("#joblog").textContent = j.log.join("\n");
       $("#joblog").scrollTop = $("#joblog").scrollHeight;
-      showJobStatus(j.status);
+      showJobStatus(j);
       terminal = terminalStatuses.includes(j.status);
       if (terminal) {
         stopPolling();
@@ -266,9 +269,9 @@ async function postJobAction(action) {
     if (action === "login-complete") {
       startPolling(jobId);
       actionInFlightFor = null;
-      showJobStatus("resuming");
+      showJobStatus({status: "resuming"});
     } else {
-      showJobStatus(data.status);
+      showJobStatus(data);
       if (terminalStatuses.includes(data.status)) {
         stopPolling();
         loadModels();

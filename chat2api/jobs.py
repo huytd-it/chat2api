@@ -1,5 +1,6 @@
 import asyncio
 import re
+import shutil
 import uuid
 from contextlib import suppress
 from pathlib import Path
@@ -34,6 +35,7 @@ def _login_failure(job: dict, message: str) -> None:
     job["log"].append(message)
     job["log"].append(f"Chạy trực tiếp trên desktop hoặc dùng: python -m chat2api login {slug}")
     job["status"] = "failed"
+    _cleanup_staging(job)
 
 
 def _cancel_timeout(job: dict) -> None:
@@ -41,6 +43,12 @@ def _cancel_timeout(job: dict) -> None:
     if task and task is not asyncio.current_task() and not task.done():
         task.cancel()
     job["timeout_task"] = None
+
+
+def _cleanup_staging(job: dict) -> None:
+    staging_dir = job.get("staging_dir")
+    if staging_dir:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 async def _login_timeout(job: dict, login_manager) -> None:
@@ -56,6 +64,7 @@ async def _login_timeout(job: dict, login_manager) -> None:
             if job["status"] == "waiting_login":
                 job["status"] = "login_timeout"
                 job["log"].append("Hết thời gian chờ đăng nhập.")
+                _cleanup_staging(job)
     except asyncio.CancelledError:
         pass
     finally:
@@ -77,7 +86,7 @@ async def _open_login(job: dict, expected_status: str, cfg, login_manager) -> No
             return
 
     try:
-        await login_manager.start(job["id"], slug, job["url"], cfg.recipes_dir / slug)
+        await login_manager.start(job["id"], slug, job["url"], job["staging_dir"])
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -102,32 +111,62 @@ async def _open_login(job: dict, expected_status: str, cfg, login_manager) -> No
 async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, login_manager,
                         storage_state: Path | None = None) -> None:
     try:
-        result = await integrate(job["url"], pool, cfg, job["log"].append,
-                                 storage_state=storage_state)
-        open_login = False
-        reload_router = False
+        analyze_key = f"{job['id']}__analyze"
+        try:
+            result = await integrate(
+                job["url"], pool, cfg, job["log"].append,
+                storage_state=storage_state, analyze_key=analyze_key
+            )
+        finally:
+            try:
+                await pool.drop(analyze_key)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                raise ContextResetFailed from error
         async with job["lock"]:
             if job["status"] != expected_status:
                 return
             job["slug"] = result.get("slug", job.get("slug"))
-            if result.get("status") == "login_required":
-                open_login = True
-            else:
-                job.update({key: value for key, value in result.items()
-                            if key not in {"task", "timeout_task", "lock"}})
-                job["status"] = result.get("status", "failed")
-                reload_router = job["status"] == "ok" and router is not None
+            open_login = result.get("status") == "login_required"
+
         if open_login:
             await _open_login(job, expected_status, cfg, login_manager)
-        elif reload_router:
-            router.reload()
+            return
+
+        if result.get("status") == "ok" and router is not None:
+            try:
+                router.reload()
+            except Exception:
+                async with job["lock"]:
+                    if job["status"] == expected_status:
+                        job["log"].append("Không thể tải recipe mới.")
+                        job["status"] = "failed"
+                        _cleanup_staging(job)
+                return
+
+        async with job["lock"]:
+            if job["status"] != expected_status:
+                return
+            job.update({key: value for key, value in result.items()
+                        if key not in {"task", "timeout_task", "lock"}})
+            job["status"] = result.get("status", "failed")
+            if job["status"] in TERMINAL_STATUSES:
+                _cleanup_staging(job)
     except asyncio.CancelledError:
         raise
+    except ContextResetFailed:
+        async with job["lock"]:
+            if job["status"] == expected_status:
+                job["log"].append("Không thể reset analyzer context.")
+                job["status"] = "failed"
+                _cleanup_staging(job)
     except Exception as error:
         async with job["lock"]:
             if job["status"] == expected_status:
                 job["log"].append(f"error: {error}")
                 job["status"] = "failed"
+                _cleanup_staging(job)
 
 
 def start_integrate(url: str, cfg, pool, router=None, login_manager=None) -> str:
@@ -143,6 +182,7 @@ def start_integrate(url: str, cfg, pool, router=None, login_manager=None) -> str
         "login_attempts": 0,
         "login_timeout_claimed": False,
         "login_manager": login_manager,
+        "staging_dir": cfg.recipes_dir / ".login" / job_id,
         "lock": asyncio.Lock(),
     }
     JOBS[job_id] = job
@@ -178,17 +218,6 @@ async def complete_login(job_id: str, cfg, pool, router, login_manager) -> dict:
                 _login_failure(job, "Không thể lưu session đăng nhập.")
         raise LoginSaveFailed
 
-    try:
-        await pool.drop(f"{job['slug']}__analyze")
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        async with job["lock"]:
-            if job["status"] == "resuming":
-                job["log"].append("Không thể reset analyzer context.")
-                job["status"] = "failed"
-        raise ContextResetFailed
-
     async with job["lock"]:
         if job["status"] != "resuming":
             return {"ok": True, "status": job["status"]}
@@ -221,6 +250,7 @@ async def cancel_job(job_id: str, login_manager) -> dict:
     if task and task is not asyncio.current_task():
         with suppress(asyncio.CancelledError):
             await task
+    _cleanup_staging(job)
     return {"ok": True, "status": "cancelled"}
 
 
@@ -245,6 +275,8 @@ async def shutdown(login_manager) -> None:
     cleanup.extend(tasks)
     if cleanup:
         await asyncio.gather(*cleanup, return_exceptions=True)
+    for job in list(JOBS.values()):
+        _cleanup_staging(job)
 
 
 async def get(job_id: str) -> dict | None:

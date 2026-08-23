@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -72,11 +73,12 @@ async def _looks_like_login(page) -> bool:
         return False
 
 
-async def integrate(url: str, pool, cfg, log, storage_state: Path | None = None) -> dict:
+async def integrate(url: str, pool, cfg, log, storage_state: Path | None = None,
+                    analyze_key: str | None = None) -> dict:
     from ..config import Config  # noqa: F401  (type hint)
 
     slug = _domain_slug(url)
-    analyze_key = f"{slug}__analyze"
+    analyze_key = analyze_key or f"{slug}__analyze"
     ctx = await pool.context_for(analyze_key, storage_state)
     page = await ctx.new_page()
 
@@ -107,7 +109,14 @@ async def integrate(url: str, pool, cfg, log, storage_state: Path | None = None)
 
             slug = str(recipe["slug"])
             base_dir, slug = _resolve_dir(cfg, slug, url)
+            recipe["slug"] = slug
             base_dir.mkdir(parents=True, exist_ok=True)
+            if storage_state is not None:
+                target_state = base_dir / "auth" / "state.json"
+                target_state.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(storage_state, target_state)
+                recipe.setdefault("login", {})["storage_state"] = "auth/state.json"
+                await pool.drop(slug)
 
             runner = BrowserRecipe(recipe, base_dir, pool)
             trial = [{"role": "user", "content": "Reply with exactly: OK"}]
