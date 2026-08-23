@@ -133,4 +133,3 @@ async def integrate(url: str, pool, cfg, log) -> dict:
                 "hint": "Hết vòng thử. Xem log, chỉnh recipes/<slug>/recipe.yaml tay."}
     finally:
         await page.close()
-        await pool.context_for(analyze_key)  # giữ nguyên context cho lần sau

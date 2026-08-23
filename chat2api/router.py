@@ -22,13 +22,18 @@ class Router:
 
     def reload(self) -> None:
         self.providers.clear()
+        self.failures.clear()
         if not self.recipes_dir.exists():
             return
         for child in sorted(self.recipes_dir.iterdir()):
             if not child.is_dir() or child.name.startswith("."):
                 continue
             for loader in LOADERS:
-                loaded = loader(child, self.pool)
+                try:
+                    loaded = loader(child, self.pool)
+                except Exception as e:
+                    print(f"[chat2api] loader error {child.name}: {e}", file=sys.stderr)
+                    continue
                 if loaded is None:
                     continue
                 items = loaded if isinstance(loaded, list) else [loaded]

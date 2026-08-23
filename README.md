@@ -4,7 +4,7 @@ Biến web chat AI bất kỳ thành API OpenAI-compatible. Thay việc copy/pas
 
 ## Cài đặt
 
-    python 3.12+
+    python 3.11+
     pip install -e ".[dev]"
     playwright install chromium
 

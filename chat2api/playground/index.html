@@ -61,9 +61,14 @@ async function loadModels() {
   try {
     const r = await fetch("/v1/models", {headers: headers()});
     const data = await r.json();
-    $("#model").innerHTML = data.data
-      .filter(m => m.ready !== false)
-      .map(m => `<option value="${m.id}">${m.id}</option>`).join("");
+    const sel = $("#model");
+    sel.textContent = "";
+    for (const m of data.data.filter(m => m.ready !== false)) {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      opt.textContent = m.id;
+      sel.appendChild(opt);
+    }
   } catch (e) { addMsg("err", "Không nạp được models: " + e); }
 }
 
@@ -123,8 +128,26 @@ async function loadRecipes() {
     tb.innerHTML = "";
     for (const rec of list) {
       const tr = document.createElement("tr");
-      tr.innerHTML = `<td>${rec.slug}</td><td>${(rec.models||[]).join(", ")}</td>
-        <td><button class="secondary" onclick="delRecipe('${rec.slug}')">Delete</button></td>`;
+      const tdSlug = document.createElement("td");
+      tdSlug.textContent = rec.slug;
+      const tdModels = document.createElement("td");
+      tdModels.textContent = (rec.models || []).join(", ");
+      const tdBtns = document.createElement("td");
+      const btnReload = document.createElement("button");
+      btnReload.className = "secondary";
+      btnReload.textContent = "Reload";
+      btnReload.onclick = () => {
+        fetch("/admin/recipes/" + rec.slug + "/reload", {method: "POST", headers: headers()}).then(loadRecipes);
+      };
+      const btnDel = document.createElement("button");
+      btnDel.className = "secondary";
+      btnDel.textContent = "Delete";
+      btnDel.addEventListener("click", () => delRecipe(rec.slug));
+      tdBtns.appendChild(btnReload);
+      tdBtns.appendChild(btnDel);
+      tr.appendChild(tdSlug);
+      tr.appendChild(tdModels);
+      tr.appendChild(tdBtns);
       tb.appendChild(tr);
     }
   } catch (e) {}
@@ -143,12 +166,21 @@ $("#integrate").onclick = async () => {
   const data = await r.json();
   if (!r.ok) { $("#jobstatus").textContent = data.error?.message || r.statusText; return; }
   $("#jobstatus").textContent = "đang chạy job " + data.job_id + "...";
+  let ticks = 0;
   const timer = setInterval(async () => {
-    const j = await (await fetch("/admin/integrate/" + data.job_id, {headers: headers()})).json();
-    $("#joblog").textContent = j.log.join("\n");
-    $("#joblog").scrollTop = $("#joblog").scrollHeight;
-    $("#jobstatus").textContent = "trạng thái: " + j.status;
-    if (j.status !== "running") { clearInterval(timer); loadModels(); loadRecipes(); }
+    ticks++;
+    try {
+      if (ticks > 300) {
+        clearInterval(timer);
+        $("#jobstatus").textContent = "timeout: job quá lâu, kiểm tra lại sau";
+        return;
+      }
+      const j = await (await fetch("/admin/integrate/" + data.job_id, {headers: headers()})).json();
+      $("#joblog").textContent = j.log.join("\n");
+      $("#joblog").scrollTop = $("#joblog").scrollHeight;
+      $("#jobstatus").textContent = "trạng thái: " + j.status;
+      if (j.status !== "running") { clearInterval(timer); loadModels(); loadRecipes(); }
+    } catch (e) { $("#jobstatus").textContent = "poll lỗi: " + e; }
   }, 1000);
 };
 

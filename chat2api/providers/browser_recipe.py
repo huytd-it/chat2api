@@ -92,7 +92,7 @@ class BrowserRecipe(Provider):
                     raise TimeoutError(f"recipe '{self.slug}' timeout sau {timeout_ms}ms")
                 text = await self._reply_text(page)
                 if text != last:
-                    if text.startswith(last):
+                    if text.startswith(last) and text.strip() != prompt.strip():
                         yield text[len(last):]
                     last = text
                     stable_since = time.monotonic()

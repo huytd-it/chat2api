@@ -1,6 +1,8 @@
 from collections import OrderedDict
 from pathlib import Path
 
+import asyncio
+
 
 class BrowserPool:
     """Một BrowserContext dài hạn cho mỗi slug.
@@ -11,8 +13,9 @@ class BrowserPool:
 
     def __init__(self, engine: str = "playwright", max_contexts: int = 3):
         self.engine = engine
-        self.max_contexts = max_contexts
+        self.max_contexts = max(1, int(max_contexts))
         self._contexts: OrderedDict[str, object] = OrderedDict()
+        self._lock = asyncio.Lock()
         self._pw = None
         self._browser = None
 
@@ -36,21 +39,26 @@ class BrowserPool:
         if slug in self._contexts:
             self._contexts.move_to_end(slug)
             return self._contexts[slug]
-        while len(self._contexts) >= self.max_contexts:
-            _, old_ctx = self._contexts.popitem(last=False)
-            try:
-                await old_ctx.close()
-            except Exception:
-                pass
-        state = str(storage_state) if storage_state and storage_state.exists() else None
-        if self.engine == "cloak":
-            from cloakbrowser import launch_context_async
+        async with self._lock:
+            if slug in self._contexts:
+                self._contexts.move_to_end(slug)
+                return self._contexts[slug]
+            while len(self._contexts) >= self.max_contexts:
+                # ponytail: eviction có thể đóng context đang có page streaming khi vượt N slug khác nhau — cần refcount nếu gặp thực tế
+                _, old_ctx = self._contexts.popitem(last=False)
+                try:
+                    await old_ctx.close()
+                except Exception:
+                    pass
+            state = str(storage_state) if storage_state and storage_state.exists() else None
+            if self.engine == "cloak":
+                from cloakbrowser import launch_context_async
 
-            ctx = await launch_context_async(headless=True, storage_state=state)
-        else:
-            ctx = await self._browser.new_context(storage_state=state)
-        self._contexts[slug] = ctx
-        return ctx
+                ctx = await launch_context_async(headless=True, storage_state=state)
+            else:
+                ctx = await self._browser.new_context(storage_state=state)
+            self._contexts[slug] = ctx
+            return ctx
 
     async def aclose(self):
         for ctx in self._contexts.values():

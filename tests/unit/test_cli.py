@@ -9,7 +9,7 @@ def test_resolve_ok(tmp_path):
     assert resolve_recipe_path(tmp_path, "copilot") == d
 
 
-@pytest.mark.parametrize("bad", ["../evil", "a/b", "a\\b", ".", ""])
+@pytest.mark.parametrize("bad", ["../evil", "a/b", "a\\b", ".", "", "C:"])
 def test_resolve_rejects_traversal(tmp_path, bad):
     with pytest.raises(ValueError):
         resolve_recipe_path(tmp_path, bad)

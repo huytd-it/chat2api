@@ -4,7 +4,7 @@ import uuid
 JOBS: dict[str, dict] = {}
 
 
-def start_integrate(url: str, cfg, pool) -> str:
+def start_integrate(url: str, cfg, pool, router=None) -> str:
     from .agents.analyzer import integrate
 
     job_id = uuid.uuid4().hex[:12]
@@ -17,6 +17,8 @@ def start_integrate(url: str, cfg, pool) -> str:
     async def run():
         try:
             result = await integrate(url, pool, cfg, log)
+            if result.get("status") == "ok" and router is not None:
+                router.reload()
             job.update(result)
             job["status"] = result["status"]
         except Exception as e:

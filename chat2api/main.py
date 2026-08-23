@@ -92,16 +92,20 @@ def create_app(cfg: Config) -> FastAPI:
                 yield d
 
         async def upstream():
+            sent = {"n": 0}
             if rt.is_unhealthy(provider.slug) and fallback_ok("unhealthy recipe"):
                 async for d in agent_stream():
                     yield d
                 return
             try:
                 async for d in provider.stream(msgs, local):
+                    sent["n"] += 1
                     yield d
                 rt.mark_success(provider.slug)
             except TimeoutError:
                 rt.mark_failure(provider.slug)
+                if sent["n"] > 0:
+                    raise
                 if fallback_ok("timeout"):
                     async for d in agent_stream():
                         yield d
@@ -114,6 +118,8 @@ def create_app(cfg: Config) -> FastAPI:
                 raise
             except Exception as e:
                 rt.mark_failure(provider.slug)
+                if sent["n"] > 0:
+                    raise
                 if fallback_ok(str(e)):
                     async for d in agent_stream():
                         yield d
@@ -167,7 +173,8 @@ def register_admin(app: FastAPI, admin) -> None:
             raise OpenAIError(503, "agent_not_configured",
                               "Đặt AGENT_LLM_BASE_URL, AGENT_LLM_API_KEY, AGENT_LLM_MODEL "
                               "để dùng tính năng tích hợp tự động.")
-        job_id = start_integrate(body.url, cfg, request.app.state.pool)
+        job_id = start_integrate(body.url, cfg, request.app.state.pool,
+                                 router=request.app.state.router)
         return {"job_id": job_id}
 
     @admin.get("/integrate/{job_id}")

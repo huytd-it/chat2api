@@ -7,7 +7,7 @@ import yaml
 
 
 def resolve_recipe_path(recipes_dir: Path, slug: str) -> Path:
-    if not slug or any(c in slug for c in "/\\") or slug in {".", ".."}:
+    if not slug or any(c in slug for c in "/\\:") or slug in {".", ".."}:
         raise ValueError(f"slug không hợp lệ: {slug!r}")
     return recipes_dir / slug
 
