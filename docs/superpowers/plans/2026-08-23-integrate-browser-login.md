@@ -297,3 +297,10 @@ git commit -m "feat: interactive login controls in playground"
 - Coverage: Task 1 covers manager/pool/cleanup; Task 2 covers analyzer/jobs/API/lifespan/timeout/retry; Task 3 covers UI/manual acceptance. All spec sections mapped.
 - Type consistency: `LoginSessionManager`, `start_integrate(...login_manager)`, `complete_login`, `cancel_job`, `integrate(...storage_state)` names consistent across tasks.
 - No placeholders: test behavior and implementation rules are explicit.
+
+## 2026-08-24 login-session race verification
+
+- Pending starts are tracked by task, cancelled and drained before shared resources stop.
+- Concurrent starts retain manager-owned Playwright until `close_all()`.
+- Targeted: `python -m pytest tests/unit/test_login_sessions.py -q` — 15 passed.
+- Full: `python -m pytest -q` — 72 passed.

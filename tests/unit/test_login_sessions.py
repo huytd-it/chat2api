@@ -71,14 +71,20 @@ class FakeBrowser:
 
 
 class FakeLauncher:
-    def __init__(self, fail_launch=False, **browser_kwargs):
-        self.browser = FakeBrowser(**browser_kwargs)
+    def __init__(self, fail_launch=False, browser_events=None, **browser_kwargs):
+        self.browser = None
+        self.browsers = []
+        self.browser_events = list(browser_events or [])
+        self.browser_kwargs = browser_kwargs
         self.fail_launch = fail_launch
 
     async def launch(self, **kwargs):
         assert kwargs["headless"] is False
         if self.fail_launch:
             raise RuntimeError("launch failed")
+        event_kwargs = self.browser_events[len(self.browsers)] if self.browser_events else {}
+        self.browser = FakeBrowser(**{**self.browser_kwargs, **event_kwargs})
+        self.browsers.append(self.browser)
         return self.browser
 
 
@@ -146,9 +152,11 @@ async def test_start_failure_cleans_partial_resources(tmp_path, failure):
         await manager.start("j1", "site", "https://x", tmp_path)
 
     assert not await manager.has("j1")
-    assert pw.stopped
+    assert not pw.stopped
     if failure != "launch":
         assert pw.chromium.browser.closed
+    await manager.close_all()
+    assert pw.stopped
 
 
 async def test_complete_failure_closes_and_forgets_session(tmp_path):
@@ -205,8 +213,10 @@ async def test_cancel_during_goto_cleans_browser_and_driver(tmp_path):
         await asyncio.wait_for(start, 1)
 
     assert pw.chromium.browser.closed
-    assert pw.stopped
+    assert not pw.stopped
     assert not await manager.has("j1")
+    await manager.close_all()
+    assert pw.stopped
 
 
 async def test_duplicate_while_first_start_pending_is_rejected(tmp_path):
@@ -232,7 +242,39 @@ async def test_duplicate_while_first_start_pending_is_rejected(tmp_path):
     await manager.close_all()
 
 
-async def test_close_all_during_pending_start_cleans_without_publication(tmp_path):
+async def test_failed_start_does_not_stop_driver_shared_by_published_session(tmp_path):
+    first_goto_started = asyncio.Event()
+    fail_first_goto = asyncio.Event()
+    pw = FakePW(
+        browser_events=[
+            {
+                "goto_started": first_goto_started,
+                "allow_goto": fail_first_goto,
+                "fail_goto": True,
+            },
+            {},
+        ]
+    )
+    manager = LoginSessionManager(playwright_factory=lambda: pw)
+    first = asyncio.create_task(manager.start("j1", "site", "https://x", tmp_path))
+    await asyncio.wait_for(first_goto_started.wait(), 1)
+
+    await manager.start("j2", "site", "https://y", tmp_path)
+    fail_first_goto.set()
+    with pytest.raises(LoginSessionError, match="Unable to start"):
+        await asyncio.wait_for(first, 1)
+
+    assert pw.chromium.browsers[0].closed
+    assert await manager.has("j2")
+    assert not pw.chromium.browsers[1].closed
+    assert not pw.stopped
+
+    await manager.close_all()
+    assert pw.chromium.browsers[1].closed
+    assert pw.stopped
+
+
+async def test_close_all_cancels_and_drains_pending_start(tmp_path):
     goto_started = asyncio.Event()
     allow_goto = asyncio.Event()
     pw = FakePW(goto_started=goto_started, allow_goto=allow_goto)
@@ -241,9 +283,10 @@ async def test_close_all_during_pending_start_cleans_without_publication(tmp_pat
     await asyncio.wait_for(goto_started.wait(), 1)
 
     await asyncio.wait_for(manager.close_all(), 1)
-    allow_goto.set()
-    with pytest.raises(LoginSessionError, match="closed"):
-        await asyncio.wait_for(start, 1)
 
+    with pytest.raises(asyncio.CancelledError):
+        await start
     assert pw.chromium.browser.closed
+    assert manager._pending == {}
+    assert pw.stopped
     assert not await manager.has("j1")

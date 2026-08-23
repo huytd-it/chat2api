@@ -45,7 +45,7 @@ class LoginSessionManager:
         self._playwright_factory = playwright_factory
         self._playwright = None
         self._sessions: dict[str, LoginSession] = {}
-        self._pending: set[str] = set()
+        self._pending: dict[str, asyncio.Task] = {}
         self._closing = False
         self._lock = asyncio.Lock()
         self._driver_lock = asyncio.Lock()
@@ -64,46 +64,34 @@ class LoginSessionManager:
             return await driver
         return driver
 
-    async def _driver(self):
+    async def _ensure_driver(self):
         async with self._driver_lock:
             if self._playwright is not None:
-                return self._playwright, False
-            task = asyncio.create_task(self._new_driver())
+                return self._playwright
             try:
-                driver = await asyncio.shield(task)
-            except asyncio.CancelledError as cancelled:
-                try:
-                    driver = await task
-                except Exception:
-                    raise cancelled
-                self._playwright = driver
-                await _finish_cleanup(_close(driver, "stop"))
+                self._playwright = await self._new_driver()
+            except BaseException:
                 self._playwright = None
                 raise
-            self._playwright = driver
-            return driver, True
+            return self._playwright
 
-    async def _cleanup_start(self, browser, playwright, created_driver) -> None:
-        await _close(browser, "close")
-        if created_driver:
-            async with self._driver_lock:
-                if self._playwright is playwright:
-                    await _close(playwright, "stop")
-                    self._playwright = None
+    async def _remove_pending(self, job_id: str, task: asyncio.Task) -> None:
+        async with self._lock:
+            if self._pending.get(job_id) is task:
+                self._pending.pop(job_id, None)
 
     async def start(self, job_id: str, slug: str, url: str, recipe_dir: Path) -> None:
+        current_task = asyncio.current_task()
         async with self._lock:
             if self._closing:
                 raise LoginSessionError("Login session manager is closed")
             if job_id in self._sessions or job_id in self._pending:
                 raise LoginSessionError(f"Login session already exists for job {job_id}")
-            self._pending.add(job_id)
+            self._pending[job_id] = current_task
 
         browser = None
-        playwright = None
-        created_driver = False
         try:
-            playwright, created_driver = await self._driver()
+            playwright = await self._ensure_driver()
             launch = asyncio.create_task(playwright.chromium.launch(headless=False))
             try:
                 browser = await asyncio.shield(launch)
@@ -131,20 +119,15 @@ class LoginSessionManager:
                     raise LoginSessionError("Login session manager is closed")
                 self._sessions[job_id] = session
         except asyncio.CancelledError:
-            await _finish_cleanup(
-                self._cleanup_start(browser, playwright, created_driver)
-            )
+            await _finish_cleanup(_close(browser, "close"))
             raise
         except Exception as error:
-            await _finish_cleanup(
-                self._cleanup_start(browser, playwright, created_driver)
-            )
+            await _finish_cleanup(_close(browser, "close"))
             if isinstance(error, LoginSessionError):
                 raise
             raise LoginSessionError("Unable to start login session") from error
         finally:
-            async with self._lock:
-                self._pending.discard(job_id)
+            await _finish_cleanup(self._remove_pending(job_id, current_task))
 
     async def complete(self, job_id: str) -> Path:
         async with self._lock:
@@ -171,16 +154,23 @@ class LoginSessionManager:
             await _finish_cleanup(_close(session.browser, "close"))
 
     async def close_all(self) -> None:
+        current_task = asyncio.current_task()
         async with self._lock:
             self._closing = True
             sessions = list(self._sessions.values())
             self._sessions.clear()
-            playwright = self._playwright
-            self._playwright = None
+            pending = [task for task in self._pending.values() if task is not current_task]
+
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
 
         async def cleanup() -> None:
             for session in sessions:
                 await _close(session.browser, "close")
-            await _close(playwright, "stop")
+            async with self._driver_lock:
+                playwright = self._playwright
+                self._playwright = None
+                await _close(playwright, "stop")
 
         await _finish_cleanup(cleanup())
