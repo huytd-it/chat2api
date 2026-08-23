@@ -1,0 +1,13 @@
+slug: gemini
+# cookie_file trỏ tới JSON {"cookie": "...", "sapisid": "..."} hoặc chuỗi cookie thô.
+# Copy cookie từ trình duyệt đã đăng nhập gemini.google.com vào recipes/secrets/gemini-cookies.txt
+cookie_file: ../secrets/gemini-cookies.txt
+auth_user: null
+temporary_chats: false
+models:
+  - id: gemini-flash
+    model_id: 1
+    think_mode: null
+  - id: gemini-flash-thinking
+    model_id: 1
+    think_mode: 0

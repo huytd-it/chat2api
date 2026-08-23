@@ -57,3 +57,17 @@ class Router:
 
     def is_unhealthy(self, slug: str) -> bool:
         return self.failures.get(slug, 0) >= UNHEALTHY_THRESHOLD
+
+
+def _gemini_loader(directory: Path, pool):
+    if directory.name != "gemini" or not (directory / "config.yaml").exists():
+        return None
+    import yaml
+
+    from .providers.gemini_native import GeminiNative
+
+    cfg = yaml.safe_load((directory / "config.yaml").read_text(encoding="utf-8"))
+    return GeminiNative(cfg, directory)
+
+
+LOADERS.append(_gemini_loader)
