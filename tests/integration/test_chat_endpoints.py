@@ -42,6 +42,12 @@ async def test_unknown_model_404(app_client):
     assert r.json()["error"]["code"] == "model_not_found"
 
 
+async def test_index_serves_playground(app_client):
+    r = await app_client.get("/")
+    assert r.status_code == 200
+    assert "chat2api" in r.text and "Integrate" in r.text
+
+
 async def test_auth_enforced_when_keys_set(app_client):
     app = app_client._transport.app
     app.state.cfg.api_keys = ["secret"]
