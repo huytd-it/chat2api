@@ -74,6 +74,70 @@ async def test_completion_stream_sse(app_client):
     assert "".join(c["choices"][0]["delta"]["content"] for c in chunks) == "Hello world"
 
 
+async def test_trial_limit_exceeded_returns_403(app_client):
+    from chat2api.providers.browser_recipe import TrialLimitExceeded
+    from chat2api.providers.base import ModelInfo, Provider
+
+    class TrialLimitedProvider(Provider):
+        slug = "limited"
+
+        def models(self):
+            return [ModelInfo(id="limited/m1", slug="limited")]
+
+        async def stream(self, messages, model_id):
+            raise TrialLimitExceeded("Đã dùng hết 2 lượt dùng thử miễn phí.")
+            yield ""  # pragma: no cover
+
+    app = app_client._transport.app
+    app.state.router.providers["limited"] = TrialLimitedProvider()
+    r = await app_client.post("/v1/chat/completions", json={
+        "model": "limited/m1", "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "trial_limit_exceeded"
+
+
+async def test_headed_header_propagates_to_browser_recipe_stream(app_client):
+    from chat2api.providers.browser_recipe import BrowserRecipe
+    from pathlib import Path
+
+    seen = []
+
+    class SpyRecipeProvider(BrowserRecipe):
+        slug = "spy"
+
+        def __init__(self):
+            super().__init__({"slug": "spy", "url": "http://127.0.0.1:9/nothing"}, Path("."), None)
+
+        def models(self):
+            from chat2api.providers.base import ModelInfo
+            return [ModelInfo(id="spy/m1", slug="spy")]
+
+        async def stream(self, messages, model_id, headed=None, watch_id=None):
+            seen.append(headed)
+            yield "ok"
+
+    app = app_client._transport.app
+    app.state.router.providers["spy"] = SpyRecipeProvider()
+
+    r1 = await app_client.post("/v1/chat/completions", json={
+        "model": "spy/m1", "messages": [{"role": "user", "content": "hi"}]})
+    assert r1.status_code == 200
+    r2 = await app_client.post("/v1/chat/completions", json={
+        "model": "spy/m1", "messages": [{"role": "user", "content": "hi"}]},
+        headers={"X-Chat2api-Headed": "true"})
+    assert r2.status_code == 200
+
+    assert seen == [False, True]
+
+
+async def test_headed_header_ignored_for_non_browser_recipe_providers(app_client):
+    r = await app_client.post("/v1/chat/completions", json={
+        "model": "fake/m1", "messages": [{"role": "user", "content": "hi"}]},
+        headers={"X-Chat2api-Headed": "true"})
+    assert r.status_code == 200
+    assert r.json()["choices"][0]["message"]["content"] == "Hello world"
+
+
 async def test_unknown_model_404(app_client):
     r = await app_client.post("/v1/chat/completions", json={
         "model": "nope/x", "messages": [{"role": "user", "content": "hi"}]})
@@ -129,6 +193,30 @@ async def test_auth_enforced_when_keys_set(app_client):
         assert r2.status_code == 200
     finally:
         app.state.cfg.api_keys = []
+
+
+async def test_integrate_passes_headed_flag_to_job(app_client, monkeypatch):
+    app = app_client._transport.app
+    app.state.cfg.agent_llm_base_url = "https://llm.example/v1"
+    app.state.cfg.agent_llm_api_key = "k"
+    app.state.cfg.agent_llm_model = "m"
+    captured = {}
+
+    def fake_start_integrate(url, cfg, pool, router=None, login_manager=None,
+                             publish_lock=None, headed=False):
+        captured["headed"] = headed
+        return "job-1"
+
+    monkeypatch.setattr("chat2api.jobs.start_integrate", fake_start_integrate)
+    try:
+        r = await app_client.post("/admin/integrate", json={"url": "https://x.example", "headed": True})
+        assert r.status_code == 200
+        assert r.json() == {"job_id": "job-1"}
+        assert captured["headed"] is True
+    finally:
+        app.state.cfg.agent_llm_base_url = ""
+        app.state.cfg.agent_llm_api_key = ""
+        app.state.cfg.agent_llm_model = ""
 
 
 async def test_admin_recipes_and_auth_guard(app_client):

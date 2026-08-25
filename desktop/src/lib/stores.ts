@@ -20,6 +20,10 @@ export const apiKey = createApiKeyStore();
 export type ViewName = "playground" | "integrations";
 export const currentView = writable<ViewName>("playground");
 
+/** Khi bật, request chat test trong Playground yêu cầu server hiện cửa sổ
+ * Chromium (không headless) thay vì chạy ẩn ở nền. */
+export const headedPlayground = writable(false);
+
 export const toastMessage = writable<string | null>(null);
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 

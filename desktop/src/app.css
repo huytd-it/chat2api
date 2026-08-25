@@ -182,6 +182,11 @@ input, select { width: 100%; min-height: 42px; padding: 9px 11px; border: 1px so
 .integration-card h2 { margin: 0; font-size: 22px; letter-spacing: -0.035em; }
 .integration-card > p { margin: 8px 0 0; color: var(--soft); }
 .url-row { margin-top: 24px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px; }
+.headed-toggle { margin-top: 10px; display: flex; align-items: center; gap: 7px; color: var(--soft); font-size: 13px; }
+.headed-toggle input { width: auto; min-height: 0; }
+.live-view { margin-top: 12px; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--terminal); }
+.live-view-label { margin: 0 0 8px; color: var(--terminal-text); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.75; }
+.live-view img { display: block; width: 100%; border-radius: 7px; background: #000; }
 .status-box { margin-top: 16px; min-height: 46px; padding: 12px 14px; border-radius: 9px; background: var(--muted); color: var(--soft); font-size: 13px; }
 .status-box:empty:before { content: "Chưa có job đang chạy."; color: var(--faint); }
 .login-actions { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
@@ -208,7 +213,13 @@ td:nth-child(2) { color: var(--soft); font: 12px "Cascadia Code", Consolas, mono
 .recipe-actions { display: flex; justify-content: flex-end; gap: 7px; }
 .recipe-state { display: inline-flex; padding: 4px 8px; border-radius: 7px; background: var(--success-soft); color: var(--success); font-size: 11px; font-weight: 750; }
 .recipe-state.unhealthy { background: var(--danger-soft); color: var(--danger); }
+.login-badge { display: inline-flex; padding: 4px 8px; border-radius: 7px; background: var(--muted); color: var(--soft); font-size: 11px; font-weight: 750; }
+.login-badge.trial { background: var(--danger-soft); color: var(--danger); }
 .empty-row td { padding: 34px 20px; color: var(--faint); text-align: center; }
+.account-flow { margin: 0; padding: 16px 20px; border-top: 1px solid var(--line); background: var(--muted); }
+.account-flow p { margin: 0 0 10px; color: var(--soft); font-size: 13px; }
+.account-flow .url-row { margin-top: 0; }
+.account-flow .button.secondary.small { margin-top: 10px; }
 
 .toast { position: fixed; right: 20px; bottom: 20px; z-index: 30; max-width: min(380px, calc(100vw - 40px)); padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--raised); box-shadow: var(--shadow); color: var(--text); font-size: 13px; }
 

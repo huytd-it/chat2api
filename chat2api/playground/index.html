@@ -15,8 +15,8 @@ main{width:min(1400px,100%);margin:auto;padding:28px 24px 32px}.view{animation:v
 .composer{padding:14px 16px 16px;border-top:1px solid var(--line);background:var(--raised)}#row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:10px}#prompt{width:100%;min-height:48px;max-height:180px;resize:vertical;padding:12px 13px;border:1px solid var(--strong);border-radius:10px;background:var(--panel);color:var(--text)}input::placeholder,textarea::placeholder{color:var(--faint);opacity:1}.composer-actions{display:flex;gap:8px}.composer-meta{margin-top:8px;display:flex;justify-content:space-between;gap:12px;color:var(--faint);font-size:12px}
 .sidebar{display:flex;flex-direction:column;gap:16px}.side-section{padding:17px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel)}.side-section h2{margin:0 0 14px;font-size:14px}.field{display:grid;gap:7px;margin-top:13px}.field:first-of-type{margin-top:0}.field label{color:var(--soft);font-size:12px;font-weight:700}.field-help{margin:0;color:var(--faint);font-size:11px}input,select{width:100%;min-height:42px;padding:9px 11px;border:1px solid var(--strong);border-radius:9px;background:var(--raised);color:var(--text)}.key-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px}.metrics{display:grid;grid-template-columns:1fr 1fr;gap:9px}.metric{padding:11px;border-radius:9px;background:var(--muted)}.metric strong{display:block;overflow:hidden;text-overflow:ellipsis;font:15px "Cascadia Code",Consolas,monospace}.metric span{display:block;margin-top:3px;color:var(--faint);font-size:11px}
 .button,button.secondary{min-height:40px;padding:9px 14px;border:1px solid transparent;border-radius:9px;background:var(--accent);color:#f7faff;font-weight:700;transition:transform .16s ease,background .16s ease,border-color .16s ease}.button:hover:not(:disabled){background:var(--accent-hover)}.button:active:not(:disabled){transform:scale(.98)}.button.secondary,button.secondary{border-color:var(--line);background:var(--raised);color:var(--text)}.button.secondary:hover:not(:disabled),button.secondary:hover:not(:disabled){border-color:var(--strong);background:var(--muted)}.button.danger{border-color:color-mix(in srgb,var(--danger) 35%,var(--line));background:transparent;color:var(--danger)}.button.small{min-height:34px;padding:6px 10px;font-size:12px}.button.full{width:100%}
-.integrations{width:min(1120px,100%);margin:auto;display:grid;gap:20px}.page-heading{padding:14px 2px 8px}.page-heading h1{margin:0;max-width:780px;font-size:clamp(30px,4.5vw,52px);line-height:1.02;letter-spacing:-.05em}.page-heading p{max-width:60ch;margin:14px 0 0;color:var(--soft);font-size:16px}.integration-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(300px,.85fr);gap:20px;align-items:start}.integration-card{padding:clamp(20px,3vw,30px)}.integration-card h2{margin:0;font-size:22px;letter-spacing:-.035em}.integration-card>p{margin:8px 0 0;color:var(--soft)}.url-row{margin-top:24px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px}.status-box{margin-top:16px;min-height:46px;padding:12px 14px;border-radius:9px;background:var(--muted);color:var(--soft);font-size:13px}.status-box:empty:before{content:"Chưa có job đang chạy.";color:var(--faint)}#loginactions{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px}#joblog{min-height:245px;max-height:430px;margin:16px 0 0;padding:15px;overflow:auto;border:1px solid #2c3740;border-radius:var(--radius);background:var(--terminal);color:var(--terminal-text);font:12px/1.65 "Cascadia Code",Consolas,monospace;white-space:pre-wrap}#joblog:empty:before{content:"Log analyzer sẽ xuất hiện tại đây.";color:#94a4b3}.steps{margin-top:20px}.step{display:grid;grid-template-columns:28px 1fr;gap:10px;padding:13px 0;border-top:1px solid var(--line)}.step:first-child{border-top:0}.step-index{width:24px;height:24px;display:grid;place-items:center;border-radius:7px;background:var(--muted);font:11px "Cascadia Code",Consolas,monospace}.step strong{font-size:13px}.step p{margin:3px 0 0;color:var(--faint);font-size:12px}
-.recipes-panel{overflow:hidden}.recipes-head{padding:18px 20px;display:flex;justify-content:space-between;align-items:center;gap:14px;border-bottom:1px solid var(--line)}.recipes-head h2{margin:0;font-size:17px}.recipes-head p{margin:3px 0 0;color:var(--faint);font-size:12px}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse}th,td{padding:14px 20px;text-align:left;vertical-align:middle}th{color:var(--faint);background:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em}tbody tr+tr{border-top:1px solid var(--line)}td:first-child{font-weight:700}td:nth-child(2){color:var(--soft);font:12px "Cascadia Code",Consolas,monospace}.recipe-actions{display:flex;justify-content:flex-end;gap:7px}.recipe-state{display:inline-flex;padding:4px 8px;border-radius:7px;background:var(--success-soft);color:var(--success);font-size:11px;font-weight:750}.recipe-state.unhealthy{background:var(--danger-soft);color:var(--danger)}.empty-row td{padding:34px 20px;color:var(--faint);text-align:center}.toast{position:fixed;right:20px;bottom:20px;z-index:30;max-width:min(380px,calc(100vw - 40px));padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--raised);box-shadow:var(--shadow);color:var(--text);font-size:13px}
+.integrations{width:min(1120px,100%);margin:auto;display:grid;gap:20px}.page-heading{padding:14px 2px 8px}.page-heading h1{margin:0;max-width:780px;font-size:clamp(30px,4.5vw,52px);line-height:1.02;letter-spacing:-.05em}.page-heading p{max-width:60ch;margin:14px 0 0;color:var(--soft);font-size:16px}.integration-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(300px,.85fr);gap:20px;align-items:start}.integration-card{padding:clamp(20px,3vw,30px)}.integration-card h2{margin:0;font-size:22px;letter-spacing:-.035em}.integration-card>p{margin:8px 0 0;color:var(--soft)}.url-row{margin-top:24px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px}.headed-toggle{margin-top:10px;display:flex;align-items:center;gap:7px;color:var(--soft);font-size:13px}.headed-toggle input{width:auto;min-height:0}.live-view{margin-top:12px;padding:10px;border:1px solid var(--line);border-radius:var(--radius);background:var(--terminal)}.live-view-label{margin:0 0 8px;color:var(--terminal-text);font-size:11px;text-transform:uppercase;letter-spacing:.05em;opacity:.75}.live-view img{display:block;width:100%;border-radius:7px;background:#000}.status-box{margin-top:16px;min-height:46px;padding:12px 14px;border-radius:9px;background:var(--muted);color:var(--soft);font-size:13px}.status-box:empty:before{content:"Chưa có job đang chạy.";color:var(--faint)}#loginactions{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px}#joblog{min-height:245px;max-height:430px;margin:16px 0 0;padding:15px;overflow:auto;border:1px solid #2c3740;border-radius:var(--radius);background:var(--terminal);color:var(--terminal-text);font:12px/1.65 "Cascadia Code",Consolas,monospace;white-space:pre-wrap}#joblog:empty:before{content:"Log analyzer sẽ xuất hiện tại đây.";color:#94a4b3}.steps{margin-top:20px}.step{display:grid;grid-template-columns:28px 1fr;gap:10px;padding:13px 0;border-top:1px solid var(--line)}.step:first-child{border-top:0}.step-index{width:24px;height:24px;display:grid;place-items:center;border-radius:7px;background:var(--muted);font:11px "Cascadia Code",Consolas,monospace}.step strong{font-size:13px}.step p{margin:3px 0 0;color:var(--faint);font-size:12px}
+.recipes-panel{overflow:hidden}.recipes-head{padding:18px 20px;display:flex;justify-content:space-between;align-items:center;gap:14px;border-bottom:1px solid var(--line)}.recipes-head h2{margin:0;font-size:17px}.recipes-head p{margin:3px 0 0;color:var(--faint);font-size:12px}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse}th,td{padding:14px 20px;text-align:left;vertical-align:middle}th{color:var(--faint);background:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em}tbody tr+tr{border-top:1px solid var(--line)}td:first-child{font-weight:700}td:nth-child(2){color:var(--soft);font:12px "Cascadia Code",Consolas,monospace}.recipe-actions{display:flex;justify-content:flex-end;gap:7px}.recipe-state{display:inline-flex;padding:4px 8px;border-radius:7px;background:var(--success-soft);color:var(--success);font-size:11px;font-weight:750}.recipe-state.unhealthy{background:var(--danger-soft);color:var(--danger)}.login-badge{display:inline-flex;padding:4px 8px;border-radius:7px;background:var(--muted);color:var(--soft);font-size:11px;font-weight:750}.login-badge.trial{background:var(--danger-soft);color:var(--danger)}.empty-row td{padding:34px 20px;color:var(--faint);text-align:center}.account-flow{margin:0;padding:16px 20px;border-top:1px solid var(--line);background:var(--muted)}.account-flow p{margin:0 0 10px;color:var(--soft);font-size:13px}.account-flow .url-row{margin-top:0}.account-flow #accountcancel{margin-top:10px}.toast{position:fixed;right:20px;bottom:20px;z-index:30;max-width:min(380px,calc(100vw - 40px));padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--raised);box-shadow:var(--shadow);color:var(--text);font-size:13px}
 @media(max-width:900px){.topbar-inner{grid-template-columns:1fr auto}.top-actions{display:none}.nav-tabs{justify-self:end}.workspace,.integration-grid{grid-template-columns:1fr}.workspace{min-height:auto}.chat-panel{min-height:calc(100dvh - 160px)}.sidebar{display:grid;grid-template-columns:1fr 1fr}.integration-card:last-child{order:-1}}
 @media(max-width:640px){.topbar{height:auto;position:relative}.topbar-inner{height:auto;padding:12px 16px;grid-template-columns:1fr;gap:10px}.nav-tabs{width:100%;justify-self:stretch}.nav-tab{flex:1}.brand{justify-content:center}main{padding:16px}.workspace{display:block}.chat-panel{min-height:calc(100dvh - 150px)}.sidebar{grid-template-columns:1fr;margin-top:16px}#chat{padding:22px 14px}.msg{width:92%}#row,.url-row{grid-template-columns:1fr}.composer-actions{display:grid;grid-template-columns:1fr 1fr}.button{width:100%}.composer-meta{display:none}.page-heading{padding-top:4px}.recipes-head{align-items:flex-start}.table-wrap table,.table-wrap thead,.table-wrap tbody,.table-wrap tr,.table-wrap td{display:block}.table-wrap thead{display:none}.table-wrap tr{padding:14px 16px}.table-wrap td{padding:4px 0}.recipe-actions{justify-content:flex-start;margin-top:8px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
@@ -41,6 +41,10 @@ main{width:min(1400px,100%);margin:auto;padding:28px 24px 32px}.view{animation:v
       <div class="panel-head">
         <div><h1>API playground</h1><p>Kiểm thử phản hồi streaming theo thời gian thực</p></div>
         <span class="latency" id="latency" aria-live="polite"></span>
+      </div>
+      <div class="live-view" id="playgroundliveview" hidden>
+        <p class="live-view-label">Live view — browser đang chạy recipe</p>
+        <img id="playgroundliveimg" alt="Live view của browser đang test recipe">
       </div>
       <div id="chat" aria-live="polite">
         <div class="chat-empty" id="chatempty">
@@ -69,6 +73,7 @@ main{width:min(1400px,100%);margin:auto;padding:28px 24px 32px}.view{animation:v
         <h2>Request</h2>
         <div class="field"><label for="model">Model</label><select id="model" aria-describedby="modelhelp"><option>Đang tải model...</option></select><p class="field-help" id="modelhelp">Chỉ hiển thị model đang sẵn sàng.</p></div>
         <div class="field"><label for="key">API key</label><div class="key-row"><input id="key" type="password" autocomplete="off" placeholder="Bearer token"><button id="togglekey" class="button secondary small" type="button">Hiện</button></div><p class="field-help">Được lưu cục bộ trong trình duyệt này.</p></div>
+        <label class="headed-toggle"><input id="headedplayground" type="checkbox"> Hiện browser khi test (không headless)</label>
       </section>
       <section class="side-section">
         <h2>Server</h2>
@@ -93,6 +98,11 @@ main{width:min(1400px,100%);margin:auto;padding:28px 24px 32px}.view{animation:v
         <h2>Tích hợp website mới</h2>
         <p>Nhập URL đầy đủ của web chat cần kết nối.</p>
         <div class="url-row"><input id="siteurl" type="url" inputmode="url" placeholder="https://chat.example.com" aria-label="URL web chat"><button id="integrate" class="button">Bắt đầu</button></div>
+        <label class="headed-toggle"><input id="headedmode" type="checkbox"> Hiện browser khi test (không headless)</label>
+        <div class="live-view" id="integrateliveview" hidden>
+          <p class="live-view-label">Live view — browser đang chạy</p>
+          <img id="integrateliveimg" alt="Live view của browser đang phân tích/test website">
+        </div>
         <div class="status-box" id="jobstatus" role="status" aria-live="polite"></div>
         <span id="loginactions" hidden>
        <button id="logincomplete">Đã đăng nhập</button>
@@ -112,7 +122,12 @@ main{width:min(1400px,100%);margin:auto;padding:28px 24px 32px}.view{animation:v
     </div>
     <section class="panel recipes-panel">
       <div class="recipes-head"><div><h2>Recipes hiện có</h2><p>Reload cấu hình hoặc xóa provider tùy chỉnh.</p></div><button id="refreshrecipes" class="button secondary small">Làm mới</button></div>
-      <div class="table-wrap"><table id="recipies"><thead><tr><th>Provider</th><th>Models</th><th>Trạng thái</th><th aria-label="Thao tác"></th></tr></thead><tbody><tr class="empty-row"><td colspan="4">Đang tải recipes...</td></tr></tbody></table></div>
+      <div class="table-wrap"><table id="recipies"><thead><tr><th>Provider</th><th>Models</th><th>Trạng thái</th><th>Đăng nhập</th><th aria-label="Thao tác"></th></tr></thead><tbody><tr class="empty-row"><td colspan="5">Đang tải recipes...</td></tr></tbody></table></div>
+      <div class="account-flow" id="accountflow" hidden>
+        <p id="accountflowstatus"></p>
+        <div class="url-row"><input id="accountname" type="text" inputmode="text" placeholder="ten-account" aria-label="Tên account"><button id="accountsave" class="button">Lưu</button></div>
+        <button id="accountcancel" class="button secondary small">Hủy</button>
+      </div>
     </section>
   </section>
 </main>
@@ -176,9 +191,10 @@ async function loadHealth() {
   }
 }
 
-function headers() {
+function headers(headed) {
   const h = {"Content-Type": "application/json"};
   if (key) h["Authorization"] = "Bearer " + key;
+  if (headed) h["X-Chat2api-Headed"] = "true";
   return h;
 }
 
@@ -212,6 +228,45 @@ async function loadModels() {
   } finally { sel.disabled = false; }
 }
 
+const liveViews = {};
+
+function startLiveView(name, containerSel, imgSel, watchId) {
+  stopLiveView(name, containerSel, imgSel);
+  const container = $(containerSel), img = $(imgSel);
+  container.hidden = false;
+  const state = {timer: null};
+  liveViews[name] = state;
+  const poll = async () => {
+    if (liveViews[name] !== state) return;
+    try {
+      const r = await fetch("/admin/watch/" + watchId + "/screenshot", {headers: headers()});
+      if (liveViews[name] !== state) return;
+      if (r.ok) {
+        const blob = await r.blob();
+        if (liveViews[name] !== state) return;
+        const old = img.dataset.blobUrl;
+        const url = URL.createObjectURL(blob);
+        img.src = url;
+        img.dataset.blobUrl = url;
+        if (old) URL.revokeObjectURL(old);
+      }
+    } catch (e) { /* bỏ qua lỗi tạm thời khi poll */ }
+    finally {
+      if (liveViews[name] === state) state.timer = setTimeout(poll, 700);
+    }
+  };
+  poll();
+}
+
+function stopLiveView(name, containerSel, imgSel) {
+  const state = liveViews[name];
+  if (state) { if (state.timer !== null) clearTimeout(state.timer); delete liveViews[name]; }
+  const container = $(containerSel), img = $(imgSel);
+  container.hidden = true;
+  if (img.dataset.blobUrl) { URL.revokeObjectURL(img.dataset.blobUrl); delete img.dataset.blobUrl; }
+  img.removeAttribute("src");
+}
+
 function addMsg(cls, text) {
   if (emptyChat?.isConnected) emptyChat.remove();
   const d = document.createElement("div");
@@ -232,10 +287,12 @@ async function send() {
   const t0 = performance.now();
   try {
     const r = await fetch("/v1/chat/completions", {
-      method: "POST", headers: headers(),
+      method: "POST", headers: headers($("#headedplayground").checked),
       body: JSON.stringify({model: $("#model").value, stream: true,
         messages: [{role: "user", content: prompt}]})});
     if (!r.ok) { reply.className = "msg err"; reply.textContent = (await r.json()).error?.message || r.statusText; return; }
+    const watchId = r.headers.get("X-Chat2api-Watch-Id");
+    if (watchId) startLiveView("playground", "#playgroundliveview", "#playgroundliveimg", watchId);
     const reader = r.body.getReader();
     const dec = new TextDecoder();
     let buf = "";
@@ -255,7 +312,10 @@ async function send() {
       }
     }
   } catch (e) { reply.className = "msg err"; reply.textContent = String(e); }
-  finally { $("#send").disabled = false; }
+  finally {
+    $("#send").disabled = false;
+    stopLiveView("playground", "#playgroundliveview", "#playgroundliveimg");
+  }
   $("#latency").textContent = Math.round(performance.now() - t0) + " ms";
 }
 $("#send").onclick = send;
@@ -273,7 +333,7 @@ async function loadRecipes() {
     if (!r.ok) throw new Error(list.error?.message || r.statusText);
     const tb = $("#recipies tbody");
     tb.innerHTML = "";
-    if (!list.length) tb.innerHTML = '<tr class="empty-row"><td colspan="4">Chưa có recipe. Hãy tích hợp một website mới.</td></tr>';
+    if (!list.length) tb.innerHTML = '<tr class="empty-row"><td colspan="5">Chưa có recipe. Hãy tích hợp một website mới.</td></tr>';
     for (const rec of list) {
       const tr = document.createElement("tr");
       const tdSlug = document.createElement("td");
@@ -285,6 +345,21 @@ async function loadRecipes() {
       state.className = "recipe-state" + (rec.unhealthy ? " unhealthy" : "");
       state.textContent = rec.unhealthy ? "Cần kiểm tra" : "Sẵn sàng";
       tdState.appendChild(state);
+      const tdLogin = document.createElement("td");
+      const isBrowserRecipe = rec.type === "BrowserRecipe";
+      if (isBrowserRecipe) {
+        const badge = document.createElement("span");
+        if (rec.trial) {
+          badge.className = "login-badge trial";
+          badge.textContent = "Dùng thử " + rec.trial.used + "/" + rec.trial.limit;
+        } else {
+          badge.className = "login-badge";
+          badge.textContent = rec.accounts + " account" + (rec.accounts === 1 ? "" : "s");
+        }
+        tdLogin.appendChild(badge);
+      } else {
+        tdLogin.textContent = "-";
+      }
       const tdBtns = document.createElement("td");
       tdBtns.className = "recipe-actions";
       const btnReload = document.createElement("button");
@@ -295,22 +370,80 @@ async function loadRecipes() {
         try { await fetch("/admin/recipes/" + rec.slug + "/reload", {method: "POST", headers: headers()}); await loadRecipes(); await loadModels(); }
         finally { btnReload.disabled = false; }
       };
+      tdBtns.appendChild(btnReload);
+      if (isBrowserRecipe) {
+        const btnAcct = document.createElement("button");
+        btnAcct.className = "button secondary small";
+        btnAcct.textContent = "Thêm account";
+        btnAcct.onclick = () => startAddAccount(rec.slug);
+        tdBtns.appendChild(btnAcct);
+      }
       const btnDel = document.createElement("button");
       btnDel.className = "button danger small";
       btnDel.textContent = "Xóa";
       btnDel.addEventListener("click", () => delRecipe(rec.slug));
-      tdBtns.appendChild(btnReload);
       tdBtns.appendChild(btnDel);
       tr.appendChild(tdSlug);
       tr.appendChild(tdModels);
       tr.appendChild(tdState);
+      tr.appendChild(tdLogin);
       tr.appendChild(tdBtns);
       tb.appendChild(tr);
     }
   } catch (e) {
-    $("#recipies tbody").innerHTML = '<tr class="empty-row"><td colspan="4">Không tải được recipes. Kiểm tra API key và thử lại.</td></tr>';
+    $("#recipies tbody").innerHTML = '<tr class="empty-row"><td colspan="5">Không tải được recipes. Kiểm tra API key và thử lại.</td></tr>';
   }
 }
+
+let accountSlug = null;
+let accountSessionId = null;
+
+function resetAccountFlow() {
+  accountSlug = null;
+  accountSessionId = null;
+  $("#accountflow").hidden = true;
+  $("#accountname").value = "";
+}
+
+async function startAddAccount(slug) {
+  if (accountSessionId) { showToast("Đang có phiên thêm account khác, hãy hoàn tất hoặc hủy trước."); return; }
+  try {
+    const r = await fetch("/admin/recipes/" + slug + "/accounts", {method: "POST", headers: headers()});
+    const data = await r.json();
+    if (!r.ok) { showToast(data.error?.message || r.statusText); return; }
+    accountSlug = slug;
+    accountSessionId = data.session_id;
+    $("#accountflowstatus").textContent = "Chrome đã mở cho " + slug + ". Đăng nhập xong, đặt tên account rồi bấm Lưu.";
+    $("#accountflow").hidden = false;
+    $("#accountname").focus();
+  } catch (e) { showToast("lỗi: " + e); }
+}
+
+$("#accountsave").onclick = async () => {
+  if (!accountSessionId) return;
+  const name = $("#accountname").value.trim();
+  if (!name) { showToast("Nhập tên account."); return; }
+  $("#accountsave").disabled = true;
+  try {
+    const r = await fetch("/admin/recipes/" + accountSlug + "/accounts/" + accountSessionId + "/complete",
+      {method: "POST", headers: headers(), body: JSON.stringify({name})});
+    const data = await r.json();
+    if (!r.ok) { showToast(data.error?.message || r.statusText); return; }
+    showToast("Đã thêm account " + name + " cho " + accountSlug);
+    resetAccountFlow();
+    await loadRecipes();
+  } catch (e) { showToast("lỗi: " + e); }
+  finally { $("#accountsave").disabled = false; }
+};
+
+$("#accountcancel").onclick = async () => {
+  const slug = accountSlug, sessionId = accountSessionId;
+  resetAccountFlow();
+  if (sessionId) {
+    try { await fetch("/admin/recipes/" + slug + "/accounts/" + sessionId + "/cancel",
+      {method: "POST", headers: headers()}); } catch (e) { /* best effort */ }
+  }
+};
 
 async function delRecipe(slug) {
   if (!confirm("Xóa recipe " + slug + "?")) return;
@@ -393,6 +526,7 @@ function startPolling(jobId) {
       terminal = terminalStatuses.includes(j.status);
       if (terminal) {
         stopPolling();
+        stopLiveView("integrate", "#integrateliveview", "#integrateliveimg");
         loadModels();
         loadRecipes();
       }
@@ -434,6 +568,7 @@ async function postJobAction(action) {
       showJobStatus(data);
       if (terminalStatuses.includes(data.status)) {
         stopPolling();
+        stopLiveView("integrate", "#integrateliveview", "#integrateliveimg");
         loadModels();
         loadRecipes();
       }
@@ -463,17 +598,20 @@ $("#integrate").onclick = async () => {
   resetLoginButtons();
   $("#integrate").disabled = true;
   stopPolling();
+  stopLiveView("integrate", "#integrateliveview", "#integrateliveimg");
   $("#loginactions").hidden = true;
   $("#joblog").textContent = "";
   try {
+    const headed = $("#headedmode").checked;
     const r = await fetch("/admin/integrate", {method: "POST", headers: headers(),
-      body: JSON.stringify({url: siteUrl})});
+      body: JSON.stringify({url: siteUrl, headed})});
     if (operation !== operationGeneration) return;
     const data = await r.json();
     if (operation !== operationGeneration) return;
     if (!r.ok) { $("#jobstatus").textContent = data.error?.message || r.statusText; return; }
     $("#jobstatus").textContent = "đang chạy job " + data.job_id + "...";
     resetLoginButtons();
+    if (headed) startLiveView("integrate", "#integrateliveview", "#integrateliveimg", data.job_id);
     startPolling(data.job_id);
   } catch (e) {
     if (operation === operationGeneration) $("#jobstatus").textContent = "lỗi: " + e;

@@ -129,13 +129,13 @@ class LoginSessionManager:
         finally:
             await _finish_cleanup(self._remove_pending(job_id, current_task))
 
-    async def complete(self, job_id: str) -> Path:
+    async def complete(self, job_id: str, filename: str = "state.json") -> Path:
         async with self._lock:
             session = self._sessions.pop(job_id, None)
         if session is None:
             raise LoginSessionError(f"No login session for job {job_id}")
 
-        state_path = session.recipe_dir / "auth" / "state.json"
+        state_path = session.recipe_dir / "auth" / filename
         try:
             state_path.parent.mkdir(parents=True, exist_ok=True)
             await session.context.storage_state(path=state_path)

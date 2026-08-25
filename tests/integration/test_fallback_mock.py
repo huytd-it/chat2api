@@ -69,7 +69,7 @@ async def test_unhealthy_recipe_routes_to_fallback(app_client, monkeypatch):
             from chat2api.providers.base import ModelInfo
             return [ModelInfo(id="broken/m1", slug="broken")]
 
-        async def stream(self, messages, model_id):
+        async def stream(self, messages, model_id, headed=None, watch_id=None):
             raise TimeoutError("recipe 'broken' timeout")
             yield ""
 
@@ -97,6 +97,53 @@ async def test_unhealthy_recipe_routes_to_fallback(app_client, monkeypatch):
         "model": "broken/m1", "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 200
     assert r.json()["choices"][0]["message"]["content"] == "saved by agent"
+
+
+async def test_unhealthy_recipe_routes_to_real_fallback_run(app_client, monkeypatch, site):
+    # Không mock fallback.run: bug "log = [...]" (list, không phải callable) chỉ lộ ra
+    # khi fallback.run() thật sự chạy và gọi log(...) bên trong.
+    from chat2api.providers.browser_recipe import BrowserRecipe
+
+    class FakeRecipeProvider(BrowserRecipe):
+        slug = "broken2"
+
+        def __init__(self):
+            super().__init__({"slug": "broken2", "url": f"{site}/chat.html"},
+                             Path("."), None)
+
+        def models(self):
+            from chat2api.providers.base import ModelInfo
+            return [ModelInfo(id="broken2/m1", slug="broken2")]
+
+        async def stream(self, messages, model_id, headed=None, watch_id=None):
+            raise TimeoutError("recipe 'broken2' timeout")
+            yield ""
+
+    app = app_client._transport.app
+    provider = FakeRecipeProvider()
+    app.state.router.providers["broken2"] = provider
+    for _ in range(3):
+        app.state.router.mark_failure("broken2")
+
+    cfg = app.state.cfg
+    cfg.enable_fallback = True
+
+    async def fake_chat_json(cfg_, system, user, timeout=180):
+        return {"done": True, "answer": "This is the reply."}
+
+    import chat2api.agents.llm as llm_mod
+    from chat2api.agents import fallback as fb
+    monkeypatch.setattr(llm_mod, "configured", lambda cfg_: True)
+    monkeypatch.setattr(fb.llm, "chat_json", fake_chat_json)
+
+    await app.state.pool.start()
+    try:
+        r = await app_client.post("/v1/chat/completions", json={
+            "model": "broken2/m1", "messages": [{"role": "user", "content": "hi"}]})
+    finally:
+        await app.state.pool.aclose()
+    assert r.status_code == 200
+    assert r.json()["choices"][0]["message"]["content"] == "This is the reply."
 
 
 async def test_recipe_error_without_fallback_is_504(app_client):

@@ -11,10 +11,18 @@ export interface ModelInfo {
   ready?: boolean;
 }
 
+export interface TrialStatus {
+  limit: number;
+  used: number;
+}
+
 export interface RecipeInfo {
   slug: string;
   models: string[];
   unhealthy: boolean;
+  type?: string;
+  accounts?: number;
+  trial?: TrialStatus | null;
 }
 
 export interface JobStatus {
@@ -40,9 +48,10 @@ export async function apiBase(): Promise<string> {
   return cachedBase;
 }
 
-function headers(key: string): HeadersInit {
+function headers(key: string, headed = false): HeadersInit {
   const h: Record<string, string> = { "Content-Type": "application/json" };
   if (key) h["Authorization"] = "Bearer " + key;
+  if (headed) h["X-Chat2api-Headed"] = "true";
   return h;
 }
 
@@ -66,18 +75,26 @@ export async function fetchModels(key: string): Promise<ModelInfo[]> {
   return ((data.data ?? []) as ModelInfo[]).filter((m) => m.ready !== false);
 }
 
-/** Streams an SSE chat completion, invoking onDelta for each content chunk. */
+/** Streams an SSE chat completion, invoking onDelta for each content chunk.
+ * `headed` asks the server to run the underlying browser recipe with a
+ * visible Chromium window instead of headless (recipe providers only — the
+ * server ignores it for non-browser providers like Gemini/OpenAI passthrough).
+ * When the server grants a live view, `onWatchId` fires with the id to poll
+ * via `fetchScreenshot` — this works whether or not a native window actually
+ * shows up on the user's machine. */
 export async function streamChat(
   key: string,
   model: string,
   prompt: string,
   onDelta: (text: string) => void,
   signal?: AbortSignal,
+  headed = false,
+  onWatchId?: (watchId: string) => void,
 ): Promise<void> {
   const base = await apiBase();
   const r = await fetch(base + "/v1/chat/completions", {
     method: "POST",
-    headers: headers(key),
+    headers: headers(key, headed),
     signal,
     body: JSON.stringify({
       model,
@@ -89,6 +106,8 @@ export async function streamChat(
     const data = await r.json().catch(() => ({}));
     throw new Error(data?.error?.message || r.statusText);
   }
+  const watchId = r.headers.get("X-Chat2api-Watch-Id");
+  if (watchId && onWatchId) onWatchId(watchId);
   const reader = r.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
@@ -107,6 +126,19 @@ export async function streamChat(
       if (delta) onDelta(delta);
     }
   }
+}
+
+/** Fetches one live-view frame (JPEG) for a watch id from streamChat's
+ * onWatchId or an Integrate job id (job ids double as their own watch id
+ * when the "hiện browser" checkbox was on). Returns null if there's no
+ * active browser page for that id right now (e.g. the request finished). */
+export async function fetchScreenshot(key: string, watchId: string): Promise<Blob | null> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/watch/" + encodeURIComponent(watchId) + "/screenshot", {
+    headers: headers(key),
+  });
+  if (!r.ok) return null;
+  return r.blob();
 }
 
 export async function fetchRecipes(key: string): Promise<RecipeInfo[]> {
@@ -132,12 +164,16 @@ export async function deleteRecipe(key: string, slug: string): Promise<void> {
   await asJson(r);
 }
 
-export async function startIntegration(key: string, url: string): Promise<{ job_id: string }> {
+export async function startIntegration(
+  key: string,
+  url: string,
+  headed = false,
+): Promise<{ job_id: string }> {
   const base = await apiBase();
   const r = await fetch(base + "/admin/integrate", {
     method: "POST",
     headers: headers(key),
-    body: JSON.stringify({ url }),
+    body: JSON.stringify({ url, headed }),
   });
   return asJson(r);
 }
@@ -162,4 +198,37 @@ export async function jobAction(
     headers: headers(key),
   });
   return asJson(r);
+}
+
+/** Opens a Chromium window (on the machine running the chat2api server) for
+ * the given recipe's URL so the user can log in and register a new account. */
+export async function startAccountLogin(key: string, slug: string): Promise<{ session_id: string }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug) + "/accounts", {
+    method: "POST",
+    headers: headers(key),
+  });
+  return asJson(r);
+}
+
+export async function completeAccountLogin(
+  key: string,
+  slug: string,
+  sessionId: string,
+  name: string,
+): Promise<{ ok: true; slug: string; account: string }> {
+  const base = await apiBase();
+  const r = await fetch(
+    base + "/admin/recipes/" + encodeURIComponent(slug) + "/accounts/" + encodeURIComponent(sessionId) + "/complete",
+    { method: "POST", headers: headers(key), body: JSON.stringify({ name }) },
+  );
+  return asJson(r);
+}
+
+export async function cancelAccountLogin(key: string, slug: string, sessionId: string): Promise<void> {
+  const base = await apiBase();
+  await fetch(
+    base + "/admin/recipes/" + encodeURIComponent(slug) + "/accounts/" + encodeURIComponent(sessionId) + "/cancel",
+    { method: "POST", headers: headers(key) },
+  );
 }

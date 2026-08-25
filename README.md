@@ -38,8 +38,25 @@ Rồi bấm **Integrate** trong playground, hoặc:
 
     python -m chat2api integrate https://chat.example.com
 
+Tick ô **"Hiện browser khi test (không headless)"** cạnh nút Bắt đầu để xem
+Chromium thao tác trực tiếp trên trang web song song với app. Cửa sổ
+Chromium có thể không hiện ra tùy máy/session (remote desktop, sandbox...),
+nên khi tick ô này app còn hiện thêm một **live view** — ảnh chụp trực tiếp
+trang đang chạy, tự refresh khoảng 700ms/lần qua
+`GET /admin/watch/{id}/screenshot` — hoạt động cả khi cửa sổ không hiện ra.
+Live view cũng dùng được khi test chat ở tab Playground, không chỉ lúc
+Integrate.
+
 Site cần đăng nhập: chạy `python -m chat2api login <slug>`, đăng nhập tay,
 chạy lại integrate.
+
+Site KHÔNG bắt buộc đăng nhập (chat được ngay ở chế độ ẩn danh) vẫn được
+publish, nhưng chỉ cho dùng thử `ANON_TRIAL_LIMIT` lượt (mặc định 20) —
+hết lượt thì `/v1/chat/completions` trả lỗi `trial_limit_exceeded` (403) cho
+tới khi có tài khoản đăng nhập. Thêm tài khoản bất cứ lúc nào bằng nút
+**Thêm account** ở bảng recipes trong playground (hoặc
+`python -m chat2api login <slug> --account <tên>`); Chrome sẽ mở để đăng
+nhập, sau đó model dùng account đó thay vì giới hạn ẩn danh.
 
 ## Fallback khi recipe hỏng
 
@@ -49,4 +66,5 @@ chạy lại integrate.
 ## Env chính
 
 CHAT2API_KEYS · RECIPES_DIR · AGENT_LLM_* · ENABLE_AGENT_FALLBACK ·
-POOL_MAX_CONTEXTS · BROWSER_ENGINE=playwright|cloak · RECIPE_TIMEOUT_MS · INTEGRATE_MAX_ROUNDS
+POOL_MAX_CONTEXTS · BROWSER_ENGINE=playwright|cloak · RECIPE_TIMEOUT_MS · INTEGRATE_MAX_ROUNDS ·
+ANON_TRIAL_LIMIT (0 = không giới hạn dùng thử ẩn danh)

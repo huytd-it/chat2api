@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { apiKey, currentView, serverStatus } from "../stores";
+  import { apiKey, currentView, headedPlayground, serverStatus } from "../stores";
   import { models, modelsLoading, selectedModel, refreshModels, refreshRecipes } from "../sync";
 
   let keyVisible = $state(false);
@@ -52,6 +52,10 @@
       </div>
       <p class="field-help">Được lưu cục bộ trong trình duyệt này.</p>
     </div>
+    <label class="headed-toggle">
+      <input type="checkbox" bind:checked={$headedPlayground} />
+      Hiện browser khi test (không headless)
+    </label>
   </section>
   <section class="side-section">
     <h2>Server</h2>

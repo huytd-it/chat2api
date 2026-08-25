@@ -51,6 +51,94 @@ models:
         await pool.aclose()
 
 
+async def test_anonymous_publish_gets_trial_limit(site, tmp_path, monkeypatch):
+    from chat2api.config import Config
+
+    recipe_yaml = f"""
+slug: fixturesite
+url: {site}/chat.html
+prompt:
+  input_selector: "#prompt"
+  input_mode: fill
+  submit: "click:#send"
+response:
+  last_message_selector: ".msg"
+  done_signal:
+    type: stable_text
+    quiet_ms: 500
+    timeout_ms: 8000
+models:
+  - id: web
+"""
+
+    async def fake_chat_json(cfg, system, user, timeout=180):
+        return {"recipe_yaml": recipe_yaml}
+
+    import chat2api.agents.llm as llm_mod
+    monkeypatch.setattr(llm_mod, "chat_json", fake_chat_json)
+
+    cfg = Config()
+    cfg.recipes_dir = tmp_path / "recipes"
+    cfg.recipes_dir.mkdir()
+    cfg.integrate_max_rounds = 3
+    cfg.anon_trial_limit = 7
+
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        result = await integrate(f"{site}/chat.html", pool, cfg, lambda m: None)
+        assert result["status"] == "ok"
+        saved = yaml.safe_load(
+            (tmp_path / "recipes" / "fixturesite" / "recipe.yaml").read_text(encoding="utf-8"))
+        assert saved["login"]["anon_trial_limit"] == 7
+    finally:
+        await pool.aclose()
+
+
+async def test_anonymous_publish_skips_trial_limit_when_disabled(site, tmp_path, monkeypatch):
+    from chat2api.config import Config
+
+    recipe_yaml = f"""
+slug: fixturesite2
+url: {site}/chat.html
+prompt:
+  input_selector: "#prompt"
+  input_mode: fill
+  submit: "click:#send"
+response:
+  last_message_selector: ".msg"
+  done_signal:
+    type: stable_text
+    quiet_ms: 500
+    timeout_ms: 8000
+models:
+  - id: web
+"""
+
+    async def fake_chat_json(cfg, system, user, timeout=180):
+        return {"recipe_yaml": recipe_yaml}
+
+    import chat2api.agents.llm as llm_mod
+    monkeypatch.setattr(llm_mod, "chat_json", fake_chat_json)
+
+    cfg = Config()
+    cfg.recipes_dir = tmp_path / "recipes"
+    cfg.recipes_dir.mkdir()
+    cfg.integrate_max_rounds = 3
+    cfg.anon_trial_limit = 0
+
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        result = await integrate(f"{site}/chat.html", pool, cfg, lambda m: None)
+        assert result["status"] == "ok"
+        saved = yaml.safe_load(
+            (tmp_path / "recipes" / "fixturesite2" / "recipe.yaml").read_text(encoding="utf-8"))
+        assert "login" not in saved
+    finally:
+        await pool.aclose()
+
+
 async def test_analyzer_login_required(tmp_path, monkeypatch):
     from chat2api.agents import analyzer
     from chat2api.config import Config
@@ -77,7 +165,7 @@ async def test_analyzer_login_required(tmp_path, monkeypatch):
             return FakeLocator()
 
     class FakePool:
-        async def context_for(self, slug, storage_state=None):
+        async def context_for(self, slug, storage_state=None, headed=False):
             return self
 
         async def new_page(self):
@@ -127,7 +215,7 @@ models:
     class Pool:
         def __init__(self):
             self.dropped = []
-        async def context_for(self, key, storage_state=None):
+        async def context_for(self, key, storage_state=None, headed=False):
             assert key == "job__analyze"
             assert storage_state == staging_state
             return Context()
@@ -137,12 +225,12 @@ models:
     observed = {}
 
     class FakeBrowserRecipe:
-        def __init__(self, recipe, base_dir, pool):
+        def __init__(self, recipe, base_dir, pool, headed=False):
             observed["slug"] = recipe["slug"]
             observed["base_dir"] = base_dir
             observed["state"] = (base_dir / recipe["login"]["storage_state"]).read_text()
             assert not final_dir.exists()
-        async def stream(self, messages, model_id):
+        async def stream(self, messages, model_id, **kwargs):
             yield "OK"
 
     async def no_login(page): return False
@@ -193,12 +281,12 @@ async def test_failed_authenticated_trial_leaves_final_bytes_unchanged(tmp_path,
         async def close(self): ...
     class Pool:
         def __init__(self): self.dropped = []
-        async def context_for(self, *args): return self
+        async def context_for(self, *args, **kwargs): return self
         async def new_page(self): return Page()
         async def drop(self, key): self.dropped.append(key)
     class FailingRecipe:
-        def __init__(self, *args): ...
-        async def stream(self, *args):
+        def __init__(self, *args, **kwargs): ...
+        async def stream(self, *args, **kwargs):
             if False:
                 yield None
             raise RuntimeError("trial failed")
@@ -245,15 +333,15 @@ async def test_concurrent_authenticated_publication_separates_hosts_and_state(tm
         async def new_page(self): return Page(self.url)
     class Pool:
         def __init__(self): self.dropped = []
-        async def context_for(self, key, storage_state=None):
+        async def context_for(self, key, storage_state=None, headed=False):
             host = "foo.com" if "job-a" in key else "foo.org"
             return Context(f"https://{host}/chat")
         async def drop(self, key): self.dropped.append(key)
     class Recipe:
-        def __init__(self, recipe, base_dir, pool):
+        def __init__(self, recipe, base_dir, pool, headed=False):
             trial_slugs.add(recipe["slug"])
             self.marker = (base_dir / recipe["login"]["storage_state"]).read_text()
-        async def stream(self, *args):
+        async def stream(self, *args, **kwargs):
             await barrier.wait()
             yield "OK"
 

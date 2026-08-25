@@ -27,6 +27,10 @@ class BrowserPool:
         self._lock = asyncio.Lock()
         self._pw = None
         self._browser = None
+        # Browser headed (cửa sổ hiện ra) dùng khi test recipe trong lúc
+        # Integrate, để xem trực quan trang web bên cạnh app — chỉ khởi
+        # động khi có context nào đó yêu cầu headed=True.
+        self._browser_headed = None
 
     @property
     def size(self) -> int:
@@ -44,7 +48,8 @@ class BrowserPool:
         self._pw = await async_playwright().start()
         self._browser = await self._pw.chromium.launch(headless=True)
 
-    async def context_for(self, slug: str, storage_state: Path | None = None):
+    async def context_for(self, slug: str, storage_state: Path | None = None,
+                          headed: bool = False):
         if slug in self._contexts:
             self._contexts.move_to_end(slug)
             return self._contexts[slug]
@@ -63,11 +68,19 @@ class BrowserPool:
             if self.engine == "cloak":
                 from cloakbrowser import launch_context_async
 
-                ctx = await launch_context_async(headless=True, storage_state=state)
+                ctx = await launch_context_async(headless=not headed, storage_state=state)
             else:
-                ctx = await self._browser.new_context(storage_state=state)
+                browser = await self._browser_for(headed)
+                ctx = await browser.new_context(storage_state=state)
             self._contexts[slug] = ctx
             return ctx
+
+    async def _browser_for(self, headed: bool):
+        if not headed:
+            return self._browser
+        if self._browser_headed is None:
+            self._browser_headed = await self._pw.chromium.launch(headless=False)
+        return self._browser_headed
 
     async def drop(self, slug: str) -> None:
         async with self._lock:
@@ -91,6 +104,11 @@ class BrowserPool:
         if self._browser:
             try:
                 await self._browser.close()
+            except Exception:
+                pass
+        if self._browser_headed:
+            try:
+                await self._browser_headed.close()
             except Exception:
                 pass
         if self._pw:

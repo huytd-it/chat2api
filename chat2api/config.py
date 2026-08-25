@@ -22,3 +22,6 @@ class Config:
         self.browser_engine = _env("BROWSER_ENGINE", "playwright")
         self.recipe_timeout_ms = int(_env("RECIPE_TIMEOUT_MS", "120000"))
         self.integrate_max_rounds = int(_env("INTEGRATE_MAX_ROUNDS", "5"))
+        # Site không yêu cầu đăng nhập vẫn được publish, nhưng chỉ cho dùng thử
+        # giới hạn số lượt trước khi bắt buộc thêm tài khoản (0 = không giới hạn).
+        self.anon_trial_limit = int(_env("ANON_TRIAL_LIMIT", "20"))

@@ -1,10 +1,10 @@
 url: https://chat.qwen.ai/
 prompt:
-  input_selector: textarea[placeholder="Ask Qwen"]
+  input_selector: textarea[placeholder='Ask Qwen']
   input_mode: type
   submit: Enter
 response:
-  last_message_selector: .qwen-markdown, .markdown-body
+  last_message_selector: .qwen-markdown, [class*='qwen-markdown'], .markdown-body
   done_signal:
     type: stable_text
     quiet_ms: 3000
@@ -12,3 +12,7 @@ response:
 models:
 - id: qwen-web
 slug: chat
+login:
+  accounts:
+  - name: codex1
+    storage_state: auth/codex1.json

@@ -100,7 +100,8 @@ async def clear_jobs():
 async def test_login_required_complete_resumes_to_ok(monkeypatch, tmp_path):
     calls = []
 
-    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None):
+    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None,
+                             headed=False, watch_id=None):
         calls.append(storage_state)
         if len(calls) == 1:
             return {"status": "login_required", "slug": "example"}
@@ -130,12 +131,37 @@ async def test_login_required_complete_resumes_to_ok(monkeypatch, tmp_path):
     assert not (cfg.recipes_dir / ".login" / job_id).exists()
 
 
+async def test_headed_flag_carries_through_login_resume(monkeypatch, tmp_path):
+    headed_calls = []
+
+    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None,
+                             headed=False, watch_id=None):
+        headed_calls.append(headed)
+        if storage_state is None:
+            return {"status": "login_required", "slug": "example"}
+        return {"status": "ok", "slug": "example", "model_id": "example/web"}
+
+    monkeypatch.setattr(jobs, "integrate", fake_integrate)
+    cfg = SimpleNamespace(recipes_dir=tmp_path / "recipes")
+    manager = FakeLoginManager(cfg.recipes_dir / "example" / "auth" / "state.json")
+    pool, router = FakePool(), FakeRouter()
+
+    job_id = jobs.start_integrate("https://example.test", cfg, pool, router, manager, headed=True)
+    await wait_for_status(job_id, "waiting_login")
+
+    await jobs.complete_login(job_id, cfg, pool, router, manager)
+    await wait_for_status(job_id, "ok")
+
+    assert headed_calls == [True, True]
+
+
 async def test_concurrent_same_slug_jobs_use_isolated_analyzer_and_login_dirs(monkeypatch, tmp_path):
     entered = asyncio.Event()
     release = asyncio.Event()
     calls = []
 
-    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None):
+    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None,
+                             headed=False, watch_id=None):
         calls.append(analyze_key)
         if len(calls) == 2:
             entered.set()
@@ -163,7 +189,8 @@ async def test_concurrent_same_slug_jobs_use_isolated_analyzer_and_login_dirs(mo
 
 
 async def test_router_reload_failure_never_publishes_ok(monkeypatch, tmp_path):
-    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None):
+    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None,
+                             headed=False, watch_id=None):
         return {"status": "ok", "slug": "example", "model_id": "example/web"}
 
     class FailingRouter:
@@ -185,7 +212,8 @@ async def test_router_reload_failure_never_publishes_ok(monkeypatch, tmp_path):
 async def test_duplicate_complete_cannot_save_twice(monkeypatch, tmp_path):
     release = asyncio.Event()
 
-    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None):
+    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None,
+                             headed=False, watch_id=None):
         return {"status": "login_required", "slug": "example"}
 
     class BlockingManager(FakeLoginManager):
@@ -213,7 +241,8 @@ async def test_cancel_as_analyzer_returns_is_terminal_and_does_not_reload(monkey
     analyzer_returned = asyncio.Event()
     release_analyzer = asyncio.Event()
 
-    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None):
+    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None,
+                             headed=False, watch_id=None):
         analyzer_returned.set()
         try:
             await release_analyzer.wait()
@@ -273,7 +302,8 @@ async def test_cancel_while_saving_does_not_resume(monkeypatch, tmp_path):
     release = asyncio.Event()
     calls = 0
 
-    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None):
+    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None,
+                             headed=False, watch_id=None):
         nonlocal calls
         calls += 1
         return {"status": "login_required", "slug": "example"}
@@ -309,7 +339,7 @@ async def test_cancel_caller_cancellation_waits_for_cleanup(monkeypatch, tmp_pat
     release_cancel = asyncio.Event()
 
     async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None,
-                             publish_lock=None):
+                             publish_lock=None, headed=False, watch_id=None):
         return {"status": "login_required", "slug": "example"}
 
     class BlockingManager(FakeLoginManager):
@@ -346,7 +376,7 @@ async def test_complete_caller_cancellation_finishes_continuation(monkeypatch, t
     release_complete = asyncio.Event()
 
     async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None,
-                             publish_lock=None):
+                             publish_lock=None, headed=False, watch_id=None):
         if storage_state is None:
             return {"status": "login_required", "slug": "example"}
         return {"status": "failed", "slug": "example"}
@@ -378,7 +408,8 @@ async def test_complete_caller_cancellation_finishes_continuation(monkeypatch, t
 
 
 async def test_cancel_waiting_login(monkeypatch, tmp_path):
-    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None):
+    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None,
+                             headed=False, watch_id=None):
         return {"status": "login_required", "slug": "example"}
 
     monkeypatch.setattr(jobs, "integrate", fake_integrate)
@@ -397,7 +428,8 @@ async def test_login_timeout_claims_job_before_session_cleanup(monkeypatch, tmp_
     cancel_started = asyncio.Event()
     release_cancel = asyncio.Event()
 
-    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None):
+    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None,
+                             headed=False, watch_id=None):
         return {"status": "login_required", "slug": "example"}
 
     class BlockingCancelManager(FakeLoginManager):
@@ -429,7 +461,8 @@ async def test_login_timeout_claims_job_before_session_cleanup(monkeypatch, tmp_
 
 
 async def test_login_open_failure_sets_failed_without_secret(monkeypatch, tmp_path):
-    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None):
+    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None,
+                             headed=False, watch_id=None):
         return {"status": "login_required", "slug": "example"}
 
     monkeypatch.setattr(jobs, "integrate", fake_integrate)
@@ -446,7 +479,8 @@ async def test_login_open_failure_sets_failed_without_secret(monkeypatch, tmp_pa
 
 
 async def test_login_save_failure_is_terminal_and_sanitized(monkeypatch, tmp_path):
-    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None):
+    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None,
+                             headed=False, watch_id=None):
         return {"status": "login_required", "slug": "example"}
 
     monkeypatch.setattr(jobs, "integrate", fake_integrate)
@@ -467,7 +501,8 @@ async def test_login_save_failure_is_terminal_and_sanitized(monkeypatch, tmp_pat
 
 
 async def test_pool_drop_failure_is_sanitized(monkeypatch, tmp_path):
-    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None):
+    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None,
+                             headed=False, watch_id=None):
         return {"status": "login_required", "slug": "example"}
 
     monkeypatch.setattr(jobs, "integrate", fake_integrate)
@@ -510,7 +545,8 @@ async def test_shutdown_cancels_jobs_and_waiting_sessions(tmp_path):
 
 
 async def test_fails_after_two_incomplete_login_attempts(monkeypatch, tmp_path):
-    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None):
+    async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None, publish_lock=None,
+                             headed=False, watch_id=None):
         return {"status": "login_required", "slug": "example"}
 
     monkeypatch.setattr(jobs, "integrate", fake_integrate)

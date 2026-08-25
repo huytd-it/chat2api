@@ -1,5 +1,6 @@
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 
@@ -63,6 +64,30 @@ fn resolve_port() -> u16 {
     pick_free_port()
 }
 
+/// `chat2api.config.Config` loads `.env` and resolves the default `recipes/`
+/// path relative to the *process's current working directory*, not its own
+/// package location. Left unset, a spawned child just inherits this app's own
+/// cwd (`desktop/src-tauri` under `cargo run`), so `.env` silently fails to
+/// load and `recipes/` resolves to a nonexistent folder next to the Rust
+/// crate -- the server comes up with zero configured keys/models and no
+/// obvious error. `CARGO_MANIFEST_DIR` is baked in at compile time as this
+/// crate's own path, so walking up two levels reliably reaches the repo root
+/// regardless of what directory the app happens to be launched from.
+/// `CHAT2API_WORKDIR` overrides it, e.g. for a future bundled install where
+/// there's no repo checkout at all.
+fn resolve_workdir() -> PathBuf {
+    if let Ok(dir) = std::env::var("CHAT2API_WORKDIR") {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// Spawns the Python chat2api server as a background process and streams its
 /// stdout/stderr to the frontend as `server-log` events. The process handle
 /// is stored in managed state so it can be killed when the window closes.
@@ -83,7 +108,11 @@ fn spawn_server(app: &AppHandle) {
     // actually open. The desktop app only ever talks to it over loopback, so
     // bind there explicitly: it's both the address that's actually usable and
     // avoids exposing the API to the local network for no reason.
-    eprintln!("[chat2api sidecar] spawning: {python} -m chat2api serve --host 127.0.0.1 --port {port}");
+    let workdir = resolve_workdir();
+    eprintln!(
+        "[chat2api sidecar] spawning: {python} -m chat2api serve --host 127.0.0.1 --port {port} (cwd: {})",
+        workdir.display()
+    );
     let mut cmd = Command::new(&python);
     cmd.args([
         "-m",
@@ -94,6 +123,7 @@ fn spawn_server(app: &AppHandle) {
         "--port",
         &port.to_string(),
     ])
+    .current_dir(&workdir)
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
 

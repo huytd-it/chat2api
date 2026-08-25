@@ -3,13 +3,18 @@
   import { startIntegration, fetchJob, jobAction, type JobStatus } from "../api";
   import { refreshModels, refreshRecipes } from "../sync";
   import RecipesTable from "./RecipesTable.svelte";
+  import LiveView from "./LiveView.svelte";
 
   let siteUrl = $state("");
+  let headedMode = $state(false);
   let integrateDisabled = $state(false);
   let jobStatusText = $state("");
   let jobLog = $state("");
   let loginActionsVisible = $state(false);
   let loginButtonsDisabled = $state(false);
+  // Watch id doubles as the job id — the server registers the analyzer's
+  // page under the job id itself whenever "hiện browser" was checked.
+  let watchId = $state<string | null>(null);
 
   const terminalStatuses = ["ok", "failed", "cancelled", "login_timeout"];
 
@@ -75,6 +80,7 @@
         terminal = terminalStatuses.includes(j.status);
         if (terminal) {
           stopPolling();
+          watchId = null;
           refreshModels();
           refreshRecipes();
         }
@@ -111,6 +117,7 @@
         showJobStatus(data);
         if (terminalStatuses.includes(data.status)) {
           stopPolling();
+          watchId = null;
           refreshModels();
           refreshRecipes();
         }
@@ -146,13 +153,15 @@
     resetLoginButtons();
     integrateDisabled = true;
     stopPolling();
+    watchId = null;
     loginActionsVisible = false;
     jobLog = "";
     try {
-      const data = await startIntegration($apiKey, url);
+      const data = await startIntegration($apiKey, url, headedMode);
       if (operation !== operationGeneration) return;
       jobStatusText = "đang chạy job " + data.job_id + "...";
       resetLoginButtons();
+      if (headedMode) watchId = data.job_id;
       startPolling(data.job_id);
     } catch (e) {
       if (operation === operationGeneration) jobStatusText = "lỗi: " + e;
@@ -181,6 +190,11 @@
         />
         <button class="button" disabled={integrateDisabled} onclick={startIntegrationJob}>Bắt đầu</button>
       </div>
+      <label class="headed-toggle">
+        <input type="checkbox" bind:checked={headedMode} />
+        Hiện browser khi test (không headless)
+      </label>
+      <LiveView {watchId} />
       <div class="status-box" role="status" aria-live="polite">{#if jobStatusText}{jobStatusText}{/if}</div>
       {#if loginActionsVisible}
         <span class="login-actions">

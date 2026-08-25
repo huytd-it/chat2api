@@ -17,3 +17,8 @@ class ChatRequest(BaseModel):
 
 class IntegrateRequest(BaseModel):
     url: str
+    headed: bool = False
+
+
+class AddAccountRequest(BaseModel):
+    name: str

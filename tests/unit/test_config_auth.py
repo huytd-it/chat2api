@@ -8,21 +8,25 @@ from chat2api.errors import OpenAIError
 
 
 def test_config_defaults(monkeypatch):
-    for k in ("CHAT2API_KEYS", "RECIPES_DIR", "AGENT_LLM_BASE_URL", "ENABLE_AGENT_FALLBACK"):
+    for k in ("CHAT2API_KEYS", "RECIPES_DIR", "AGENT_LLM_BASE_URL", "ENABLE_AGENT_FALLBACK",
+             "ANON_TRIAL_LIMIT"):
         monkeypatch.delenv(k, raising=False)
     cfg = Config()
     assert cfg.api_keys == []
     assert cfg.browser_engine == "playwright"
     assert cfg.recipe_timeout_ms == 120000
     assert cfg.enable_fallback is False
+    assert cfg.anon_trial_limit == 20
 
 
 def test_config_parse(monkeypatch):
     monkeypatch.setenv("CHAT2API_KEYS", " a , b,, ")
     monkeypatch.setenv("ENABLE_AGENT_FALLBACK", "TRUE")
+    monkeypatch.setenv("ANON_TRIAL_LIMIT", "5")
     cfg = Config()
     assert cfg.api_keys == ["a", "b"]
     assert cfg.enable_fallback is True
+    assert cfg.anon_trial_limit == 5
 
 
 def test_config_loads_dotenv_without_overriding_process_env(monkeypatch, tmp_path):

@@ -5,13 +5,14 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 
-from . import auth, errors  # noqa: F401  (import auth để đăng ký dependency)
+from . import auth, errors, live_view  # noqa: F401  (import auth để đăng ký dependency)
 from .config import Config
 from .errors import OpenAIError
+from .providers.browser_recipe import TrialLimitExceeded
 from .router import ModelNotFound, Router
 from .schemas import ChatRequest
 
@@ -92,7 +93,7 @@ def create_app(cfg: Config) -> FastAPI:
         return {"object": "list", "data": data}
 
     @v1.post("/chat/completions")
-    async def chat(body: ChatRequest, request: Request):
+    async def chat(body: ChatRequest, request: Request, response: Response):
         cfg_ = request.app.state.cfg
         rt = request.app.state.router
         try:
@@ -101,9 +102,18 @@ def create_app(cfg: Config) -> FastAPI:
             raise OpenAIError(404, "model_not_found", f"The model '{body.model}' does not exist")
         msgs = body.as_list()
         cid = "chatcmpl-" + uuid.uuid4().hex[:29]
+        from .providers.browser_recipe import BrowserRecipe as BR
+
+        # Chỉ dùng cho playground/desktop test thủ công: bật browser hiện lên
+        # (không headless) để xem trực tiếp recipe chạy, thay vì đợi kết quả mù.
+        # Dù cửa sổ Chromium có thực sự hiện ra hay không (tùy máy), watch_id
+        # luôn cho phép xem live view qua /admin/watch/{id}/screenshot.
+        headed = request.headers.get("x-chat2api-headed", "").strip().lower() == "true"
+        watch_id = uuid.uuid4().hex[:12] if (headed and isinstance(provider, BR)) else None
+        if watch_id:
+            response.headers["X-Chat2api-Watch-Id"] = watch_id
 
         def fallback_ok(reason: str) -> bool:
-            from .providers.browser_recipe import BrowserRecipe as BR
             from .agents import llm
 
             return (isinstance(provider, BR) and cfg_.enable_fallback
@@ -112,8 +122,9 @@ def create_app(cfg: Config) -> FastAPI:
         async def agent_stream():
             from .agents import fallback
 
-            log = [f"[fallback:{provider.slug}] recipe lỗi, agent chạy trực tiếp"]
-            async for d in fallback.run(provider.url, msgs, request.app.state.pool, cfg_, log):
+            log_lines = [f"[fallback:{provider.slug}] recipe lỗi, agent chạy trực tiếp"]
+            async for d in fallback.run(provider.url, msgs, request.app.state.pool, cfg_,
+                                        log_lines.append):
                 yield d
 
         async def upstream():
@@ -123,10 +134,14 @@ def create_app(cfg: Config) -> FastAPI:
                     yield d
                 return
             try:
-                async for d in provider.stream(msgs, local):
+                stream_kwargs = ({"headed": headed, "watch_id": watch_id}
+                                 if isinstance(provider, BR) else {})
+                async for d in provider.stream(msgs, local, **stream_kwargs):
                     sent["n"] += 1
                     yield d
                 rt.mark_success(provider.slug)
+            except TrialLimitExceeded as e:
+                raise OpenAIError(403, "trial_limit_exceeded", str(e))
             except TimeoutError:
                 rt.mark_failure(provider.slug)
                 if sent["n"] > 0:
@@ -158,7 +173,8 @@ def create_app(cfg: Config) -> FastAPI:
                     yield _sse(cid, body.model, d)
                 yield "data: [DONE]\n\n"
 
-            return StreamingResponse(gen(), media_type="text/event-stream")
+            sse_headers = {"X-Chat2api-Watch-Id": watch_id} if watch_id else None
+            return StreamingResponse(gen(), media_type="text/event-stream", headers=sse_headers)
 
         parts = []
         try:
@@ -188,7 +204,7 @@ def register_admin(app: FastAPI, admin) -> None:
 
     from .agents import llm
     from . import jobs
-    from .schemas import IntegrateRequest
+    from .schemas import AddAccountRequest, IntegrateRequest
 
     @admin.post("/integrate")
     async def integrate(body: IntegrateRequest, request: Request):
@@ -202,6 +218,7 @@ def register_admin(app: FastAPI, admin) -> None:
             router=request.app.state.router,
             login_manager=request.app.state.login_manager,
             publish_lock=request.app.state.recipe_publish_lock,
+            headed=body.headed,
         )
         return {"job_id": job_id}
 
@@ -256,15 +273,32 @@ def register_admin(app: FastAPI, admin) -> None:
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
+    @admin.get("/watch/{watch_id}/screenshot")
+    async def watch_screenshot(watch_id: str):
+        # Live view: chụp ảnh page Playwright đang chạy (headless hay headed đều
+        # được), để client poll thay vì phụ thuộc cửa sổ Chromium có hiện ra hay
+        # không trên máy người dùng.
+        data = await live_view.screenshot(watch_id)
+        if data is None:
+            raise OpenAIError(404, "not_found", "Không có browser nào đang chạy cho watch_id này")
+        return Response(content=data, media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
+
     @admin.get("/recipes")
     async def recipes(request: Request):
+        from .providers.browser_recipe import BrowserRecipe as BR
+
         rt = request.app.state.router
         out = []
         for slug, provider in sorted(rt.providers.items()):
-            out.append({"slug": slug,
-                        "models": [m.id.split("/", 1)[1] for m in provider.models()],
-                        "unhealthy": rt.is_unhealthy(slug),
-                        "type": type(provider).__name__})
+            entry = {"slug": slug,
+                    "models": [m.id.split("/", 1)[1] for m in provider.models()],
+                    "unhealthy": rt.is_unhealthy(slug),
+                    "type": type(provider).__name__}
+            if isinstance(provider, BR):
+                entry["accounts"] = provider.account_count
+                entry["trial"] = provider.trial_status
+            out.append(entry)
         return out
 
     @admin.post("/recipes/{slug}/reload")
@@ -280,6 +314,61 @@ def register_admin(app: FastAPI, admin) -> None:
         if target.exists():
             shutil.rmtree(target)
         request.app.state.router.reload()
+        return {"ok": True}
+
+    def _browser_recipe_or_404(request: Request, slug: str):
+        from .providers.browser_recipe import BrowserRecipe as BR
+
+        provider = request.app.state.router.providers.get(slug)
+        if not isinstance(provider, BR):
+            raise OpenAIError(404, "not_found", "Recipe không tồn tại")
+        return provider
+
+    @admin.post("/recipes/{slug}/accounts")
+    async def start_account_login(slug: str, request: Request):
+        provider = _browser_recipe_or_404(request, slug)
+        cfg = request.app.state.cfg
+        session_id = f"acct-{uuid.uuid4().hex[:10]}"
+        try:
+            await request.app.state.login_manager.start(
+                session_id, slug, provider.url, cfg.recipes_dir / slug)
+        except Exception:
+            raise OpenAIError(500, "login_open_failed",
+                              "Không thể mở browser đăng nhập trên máy chạy chat2api.")
+        return {"session_id": session_id}
+
+    @admin.post("/recipes/{slug}/accounts/{session_id}/complete")
+    async def complete_account_login(slug: str, session_id: str, request: Request,
+                                     body: AddAccountRequest):
+        from . import __main__ as cli
+
+        _browser_recipe_or_404(request, slug)
+        name = (body.name or "").strip()
+        if not re.fullmatch(r"[a-z0-9-]+", name):
+            raise OpenAIError(400, "invalid_account_name",
+                              "Tên account chỉ được gồm chữ thường, số và dấu -")
+        cfg = request.app.state.cfg
+        recipe_path = cfg.recipes_dir / slug / "recipe.yaml"
+        if not recipe_path.exists():
+            raise OpenAIError(404, "not_found", "Recipe không tồn tại")
+        try:
+            await request.app.state.login_manager.complete(session_id, filename=f"{name}.json")
+        except Exception:
+            raise OpenAIError(500, "login_save_failed", "Không thể lưu session đăng nhập")
+        async with request.app.state.recipe_publish_lock:
+            cli.add_storage_state(recipe_path, name, f"auth/{name}.json")
+            # Có account thật rồi thì bỏ giới hạn dùng thử ẩn danh (không còn dùng tới).
+            import yaml
+            data = yaml.safe_load(recipe_path.read_text(encoding="utf-8")) or {}
+            if isinstance(data.get("login"), dict) and data["login"].pop("anon_trial_limit", None) is not None:
+                recipe_path.write_text(
+                    yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            request.app.state.router.reload()
+        return {"ok": True, "slug": slug, "account": name}
+
+    @admin.post("/recipes/{slug}/accounts/{session_id}/cancel")
+    async def cancel_account_login(slug: str, session_id: str, request: Request):
+        await request.app.state.login_manager.cancel(session_id)
         return {"ok": True}
 
 

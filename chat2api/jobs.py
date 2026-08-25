@@ -136,7 +136,8 @@ async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, logi
             result = await integrate(
                 job["url"], pool, cfg, job["log"].append,
                 storage_state=storage_state, analyze_key=analyze_key,
-                publish_lock=job["publish_lock"]
+                publish_lock=job["publish_lock"], headed=job.get("headed", False),
+                watch_id=job["id"] if job.get("headed") else None,
             )
         finally:
             try:
@@ -188,7 +189,7 @@ async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, logi
 
 
 def start_integrate(url: str, cfg, pool, router=None, login_manager=None,
-                    publish_lock=None) -> str:
+                    publish_lock=None, headed: bool = False) -> str:
     job_id = uuid.uuid4().hex[:12]
     job = {
         "id": job_id,
@@ -204,6 +205,7 @@ def start_integrate(url: str, cfg, pool, router=None, login_manager=None,
         "login_manager": login_manager,
         "publish_lock": publish_lock or asyncio.Lock(),
         "staging_dir": cfg.recipes_dir / ".login" / job_id,
+        "headed": headed,
         "lock": asyncio.Lock(),
     }
     JOBS[job_id] = job

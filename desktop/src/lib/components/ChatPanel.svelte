@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { apiKey } from "../stores";
+  import { apiKey, headedPlayground } from "../stores";
   import { selectedModel } from "../sync";
   import { streamChat } from "../api";
+  import LiveView from "./LiveView.svelte";
 
   interface Msg {
     role: "user" | "assistant" | "err";
@@ -12,6 +13,7 @@
   let prompt = $state("");
   let sending = $state(false);
   let latency = $state("");
+  let watchId = $state<string | null>(null);
   let chatEl: HTMLDivElement | undefined;
 
   const suggestions = [
@@ -29,20 +31,24 @@
     prompt = "";
     sending = true;
     messages.push({ role: "user", text });
-    const reply: Msg = { role: "assistant", text: "" };
-    messages.push(reply);
+    messages.push({ role: "assistant", text: "" });
+    // Svelte 5 $state arrays deep-proxy their elements on push; mutating the
+    // plain object we just pushed wouldn't be tracked, so read back the
+    // reactive element itself and mutate that instead.
+    const reply = messages[messages.length - 1];
     scrollToEnd();
     const t0 = performance.now();
     try {
       await streamChat($apiKey, $selectedModel, text, (delta) => {
         reply.text += delta;
         scrollToEnd();
-      });
+      }, undefined, $headedPlayground, (id) => { watchId = id; });
     } catch (e) {
       reply.role = "err";
       reply.text = String((e as Error).message ?? e);
     } finally {
       sending = false;
+      watchId = null;
       latency = Math.round(performance.now() - t0) + " ms";
     }
   }
@@ -72,6 +78,8 @@
     </div>
     <span class="latency" aria-live="polite">{latency}</span>
   </div>
+
+  <LiveView {watchId} />
 
   <div class="chat" aria-live="polite" bind:this={chatEl}>
     {#if messages.length === 0}
