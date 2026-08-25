@@ -8,6 +8,8 @@ from typing import AsyncIterator
 from ..prompt import flatten_messages
 from .base import ModelInfo, Provider
 
+LOGIN_STRATEGIES = {"round_robin", "fill_first"}
+
 
 def validate_recipe(d: dict) -> list[str]:
     errs: list[str] = []
@@ -31,7 +33,56 @@ def validate_recipe(d: dict) -> list[str]:
         need("response.done_signal.selector", bool(ds.get("selector")))
     models = d.get("models")
     need("models", isinstance(models, list) and len(models) > 0 and all(m.get("id") for m in models))
+
+    login = d.get("login") or {}
+    accounts = login.get("accounts")
+    if accounts is not None:
+        if not isinstance(accounts, list) or not accounts:
+            errs.append("invalid field: login.accounts (phải là list không rỗng)")
+        else:
+            names = [a.get("name") for a in accounts if isinstance(a, dict)]
+            for i, acc in enumerate(accounts):
+                if not isinstance(acc, dict) or not acc.get("name") or not acc.get("storage_state"):
+                    errs.append(f"invalid field: login.accounts[{i}] (cần name + storage_state)")
+            if len(names) != len(set(names)):
+                errs.append("invalid field: login.accounts (name bị trùng)")
+        if login.get("strategy", "round_robin") not in LOGIN_STRATEGIES:
+            errs.append("invalid field: login.strategy (round_robin | fill_first)")
+        quota = login.get("quota", 1)
+        if not isinstance(quota, int) or quota < 1:
+            errs.append("invalid field: login.quota (số nguyên dương)")
     return errs
+
+
+class _AccountRotator:
+    """Chọn account đăng nhập cho mỗi request khi recipe có nhiều accounts.
+
+    round_robin: xoay vòng account theo thứ tự, mỗi request 1 account khác.
+    fill_first: dùng hết quota của account hiện tại rồi mới chuyển account kế tiếp.
+    """
+
+    def __init__(self, accounts: list[tuple[str, Path | None]], strategy: str, quota: int):
+        self._accounts = accounts
+        self._strategy = strategy
+        self._quota = max(1, quota)
+        self._lock = asyncio.Lock()
+        self._rr_index = 0
+        self._fill_index = 0
+        self._fill_used = 0
+
+    async def next(self) -> tuple[str, Path | None]:
+        if len(self._accounts) <= 1:
+            return self._accounts[0]
+        async with self._lock:
+            if self._strategy == "fill_first":
+                if self._fill_used >= self._quota:
+                    self._fill_index = (self._fill_index + 1) % len(self._accounts)
+                    self._fill_used = 0
+                self._fill_used += 1
+                return self._accounts[self._fill_index]
+            account = self._accounts[self._rr_index]
+            self._rr_index = (self._rr_index + 1) % len(self._accounts)
+            return account
 
 
 class BrowserRecipe(Provider):
@@ -43,6 +94,23 @@ class BrowserRecipe(Provider):
         self.prompt_cfg = recipe.get("prompt", {})
         self.response_cfg = recipe.get("response", {})
         self.ds = self.response_cfg.get("done_signal", {})
+        login_cfg = recipe.get("login") or {}
+        self._accounts = self._resolve_accounts(login_cfg, base_dir)
+        self._rotator = _AccountRotator(
+            self._accounts,
+            login_cfg.get("strategy", "round_robin"),
+            int(login_cfg.get("quota", 50)),
+        )
+
+    @staticmethod
+    def _resolve_accounts(login_cfg: dict, base_dir: Path) -> list[tuple[str, Path | None]]:
+        accounts = login_cfg.get("accounts")
+        if accounts:
+            return [(a["name"], base_dir / a["storage_state"]) for a in accounts]
+        state = login_cfg.get("storage_state")
+        if state:
+            return [("default", base_dir / state)]
+        return [("__anon__", None)]
 
     @property
     def url(self) -> str:
@@ -50,10 +118,6 @@ class BrowserRecipe(Provider):
 
     def models(self) -> list[ModelInfo]:
         return [ModelInfo(id=f"{self.slug}/{m['id']}", slug=self.slug) for m in self._recipe["models"]]
-
-    def _storage_state(self) -> Path | None:
-        st = (self._recipe.get("login") or {}).get("storage_state")
-        return self.base_dir / st if st else None
 
     async def _reply_text(self, page) -> str:
         sel = self.response_cfg["last_message_selector"]
@@ -65,7 +129,9 @@ class BrowserRecipe(Provider):
 
     async def stream(self, messages: list[dict], model_id: str) -> AsyncIterator[str]:
         prompt = flatten_messages(messages)
-        ctx = await self.pool.context_for(self.slug, self._storage_state())
+        account_name, storage_state = await self._rotator.next()
+        ctx_key = self.slug if len(self._accounts) <= 1 else f"{self.slug}::{account_name}"
+        ctx = await self.pool.context_for(ctx_key, storage_state)
         page = await ctx.new_page()
         timeout_ms = int(self.ds.get("timeout_ms", 120000))
         deadline = time.monotonic() + timeout_ms / 1000

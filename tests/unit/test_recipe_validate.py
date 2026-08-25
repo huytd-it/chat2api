@@ -30,3 +30,45 @@ def test_invalid_slug_charset():
     assert any("slug" in e for e in validate_recipe(d))
     d2 = {**MINIMAL, "slug": "Copilot Web"}
     assert any("slug" in e for e in validate_recipe(d2))
+
+
+def test_multi_account_login_valid():
+    d = {**MINIMAL, "login": {
+        "strategy": "fill_first",
+        "quota": 20,
+        "accounts": [
+            {"name": "a1", "storage_state": "auth/a1/state.json"},
+            {"name": "a2", "storage_state": "auth/a2/state.json"},
+        ],
+    }}
+    assert validate_recipe(d) == []
+
+
+def test_multi_account_login_rejects_duplicate_names():
+    d = {**MINIMAL, "login": {"accounts": [
+        {"name": "a1", "storage_state": "x"},
+        {"name": "a1", "storage_state": "y"},
+    ]}}
+    assert any("login.accounts" in e for e in validate_recipe(d))
+
+
+def test_multi_account_login_rejects_missing_fields():
+    d = {**MINIMAL, "login": {"accounts": [{"name": "a1"}]}}
+    assert any("login.accounts[0]" in e for e in validate_recipe(d))
+
+
+def test_multi_account_login_rejects_bad_strategy():
+    d = {**MINIMAL, "login": {"strategy": "random",
+                              "accounts": [{"name": "a1", "storage_state": "x"}]}}
+    assert any("login.strategy" in e for e in validate_recipe(d))
+
+
+def test_multi_account_login_rejects_bad_quota():
+    d = {**MINIMAL, "login": {"quota": 0,
+                              "accounts": [{"name": "a1", "storage_state": "x"}]}}
+    assert any("login.quota" in e for e in validate_recipe(d))
+
+
+def test_single_account_login_unaffected():
+    d = {**MINIMAL, "login": {"storage_state": "auth/state.json"}}
+    assert validate_recipe(d) == []
