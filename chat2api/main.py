@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from . import auth, errors  # noqa: F401  (import auth để đăng ký dependency)
@@ -53,6 +54,16 @@ def create_app(cfg: Config) -> FastAPI:
                 await pool.aclose()
 
     app = FastAPI(title="chat2api", lifespan=lifespan)
+    # The browser playground is same-origin (this app serves its own HTML), but
+    # the Tauri desktop app's frontend runs on a different origin than this API
+    # port, making every request cross-origin. No cookies/credentials are used
+    # (auth is a Bearer token), so a wildcard origin is safe here.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     errors.register_error_handler(app)
     app.state.cfg = cfg
     app.state.pool = pool

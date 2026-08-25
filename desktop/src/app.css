@@ -1,0 +1,256 @@
+/* chat2api console — ported from chat2api/playground/index.html, tokens per /DESIGN.md */
+:root {
+  color-scheme: light;
+  --page: #f3f5f7;
+  --panel: #fbfcfd;
+  --raised: #fff;
+  --muted: #edf1f4;
+  --text: #17202a;
+  --soft: #536170;
+  --faint: #687686;
+  --line: #d7dee5;
+  --strong: #b6c0ca;
+  --accent: #1769e0;
+  --accent-hover: #0f58c3;
+  --accent-soft: #e4efff;
+  --danger: #b82d3d;
+  --danger-soft: #fbe8eb;
+  --success: #13734a;
+  --success-soft: #e1f4ea;
+  --terminal: #182027;
+  --terminal-text: #d8e2ea;
+  --shadow: 0 18px 48px rgba(40, 55, 70, 0.08);
+  --radius: 12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page: #111417;
+    --panel: #161a1e;
+    --raised: #1b2025;
+    --muted: #20262c;
+    --text: #edf1f5;
+    --soft: #b4bec8;
+    --faint: #929eaa;
+    --line: #303840;
+    --strong: #46515c;
+    --accent: #63a1ff;
+    --accent-hover: #82b4ff;
+    --accent-soft: #182e4e;
+    --danger: #ff8692;
+    --danger-soft: #47252b;
+    --success: #70d7a5;
+    --success-soft: #18392b;
+    --terminal: #0c1013;
+    --terminal-text: #dce5ed;
+    --shadow: 0 22px 58px rgba(0, 0, 0, 0.28);
+  }
+}
+
+* { box-sizing: border-box; }
+html { min-width: 320px; background: var(--page); }
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: var(--page);
+  color: var(--text);
+  font: 15px/1.5 "Segoe UI Variable", "Aptos", "Helvetica Neue", Arial, sans-serif;
+  text-rendering: optimizeLegibility;
+}
+button, input, select, textarea { font: inherit; }
+button, select { white-space: nowrap; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: 0.55; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [role="tab"]:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  outline-offset: 2px;
+}
+[hidden] { display: none !important; }
+
+/* Topbar */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  height: 68px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--page) 88%, transparent);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+.topbar-inner {
+  width: min(1400px, 100%);
+  height: 100%;
+  margin: auto;
+  padding: 0 24px;
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 1fr);
+  align-items: center;
+  gap: 20px;
+}
+.brand { display: flex; align-items: center; gap: 11px; font-weight: 750; letter-spacing: -0.025em; }
+.brand-mark {
+  width: 31px; height: 31px;
+  display: grid; place-items: center;
+  border-radius: 9px;
+  background: var(--text); color: var(--raised);
+  font: 12px "Cascadia Code", Consolas, monospace; letter-spacing: -0.08em;
+}
+.nav-tabs { display: flex; gap: 4px; padding: 4px; border-radius: 10px; background: var(--muted); }
+.nav-tab { min-height: 36px; padding: 7px 15px; border: 0; border-radius: 8px; background: transparent; color: var(--soft); font-weight: 680; }
+.nav-tab[aria-selected="true"] { background: var(--raised); color: var(--text); box-shadow: 0 1px 3px rgba(25, 39, 52, 0.12); }
+.top-actions { display: flex; justify-content: flex-end; }
+.health { display: flex; align-items: center; gap: 7px; color: var(--soft); font-size: 13px; }
+.health-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+.health[data-state="ok"] .health-dot { background: var(--success); }
+.health[data-state="error"] .health-dot { background: var(--danger); }
+
+/* Shell */
+main { width: min(1400px, 100%); margin: auto; padding: 28px 24px 32px; }
+.view { animation: view-in 0.25s cubic-bezier(0.16, 1, 0.3, 1); }
+@keyframes view-in { from { opacity: 0; transform: translateY(7px); } }
+
+/* Playground */
+.workspace { min-height: calc(100dvh - 128px); display: grid; grid-template-columns: minmax(0, 1fr) 310px; gap: 20px; }
+.panel { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); box-shadow: var(--shadow); }
+.chat-panel { min-width: 0; display: grid; grid-template-rows: auto minmax(280px, 1fr) auto; overflow: hidden; }
+.panel-head { min-height: 70px; padding: 15px 18px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); }
+.panel-head h1, .panel-head h2 { margin: 0; font-size: 17px; line-height: 1.2; letter-spacing: -0.02em; }
+.panel-head p { margin: 4px 0 0; color: var(--faint); font-size: 13px; }
+.latency { color: var(--faint); font: 12px "Cascadia Code", Consolas, monospace; }
+
+.chat { min-height: 0; overflow-y: auto; padding: 28px clamp(18px, 5vw, 72px); scroll-behavior: smooth; }
+.chat-empty { min-height: 100%; display: grid; place-content: center; max-width: 540px; margin: auto; color: var(--soft); }
+.chat-empty h2 { margin: 0; color: var(--text); font-size: clamp(25px, 3vw, 38px); line-height: 1.08; letter-spacing: -0.04em; }
+.chat-empty p { margin: 14px 0 0; max-width: 48ch; }
+.suggestions { margin-top: 22px; display: flex; flex-wrap: wrap; gap: 8px; }
+.suggestion { padding: 8px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--raised); color: var(--soft); font-size: 13px; }
+.msg { width: min(78%, 720px); margin: 0 0 20px; padding: 13px 15px; border-radius: var(--radius); white-space: pre-wrap; overflow-wrap: anywhere; animation: message-in 0.22s ease; }
+@keyframes message-in { from { opacity: 0; transform: translateY(5px); } }
+.msg:before { display: block; margin-bottom: 5px; color: var(--faint); font-size: 11px; font-weight: 750; text-transform: uppercase; }
+.msg.user { margin-left: auto; background: var(--accent); color: #f7faff; }
+.msg.user:before { content: "Bạn"; color: rgba(255, 255, 255, 0.75); }
+.msg.assistant { margin-right: auto; border: 1px solid var(--line); background: var(--raised); }
+.msg.assistant:before { content: "Assistant"; }
+.msg.assistant:empty:after { content: "Đang nhận phản hồi"; color: var(--faint); }
+.msg.err { margin-right: auto; border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--line)); background: var(--danger-soft); color: var(--danger); }
+.msg.err:before { content: "Lỗi"; color: inherit; }
+
+.composer { padding: 14px 16px 16px; border-top: 1px solid var(--line); background: var(--raised); }
+.composer-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; }
+.prompt-input { width: 100%; min-height: 48px; max-height: 180px; resize: vertical; padding: 12px 13px; border: 1px solid var(--strong); border-radius: 10px; background: var(--panel); color: var(--text); }
+input::placeholder, textarea::placeholder { color: var(--faint); opacity: 1; }
+.composer-actions { display: flex; gap: 8px; }
+.composer-meta { margin-top: 8px; display: flex; justify-content: space-between; gap: 12px; color: var(--faint); font-size: 12px; }
+
+.sidebar { display: flex; flex-direction: column; gap: 16px; }
+.side-section { padding: 17px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.side-section h2 { margin: 0 0 14px; font-size: 14px; }
+.field { display: grid; gap: 7px; margin-top: 13px; }
+.field:first-of-type { margin-top: 0; }
+.field label { color: var(--soft); font-size: 12px; font-weight: 700; }
+.field-help { margin: 0; color: var(--faint); font-size: 11px; }
+input, select { width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid var(--strong); border-radius: 9px; background: var(--raised); color: var(--text); }
+.key-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
+.metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.metric { padding: 11px; border-radius: 9px; background: var(--muted); }
+.metric strong { display: block; overflow: hidden; text-overflow: ellipsis; font: 15px "Cascadia Code", Consolas, monospace; }
+.metric span { display: block; margin-top: 3px; color: var(--faint); font-size: 11px; }
+
+/* Buttons */
+.button, button.secondary {
+  min-height: 40px; padding: 9px 14px; border: 1px solid transparent; border-radius: 9px;
+  background: var(--accent); color: #f7faff; font-weight: 700;
+  transition: transform 0.16s ease, background 0.16s ease, border-color 0.16s ease;
+}
+.button:hover:not(:disabled) { background: var(--accent-hover); }
+.button:active:not(:disabled) { transform: scale(0.98); }
+.button.secondary, button.secondary { border-color: var(--line); background: var(--raised); color: var(--text); }
+.button.secondary:hover:not(:disabled), button.secondary:hover:not(:disabled) { border-color: var(--strong); background: var(--muted); }
+.button.danger { border-color: color-mix(in srgb, var(--danger) 35%, var(--line)); background: transparent; color: var(--danger); }
+.button.small { min-height: 34px; padding: 6px 10px; font-size: 12px; }
+.button.full { width: 100%; }
+
+/* Integrations */
+.integrations { width: min(1120px, 100%); margin: auto; display: grid; gap: 20px; }
+.page-heading { padding: 14px 2px 8px; }
+.page-heading h1 { margin: 0; max-width: 780px; font-size: clamp(30px, 4.5vw, 52px); line-height: 1.02; letter-spacing: -0.05em; }
+.page-heading p { max-width: 60ch; margin: 14px 0 0; color: var(--soft); font-size: 16px; }
+.integration-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(300px, 0.85fr); gap: 20px; align-items: start; }
+.integration-card { padding: clamp(20px, 3vw, 30px); }
+.integration-card h2 { margin: 0; font-size: 22px; letter-spacing: -0.035em; }
+.integration-card > p { margin: 8px 0 0; color: var(--soft); }
+.url-row { margin-top: 24px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px; }
+.status-box { margin-top: 16px; min-height: 46px; padding: 12px 14px; border-radius: 9px; background: var(--muted); color: var(--soft); font-size: 13px; }
+.status-box:empty:before { content: "Chưa có job đang chạy."; color: var(--faint); }
+.login-actions { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+.job-log { min-height: 245px; max-height: 430px; margin: 16px 0 0; padding: 15px; overflow: auto; border: 1px solid #2c3740; border-radius: var(--radius); background: var(--terminal); color: var(--terminal-text); font: 12px/1.65 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; }
+.job-log:empty:before { content: "Log analyzer sẽ xuất hiện tại đây."; color: #94a4b3; }
+.steps { margin-top: 20px; }
+.step { display: grid; grid-template-columns: 28px 1fr; gap: 10px; padding: 13px 0; border-top: 1px solid var(--line); }
+.step:first-child { border-top: 0; }
+.step-index { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 7px; background: var(--muted); font: 11px "Cascadia Code", Consolas, monospace; }
+.step strong { font-size: 13px; }
+.step p { margin: 3px 0 0; color: var(--faint); font-size: 12px; }
+
+.recipes-panel { overflow: hidden; }
+.recipes-head { padding: 18px 20px; display: flex; justify-content: space-between; align-items: center; gap: 14px; border-bottom: 1px solid var(--line); }
+.recipes-head h2 { margin: 0; font-size: 17px; }
+.recipes-head p { margin: 3px 0 0; color: var(--faint); font-size: 12px; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 14px 20px; text-align: left; vertical-align: middle; }
+th { color: var(--faint); background: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+tbody tr + tr { border-top: 1px solid var(--line); }
+td:first-child { font-weight: 700; }
+td:nth-child(2) { color: var(--soft); font: 12px "Cascadia Code", Consolas, monospace; }
+.recipe-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.recipe-state { display: inline-flex; padding: 4px 8px; border-radius: 7px; background: var(--success-soft); color: var(--success); font-size: 11px; font-weight: 750; }
+.recipe-state.unhealthy { background: var(--danger-soft); color: var(--danger); }
+.empty-row td { padding: 34px 20px; color: var(--faint); text-align: center; }
+
+.toast { position: fixed; right: 20px; bottom: 20px; z-index: 30; max-width: min(380px, calc(100vw - 40px)); padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--raised); box-shadow: var(--shadow); color: var(--text); font-size: 13px; }
+
+@media (max-width: 900px) {
+  .topbar-inner { grid-template-columns: 1fr auto; }
+  .top-actions { display: none; }
+  .nav-tabs { justify-self: end; }
+  .workspace, .integration-grid { grid-template-columns: 1fr; }
+  .workspace { min-height: auto; }
+  .chat-panel { min-height: calc(100dvh - 160px); }
+  .sidebar { display: grid; grid-template-columns: 1fr 1fr; }
+  .integration-card:last-child { order: -1; }
+}
+
+@media (max-width: 640px) {
+  .topbar { height: auto; position: relative; }
+  .topbar-inner { height: auto; padding: 12px 16px; grid-template-columns: 1fr; gap: 10px; }
+  .nav-tabs { width: 100%; justify-self: stretch; }
+  .nav-tab { flex: 1; }
+  .brand { justify-content: center; }
+  main { padding: 16px; }
+  .workspace { display: block; }
+  .chat-panel { min-height: calc(100dvh - 150px); }
+  .sidebar { grid-template-columns: 1fr; margin-top: 16px; }
+  .chat { padding: 22px 14px; }
+  .msg { width: 92%; }
+  .composer-row, .url-row { grid-template-columns: 1fr; }
+  .composer-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .button { width: 100%; }
+  .composer-meta { display: none; }
+  .page-heading { padding-top: 4px; }
+  .recipes-head { align-items: flex-start; }
+  .table-wrap table, .table-wrap thead, .table-wrap tbody, .table-wrap tr, .table-wrap td { display: block; }
+  .table-wrap thead { display: none; }
+  .table-wrap tr { padding: 14px 16px; }
+  .table-wrap td { padding: 4px 0; }
+  .recipe-actions { justify-content: flex-start; margin-top: 8px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *:before, *:after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .topbar { background: var(--page); backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
