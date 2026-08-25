@@ -47,9 +47,23 @@ async def test_headed_context_uses_separate_browser_only_created_on_demand(monke
 
         launched = []
 
+        class FakeContext:
+            # BrowserContext thật có backref .browser — pool dựa vào nó để biết
+            # cửa sổ còn sống hay đã bị đóng tay.
+            def __init__(self, browser):
+                self.browser = browser
+
+            async def close(self):
+                pass
+
         class FakeHeadedBrowser:
+            connected = True
+
+            def is_connected(self):
+                return self.connected
+
             async def new_context(self, storage_state=None):
-                return object()
+                return FakeContext(self)
 
             async def close(self):
                 pass
@@ -68,5 +82,10 @@ async def test_headed_context_uses_separate_browser_only_created_on_demand(monke
         # Context headed thứ 2 tái dùng browser headed đã mở, không launch lại.
         await pool.context_for("c", headed=True)
         assert launched == [False]
+
+        # Người dùng tắt tay cửa sổ headed: context cũ bị bỏ, browser mở lại.
+        pool._browser_headed.connected = False
+        await pool.context_for("c", headed=True)
+        assert launched == [False, False]
     finally:
         await pool.aclose()

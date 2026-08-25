@@ -3,8 +3,13 @@
 <body>
 <textarea id="prompt"></textarea>
 <button id="send">Send</button>
+<button id="new-chat">New chat</button>
 <div id="messages"></div>
 <script>
+document.getElementById("new-chat").onclick = () => {
+  document.getElementById("messages").replaceChildren();
+  document.getElementById("prompt").value = "";
+};
 document.getElementById("send").onclick = () => {
   const m = document.createElement("div");
   m.className = "msg";

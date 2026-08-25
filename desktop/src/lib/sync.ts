@@ -1,6 +1,15 @@
 import { get, writable } from "svelte/store";
 import { apiKey, showToast } from "./stores";
-import { fetchModels, fetchRecipes, type ModelInfo, type RecipeInfo } from "./api";
+import {
+  fetchAccounts,
+  fetchModels,
+  fetchOverview,
+  fetchRecipes,
+  type DomainAccounts,
+  type ModelInfo,
+  type Overview,
+  type RecipeInfo,
+} from "./api";
 
 export const models = writable<ModelInfo[]>([]);
 export const modelsLoading = writable(false);
@@ -29,6 +38,12 @@ export async function refreshModels() {
   }
 }
 
+export const accounts = writable<DomainAccounts[]>([]);
+export const accountsLoading = writable(false);
+export const accountsError = writable(false);
+
+export const overview = writable<Overview | null>(null);
+
 export async function refreshRecipes() {
   recipesLoading.set(true);
   try {
@@ -40,5 +55,27 @@ export async function refreshRecipes() {
     recipesError.set(true);
   } finally {
     recipesLoading.set(false);
+  }
+}
+
+export async function refreshAccounts() {
+  accountsLoading.set(true);
+  try {
+    accounts.set(await fetchAccounts(get(apiKey)));
+    accountsError.set(false);
+  } catch (e) {
+    accounts.set([]);
+    accountsError.set(true);
+    showToast("Không nạp được accounts: " + (e as Error).message);
+  } finally {
+    accountsLoading.set(false);
+  }
+}
+
+export async function refreshOverview() {
+  try {
+    overview.set(await fetchOverview(get(apiKey)));
+  } catch {
+    overview.set(null);
   }
 }

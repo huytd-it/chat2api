@@ -9,6 +9,9 @@ response:
     type: stable_text
     quiet_ms: 3000
     timeout_ms: 120000
+timing:
+  ready_delay_ms: 2000
+  input_delay_ms: 600
 models:
 - id: qwen-web
 slug: chat
@@ -16,3 +19,5 @@ login:
   accounts:
   - name: codex1
     storage_state: auth/codex1.json
+  - name: codex2
+    storage_state: auth/codex2.json

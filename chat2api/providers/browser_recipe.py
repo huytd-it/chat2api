@@ -1,19 +1,55 @@
 import asyncio
+import os
 import re
 import sys
 import time
 from pathlib import Path
 from typing import AsyncIterator
 
-from .. import live_view
+from .. import accounts, live_view, store
 from ..prompt import flatten_messages
 from .base import ModelInfo, Provider
 
 LOGIN_STRATEGIES = {"round_robin", "fill_first"}
 
+# Mỗi mục: (env override, giá trị mặc định ms)
+TIMING_DEFAULTS = {
+    "ready_delay_ms": ("RECIPE_READY_DELAY_MS", 1200),
+    "input_delay_ms": ("RECIPE_INPUT_DELAY_MS", 400),
+    "ready_timeout_ms": ("RECIPE_READY_TIMEOUT_MS", 20000),
+}
+
+
+def _timing(cfg: dict, key: str) -> int:
+    env, default = TIMING_DEFAULTS[key]
+    raw = cfg.get(key)
+    if raw is None:
+        raw = os.environ.get(env, default)
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+async def _sleep_ms(ms: int) -> None:
+    if ms:
+        await asyncio.sleep(ms / 1000)
+
 
 class TrialLimitExceeded(RuntimeError):
     pass
+
+
+def _stored_anon_uses(slug: str) -> int:
+    """Số lượt dùng thử ẩn danh đã tiêu, đọc lại từ DB khi dựng recipe."""
+    db = store.default()
+    if db is None or not slug:
+        return 0
+    try:
+        rows = db.query("SELECT anon_used FROM recipe WHERE slug = ?", (slug,))
+    except Exception:
+        return 0
+    return rows[0]["anon_used"] if rows else 0
 
 
 def validate_recipe(d: dict) -> list[str]:
@@ -59,6 +95,22 @@ def validate_recipe(d: dict) -> list[str]:
     anon_trial_limit = login.get("anon_trial_limit")
     if anon_trial_limit is not None and (not isinstance(anon_trial_limit, int) or anon_trial_limit < 0):
         errs.append("invalid field: login.anon_trial_limit (số nguyên >= 0)")
+
+    timing = d.get("timing")
+    if timing is not None:
+        if not isinstance(timing, dict):
+            errs.append("invalid field: timing (phải là mapping)")
+        else:
+            for key in TIMING_DEFAULTS:
+                value = timing.get(key)
+                if value is not None and (not isinstance(value, int) or value < 0):
+                    errs.append(f"invalid field: timing.{key} (số nguyên >= 0, đơn vị ms)")
+    new_chat = d.get("new_chat")
+    if new_chat is not None:
+        if not isinstance(new_chat, dict):
+            errs.append("invalid field: new_chat (phải là mapping)")
+        elif not new_chat.get("url") and not new_chat.get("selector"):
+            errs.append("invalid field: new_chat (cần url hoặc selector)")
     return errs
 
 
@@ -70,7 +122,7 @@ class _AccountRotator:
     """
 
     def __init__(self, accounts: list[tuple[str, Path | None]], strategy: str, quota: int,
-                anon_trial_limit: int | None = None):
+                anon_trial_limit: int | None = None, slug: str = "", anon_uses: int = 0):
         self._accounts = accounts
         self._strategy = strategy
         self._quota = max(1, quota)
@@ -81,7 +133,10 @@ class _AccountRotator:
         # Chỉ áp dụng khi recipe không có account nào (chạy ẩn danh): giới hạn
         # số lượt dùng thử trước khi bắt buộc thêm tài khoản đăng nhập.
         self._anon_trial_limit = anon_trial_limit
-        self._anon_uses = 0
+        # Đếm từ DB chứ không từ 0: trước đây restart là reset, nên giới hạn dùng
+        # thử không có tác dụng gì. `slug` rỗng = không có chỗ lưu (test đơn vị).
+        self._anon_uses = anon_uses
+        self._slug = slug
 
     @property
     def anon_trial_limit(self) -> int | None:
@@ -90,6 +145,12 @@ class _AccountRotator:
     @property
     def anon_uses(self) -> int:
         return self._anon_uses
+
+    def _persist_anon_uses(self) -> None:
+        db = store.default()
+        if db is not None and self._slug:
+            db.submit("UPDATE recipe SET anon_used = ? WHERE slug = ?",
+                      (self._anon_uses, self._slug))
 
     async def next(self) -> tuple[str, Path | None]:
         if len(self._accounts) <= 1:
@@ -102,6 +163,7 @@ class _AccountRotator:
                             "Thêm tài khoản đăng nhập để tiếp tục dùng."
                         )
                     self._anon_uses += 1
+                    self._persist_anon_uses()
             return name, storage_state
         async with self._lock:
             if self._strategy == "fill_first":
@@ -116,7 +178,8 @@ class _AccountRotator:
 
 
 class BrowserRecipe(Provider):
-    def __init__(self, recipe: dict, base_dir: Path, pool, headed: bool = False):
+    def __init__(self, recipe: dict, base_dir: Path, pool, headed: bool = False,
+                 accounts_root: Path | None = None):
         self._recipe = recipe
         self.slug = recipe["slug"]
         self.base_dir = base_dir
@@ -128,23 +191,58 @@ class BrowserRecipe(Provider):
         self.response_cfg = recipe.get("response", {})
         self.ds = self.response_cfg.get("done_signal", {})
         login_cfg = recipe.get("login") or {}
-        self._accounts = self._resolve_accounts(login_cfg, base_dir)
+        # Kho account chung nằm cạnh các recipe (recipes/.accounts). Analyzer chạy
+        # recipe thử ở thư mục tạm nên truyền accounts_root tường minh.
+        self.accounts_root = Path(accounts_root) if accounts_root else Path(base_dir).parent
+        self.domain = accounts.domain_of(recipe.get("url", ""))
+        self._accounts = self._resolve_accounts(
+            login_cfg, base_dir, self.accounts_root, recipe.get("url", ""))
+        # Mặc định giữ context sống giữa các request để không phải mở lại
+        # browser + đăng nhập mỗi lần. Site nào khôi phục hội thoại cũ (vd
+        # chat.qwen.ai) thì khai báo `new_chat` để mở phiên chat mới; đặt
+        # `keep_context: false` nếu muốn dựng context sạch mỗi request.
+        self._keep_context = bool(recipe.get("keep_context", True))
+        new_chat = recipe.get("new_chat") or {}
+        self._new_chat_url = new_chat.get("url")
+        self._new_chat_selector = new_chat.get("selector")
+        timing = recipe.get("timing") or {}
+        self._ready_delay_ms = _timing(timing, "ready_delay_ms")
+        self._input_delay_ms = _timing(timing, "input_delay_ms")
+        self._ready_timeout_ms = _timing(timing, "ready_timeout_ms")
+        # Page dài hạn cho mỗi context: không bao giờ tự đóng sau request, người
+        # dùng tự tắt cửa sổ browser. Mỗi ctx_key dùng chung 1 page nên request
+        # cùng account phải xếp hàng qua _locks.
+        self._pages: dict[str, object] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
         self._rotator = _AccountRotator(
             self._accounts,
             login_cfg.get("strategy", "round_robin"),
             int(login_cfg.get("quota", 50)),
             login_cfg.get("anon_trial_limit"),
+            slug=self.slug,
+            anon_uses=_stored_anon_uses(self.slug),
         )
 
     @staticmethod
-    def _resolve_accounts(login_cfg: dict, base_dir: Path) -> list[tuple[str, Path | None]]:
-        accounts = login_cfg.get("accounts")
-        if accounts:
-            return [(a["name"], base_dir / a["storage_state"]) for a in accounts]
+    def _resolve_accounts(login_cfg: dict, base_dir: Path, accounts_root: Path,
+                          url: str) -> list[tuple[str, Path | None]]:
+        """Gộp account khai báo trong recipe với account dùng chung của domain.
+
+        Account trong kho chung được nhận tự động, nên recipe mới trên domain đã
+        đăng nhập chạy được ngay. Khai báo tường minh trong recipe.yaml thắng khi
+        trùng tên, để recipe vẫn ghim được đúng file state của riêng nó.
+        """
+        resolved: dict[str, Path | None] = {}
+        for account in login_cfg.get("accounts") or []:
+            resolved[account["name"]] = base_dir / account["storage_state"]
         state = login_cfg.get("storage_state")
-        if state:
-            return [("default", base_dir / state)]
-        return [("__anon__", None)]
+        if state and not resolved:
+            resolved["default"] = base_dir / state
+        for name, path in accounts.list_accounts(accounts_root, accounts.domain_of(url)):
+            resolved.setdefault(name, path)
+        if not resolved:
+            return [("__anon__", None)]
+        return list(resolved.items())
 
     @property
     def url(self) -> str:
@@ -166,6 +264,43 @@ class BrowserRecipe(Provider):
                 return storage_state
         return None
 
+    async def _release_ctx(self, ctx_key: str) -> None:
+        """Dựng lại context sạch cho request sau (chỉ khi keep_context=false)."""
+        self._pages.pop(ctx_key, None)
+        await self.pool.drop(ctx_key)
+
+    def _lock_for(self, ctx_key: str) -> asyncio.Lock:
+        lock = self._locks.get(ctx_key)
+        if lock is None:
+            lock = self._locks[ctx_key] = asyncio.Lock()
+        return lock
+
+    async def _page_for(self, ctx, ctx_key: str):
+        """Tái sử dụng page đang mở; chỉ mở page mới khi chưa có hoặc bị đóng tay."""
+        page = self._pages.get(ctx_key)
+        if page is not None and not page.is_closed():
+            return page
+        page = await ctx.new_page()
+        self._pages[ctx_key] = page
+        return page
+
+    async def close_browser(self) -> int:
+        """Tắt browser của recipe — chỉ chạy khi người dùng bấm tắt thủ công."""
+        keys = list(self._pages)
+        for ctx_key in keys:
+            page = self._pages.pop(ctx_key, None)
+            if page is not None and not page.is_closed():
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+            await self.pool.drop(ctx_key)
+        return len(keys)
+
+    @property
+    def browser_open(self) -> bool:
+        return any(not page.is_closed() for page in self._pages.values())
+
     @property
     def trial_status(self) -> dict | None:
         limit = self._rotator.anon_trial_limit
@@ -184,58 +319,82 @@ class BrowserRecipe(Provider):
             sel,
         )
 
+    async def _wait_chat_ready(self, page, box) -> None:
+        """Chờ trang chat sẵn sàng nhận prompt, rồi mở phiên chat mới nếu cần.
+
+        Input thường được render trước khi JS gắn handler: gõ sớm thì mất chữ
+        hoặc Enter không gửi, nên sau khi input hiện ra vẫn chờ thêm
+        `timing.ready_delay_ms`.
+        """
+        await box.wait_for(state="visible", timeout=self._ready_timeout_ms)
+        if self._new_chat_selector:
+            await page.click(self._new_chat_selector, timeout=self._ready_timeout_ms)
+            await box.wait_for(state="visible", timeout=self._ready_timeout_ms)
+        await _sleep_ms(self._ready_delay_ms)
+
     async def stream(self, messages: list[dict], model_id: str,
                      headed: bool | None = None, watch_id: str | None = None) -> AsyncIterator[str]:
         prompt = flatten_messages(messages)
         account_name, storage_state = await self._rotator.next()
         ctx_key = self.slug if len(self._accounts) <= 1 else f"{self.slug}::{account_name}"
         effective_headed = self._headed if headed is None else headed
-        ctx = await self.pool.context_for(ctx_key, storage_state, headed=effective_headed)
-        page = await ctx.new_page()
-        if watch_id:
-            await live_view.register(watch_id, page)
         timeout_ms = int(self.ds.get("timeout_ms", 120000))
-        deadline = time.monotonic() + timeout_ms / 1000
         quiet_ms = int(self.ds.get("quiet_ms", 3000))
-        try:
-            await page.goto(self.url, wait_until="domcontentloaded", timeout=min(timeout_ms, 60000))
-            box = page.locator(self.prompt_cfg["input_selector"]).first
-            if self.prompt_cfg.get("input_mode", "fill") == "type":
-                await box.click()
-                await box.type(prompt)
-            else:
-                await box.fill(prompt)
-            submit = self.prompt_cfg.get("submit", "Enter")
-            if submit.startswith("click:"):
-                await page.click(submit.split(":", 1)[1])
-            else:
-                await box.press("Enter")
-
-            dtype = self.ds.get("type", "stable_text")
-            stable_since = None
-            last = ""
-            while True:
-                if time.monotonic() > deadline:
-                    raise TimeoutError(f"recipe '{self.slug}' timeout sau {timeout_ms}ms")
-                text = await self._reply_text(page)
-                if text != last:
-                    if text.startswith(last) and text.strip() != prompt.strip():
-                        yield text[len(last):]
-                    last = text
-                    stable_since = time.monotonic()
-                if dtype == "stable_text":
-                    done = (bool(last.strip()) and last.strip() != prompt.strip()
-                            and stable_since is not None
-                            and (time.monotonic() - stable_since) * 1000 >= quiet_ms)
-                else:
-                    count = await page.locator(self.ds["selector"]).count()
-                    appear = dtype == "selector_appear"
-                    done = ((count > 0) == appear) and stable_since is not None \
-                        and (time.monotonic() - stable_since) * 1000 >= min(quiet_ms, 1000)
-                if done:
-                    return
-                await asyncio.sleep(0.5)
-        finally:
+        # Page dùng chung cho mỗi ctx_key nên hai request cùng account phải nối
+        # đuôi nhau, không chen ngang vào cùng một ô input.
+        async with self._lock_for(ctx_key):
+            ctx = await self.pool.context_for(ctx_key, storage_state, headed=effective_headed)
+            page = await self._page_for(ctx, ctx_key)
             if watch_id:
-                await live_view.unregister(watch_id, page)
-            await page.close()
+                await live_view.register(watch_id, page)
+            deadline = time.monotonic() + timeout_ms / 1000
+            try:
+                await page.goto(self._new_chat_url or self.url, wait_until="domcontentloaded",
+                                timeout=min(timeout_ms, 60000))
+                box = page.locator(self.prompt_cfg["input_selector"]).first
+                await self._wait_chat_ready(page, box)
+                await _sleep_ms(self._input_delay_ms)
+                if self.prompt_cfg.get("input_mode", "fill") == "type":
+                    await box.click()
+                    await box.type(prompt)
+                else:
+                    await box.fill(prompt)
+                submit = self.prompt_cfg.get("submit", "Enter")
+                if submit.startswith("click:"):
+                    await page.click(submit.split(":", 1)[1])
+                else:
+                    await box.press("Enter")
+
+                dtype = self.ds.get("type", "stable_text")
+                stable_since = None
+                last = ""
+                while True:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError(f"recipe '{self.slug}' timeout sau {timeout_ms}ms")
+                    text = await self._reply_text(page)
+                    if text != last:
+                        if text.startswith(last) and text.strip() != prompt.strip():
+                            yield text[len(last):]
+                        last = text
+                        stable_since = time.monotonic()
+                    if dtype == "stable_text":
+                        done = (bool(last.strip()) and last.strip() != prompt.strip()
+                                and stable_since is not None
+                                and (time.monotonic() - stable_since) * 1000 >= quiet_ms)
+                    else:
+                        count = await page.locator(self.ds["selector"]).count()
+                        appear = dtype == "selector_appear"
+                        done = ((count > 0) == appear) and stable_since is not None \
+                            and (time.monotonic() - stable_since) * 1000 >= min(quiet_ms, 1000)
+                    if done:
+                        return
+                    await asyncio.sleep(0.5)
+            finally:
+                # Không đóng page/browser ở đây: cửa sổ phải còn nguyên sau khi
+                # trả lời xong, chỉ đóng khi người dùng tắt tay hoặc gọi
+                # close_browser(). keep_context=false là lựa chọn tường minh
+                # trong recipe nên vẫn được tôn trọng.
+                if watch_id:
+                    await live_view.unregister(watch_id, page)
+                if not self._keep_context:
+                    await self._release_ctx(ctx_key)

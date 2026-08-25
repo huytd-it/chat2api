@@ -68,7 +68,7 @@
   }
 </script>
 
-<section class="view logs" id="logs-view" role="tabpanel" aria-labelledby="tab-logs">
+<section class="view logs">
   <header class="page-heading">
     <h1>Nhật ký.</h1>
     <p>Theo dõi hoạt động server (request, integrate, đăng nhập, lỗi) và output tiến trình chạy nền.</p>

@@ -22,3 +22,20 @@ class IntegrateRequest(BaseModel):
 
 class AddAccountRequest(BaseModel):
     name: str
+
+
+class AccountLoginRequest(BaseModel):
+    """Mở browser đăng nhập cho một domain (không buộc vào recipe nào)."""
+
+    domain: str = ""
+    url: str = ""
+    name: str = ""
+
+
+class SaveAccountRequest(BaseModel):
+    domain: str
+    name: str
+
+
+class SettingsRequest(BaseModel):
+    values: dict[str, str]

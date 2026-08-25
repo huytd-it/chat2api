@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+from . import store
 from .providers.base import ModelInfo, Provider
 
 UNHEALTHY_THRESHOLD = 3
@@ -22,7 +23,12 @@ class Router:
 
     def reload(self) -> None:
         self.providers.clear()
+        # Reload luôn xoá bộ đếm hỏng, cả trong RAM lẫn DB — người dùng sửa
+        # recipe rồi bấm reload là để nó được thử lại từ đầu. Cột `failures`
+        # trong DB chỉ mirror trạng thái sống; phần *lịch sử* nằm ở
+        # last_ok_at / last_error / last_error_at và không bị xoá theo.
         self.failures.clear()
+        self._db_execute("UPDATE recipe SET failures = 0 WHERE failures != 0")
         if not self.recipes_dir.exists():
             return
         for child in sorted(self.recipes_dir.iterdir()):
@@ -55,11 +61,23 @@ class Router:
             out.extend(p.models())
         return out
 
-    def mark_failure(self, slug: str) -> None:
+    @staticmethod
+    def _db_execute(sql: str, params: tuple = ()) -> None:
+        """Ghi mirror xuống DB nếu kho đang mở. Bắn-rồi-quên, không chặn chat."""
+        db = store.default()
+        if db is not None:
+            db.submit(sql, params)
+
+    def mark_failure(self, slug: str, error: str = "") -> None:
         self.failures[slug] = self.failures.get(slug, 0) + 1
+        self._db_execute(
+            "UPDATE recipe SET failures = ?, last_error = ?, last_error_at = ? WHERE slug = ?",
+            (self.failures[slug], error[:2000], store.now_ms(), slug))
 
     def mark_success(self, slug: str) -> None:
         self.failures[slug] = 0
+        self._db_execute("UPDATE recipe SET failures = 0, last_ok_at = ? WHERE slug = ?",
+                         (store.now_ms(), slug))
 
     def is_unhealthy(self, slug: str) -> bool:
         return self.failures.get(slug, 0) >= UNHEALTHY_THRESHOLD
@@ -113,7 +131,7 @@ def _recipe_loader(directory: Path, pool):
     if errs:
         print(f"[chat2api] invalid recipe {directory.name}: {errs}", file=sys.stderr)
         return None
-    return BrowserRecipe(recipe, directory, pool)
+    return BrowserRecipe(recipe, directory, pool, accounts_root=directory.parent)
 
 
 LOADERS.append(_recipe_loader)

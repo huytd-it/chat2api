@@ -59,34 +59,37 @@ async def _client(tmp_path, login=None):
     return client, app, fake, d
 
 
-async def test_add_account_flow_updates_recipe_and_reloads(tmp_path):
+async def test_add_account_saves_into_shared_domain_store(tmp_path):
+    """Account mới về kho chung của domain, recipe.yaml không cần biết tới nó."""
     client, app, fake, d = await _client(tmp_path, login={"anon_trial_limit": 5})
+    store = tmp_path / "recipes" / ".accounts" / "site.example"
     async with client:
         r = await client.post("/admin/recipes/sitea/accounts")
         assert r.status_code == 200
         session_id = r.json()["session_id"]
         slug, url, recipe_dir, storage_state = fake.starts[session_id]
         assert slug == "sitea" and url == "https://site.example/chat"
-        assert recipe_dir == d
+        assert recipe_dir == store
         assert storage_state is None
 
         r2 = await client.post(
             f"/admin/recipes/sitea/accounts/{session_id}/complete", json={"name": "acct-1"})
         assert r2.status_code == 200
-        assert r2.json() == {"ok": True, "slug": "sitea", "account": "acct-1"}
+        assert r2.json() == {"ok": True, "slug": "sitea", "account": "acct-1",
+                             "domain": "site.example"}
 
         r3 = await client.get("/admin/recipes")
         entry = next(e for e in r3.json() if e["slug"] == "sitea")
         assert entry["accounts"] == 1
         assert entry["trial"] is None
 
+    assert (store / "acct-1.json").exists()
     saved = yaml.safe_load((d / "recipe.yaml").read_text(encoding="utf-8"))
-    assert saved["login"]["accounts"] == [{"name": "acct-1", "storage_state": "auth/acct-1.json"}]
+    assert "accounts" not in saved.get("login", {})
     assert "anon_trial_limit" not in saved["login"]
-    assert (d / "auth" / "acct-1.json").exists()
 
 
-async def test_add_second_account_appends_without_losing_first(tmp_path):
+async def test_recipe_sees_both_declared_and_shared_accounts(tmp_path):
     client, app, fake, d = await _client(
         tmp_path, login={"accounts": [{"name": "acct-1", "storage_state": "auth/acct-1.json"}]})
     (d / "auth").mkdir(parents=True, exist_ok=True)
@@ -98,9 +101,58 @@ async def test_add_second_account_appends_without_losing_first(tmp_path):
             f"/admin/recipes/sitea/accounts/{session_id}/complete", json={"name": "acct-2"})
         assert r2.status_code == 200
 
-    saved = yaml.safe_load((d / "recipe.yaml").read_text(encoding="utf-8"))
-    names = {a["name"] for a in saved["login"]["accounts"]}
-    assert names == {"acct-1", "acct-2"}
+        r3 = await client.get("/admin/recipes")
+        entry = next(e for e in r3.json() if e["slug"] == "sitea")
+        assert set(entry["account_names"]) == {"acct-1", "acct-2"}
+
+
+async def test_second_recipe_on_same_domain_reuses_accounts(tmp_path):
+    """Đúng yêu cầu chính: đăng nhập một lần, mọi recipe cùng domain dùng lại."""
+    client, app, fake, d = await _client(tmp_path)
+    async with client:
+        r = await client.post("/admin/recipes/sitea/accounts")
+        session_id = r.json()["session_id"]
+        await client.post(
+            f"/admin/recipes/sitea/accounts/{session_id}/complete", json={"name": "shared-1"})
+
+        _write_recipe(tmp_path, slug="siteb")
+        await client.post("/admin/recipes/siteb/reload")
+
+        r2 = await client.get("/admin/recipes")
+        entry = next(e for e in r2.json() if e["slug"] == "siteb")
+        assert entry["account_names"] == ["shared-1"]
+
+
+async def test_accounts_page_lists_domains_with_using_recipes(tmp_path):
+    client, app, fake, d = await _client(tmp_path)
+    async with client:
+        r = await client.post("/admin/recipes/sitea/accounts")
+        session_id = r.json()["session_id"]
+        await client.post(
+            f"/admin/recipes/sitea/accounts/{session_id}/complete", json={"name": "acct-1"})
+
+        r2 = await client.get("/admin/accounts")
+        assert r2.status_code == 200
+        entry = next(e for e in r2.json() if e["domain"] == "site.example")
+        assert [a["name"] for a in entry["accounts"]] == ["acct-1"]
+        assert entry["recipes"] == ["sitea"]
+
+
+async def test_delete_shared_account(tmp_path):
+    client, app, fake, d = await _client(tmp_path)
+    async with client:
+        r = await client.post("/admin/recipes/sitea/accounts")
+        session_id = r.json()["session_id"]
+        await client.post(
+            f"/admin/recipes/sitea/accounts/{session_id}/complete", json={"name": "acct-1"})
+
+        r2 = await client.delete("/admin/accounts/site.example/acct-1")
+        assert r2.status_code == 200
+        r3 = await client.get("/admin/recipes")
+        entry = next(e for e in r3.json() if e["slug"] == "sitea")
+        assert entry["account_names"] == []
+
+        assert (await client.delete("/admin/accounts/site.example/acct-1")).status_code == 404
 
 
 async def test_cancel_account_login(tmp_path):

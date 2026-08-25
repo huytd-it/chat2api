@@ -10,9 +10,15 @@ def _env(name: str, default: str = "") -> str:
 
 class Config:
     def __init__(self) -> None:
-        load_dotenv(Path.cwd() / ".env", override=False)
+        # Giữ lại đường dẫn để trang Settings ghi vào đúng file đã nạp.
+        self.env_path = Path.cwd() / ".env"
+        load_dotenv(self.env_path, override=False)
         self.api_keys = [k.strip() for k in _env("CHAT2API_KEYS").split(",") if k.strip()]
         self.recipes_dir = Path(_env("RECIPES_DIR", "./recipes"))
+        # Kho SQLite + profile Chromium + blob đính kèm (docs/design-v2.md §1).
+        # Thư mục chỉ được tạo khi server thật sự chạy, không phải lúc import.
+        self.data_dir = Path(_env("CHAT2API_DATA_DIR", "./data"))
+        self.db_path = self.data_dir / "chat2api.db"
         self.agent_llm_base_url = _env("AGENT_LLM_BASE_URL").rstrip("/")
         self.agent_llm_api_key = _env("AGENT_LLM_API_KEY")
         self.agent_llm_model = _env("AGENT_LLM_MODEL")

@@ -2,7 +2,6 @@
   import { apiKey, showToast } from "../stores";
   import { startIntegration, fetchJob, jobAction, type JobStatus } from "../api";
   import { refreshModels, refreshRecipes } from "../sync";
-  import RecipesTable from "./RecipesTable.svelte";
   import LiveView from "./LiveView.svelte";
 
   let siteUrl = $state("");
@@ -177,7 +176,7 @@
   }
 </script>
 
-<section class="view integrations" id="integrations-view" role="tabpanel" aria-labelledby="tab-integrations">
+<section class="view integrations">
   <header class="page-heading">
     <h1>Biến một web chat thành API.</h1>
     <p>Analyzer nhận diện giao diện, tạo recipe và đăng ký model mới vào router hiện tại.</p>
@@ -243,5 +242,7 @@
       </div>
     </aside>
   </div>
-  <RecipesTable />
+  <p class="hint">
+    Recipe tạo xong xuất hiện ở <a href="/recipes">trang Recipes</a>.
+  </p>
 </section>

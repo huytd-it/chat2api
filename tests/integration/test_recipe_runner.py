@@ -1,9 +1,15 @@
+import time
+
 import pytest
 
 from chat2api.browserpool import BrowserPool
 from chat2api.providers.browser_recipe import BrowserRecipe, TrialLimitExceeded, validate_recipe
 
 pytest.importorskip("playwright.async_api")
+
+
+async def _record_drop(dropped, key):
+    dropped.append(key)
 
 
 async def test_roundtrip_stream(fixture_recipe, tmp_path):
@@ -182,5 +188,146 @@ async def test_roundtrip_timeout(fixture_recipe, tmp_path):
         with pytest.raises(TimeoutError):
             async for _ in provider.stream([{"role": "user", "content": "hi"}], "fixture-web"):
                 pass
+    finally:
+        await pool.aclose()
+
+
+async def test_context_kept_alive_across_streams_by_default(fixture_recipe, tmp_path, monkeypatch):
+    """Browser được duy trì giữa các request để khỏi mở lại + đăng nhập lại."""
+    pool = BrowserPool(max_contexts=3)
+    await pool.start()
+    dropped = []
+    monkeypatch.setattr(pool, "drop", lambda key: _record_drop(dropped, key))
+    try:
+        provider = BrowserRecipe(fixture_recipe, tmp_path, pool)
+        for _ in range(2):
+            async for _delta in provider.stream([{"role": "user", "content": "hi"}],
+                                                "fixture-web"):
+                pass
+        assert dropped == []
+    finally:
+        await pool.aclose()
+
+
+async def test_keep_context_false_drops_context_after_each_stream(fixture_recipe, tmp_path,
+                                                                  monkeypatch):
+    recipe = {**fixture_recipe, "keep_context": False}
+    pool = BrowserPool(max_contexts=3)
+    await pool.start()
+    dropped = []
+    monkeypatch.setattr(pool, "drop", lambda key: _record_drop(dropped, key))
+    try:
+        provider = BrowserRecipe(recipe, tmp_path, pool)
+        for _ in range(2):
+            async for _delta in provider.stream([{"role": "user", "content": "hi"}],
+                                                "fixture-web"):
+                pass
+        assert dropped == ["fixture", "fixture"]
+    finally:
+        await pool.aclose()
+
+
+async def test_page_stays_open_after_stream_completes(fixture_recipe, tmp_path):
+    """Trả lời xong browser phải còn nguyên — chỉ người dùng mới được tắt."""
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(fixture_recipe, tmp_path, pool)
+        async for _delta in provider.stream([{"role": "user", "content": "hi"}], "fixture-web"):
+            pass
+        page = provider._pages["fixture"]
+        assert not page.is_closed()
+        assert len(pool._contexts["fixture"].pages) == 1
+    finally:
+        await pool.aclose()
+
+
+async def test_second_request_reuses_same_page(fixture_recipe, tmp_path):
+    """Không mở tab mới mỗi request, tránh rò tab khi browser sống lâu."""
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(fixture_recipe, tmp_path, pool)
+        pages = []
+        for _ in range(2):
+            async for _delta in provider.stream([{"role": "user", "content": "hi"}],
+                                                "fixture-web"):
+                pass
+            pages.append(provider._pages["fixture"])
+        assert pages[0] is pages[1]
+        assert len(pool._contexts["fixture"].pages) == 1
+    finally:
+        await pool.aclose()
+
+
+async def test_close_browser_is_the_manual_off_switch(fixture_recipe, tmp_path):
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(fixture_recipe, tmp_path, pool)
+        async for _delta in provider.stream([{"role": "user", "content": "hi"}], "fixture-web"):
+            pass
+        page = provider._pages["fixture"]
+        assert await provider.close_browser() == 1
+        assert page.is_closed()
+        assert "fixture" not in pool._contexts
+    finally:
+        await pool.aclose()
+
+
+async def test_stream_recovers_after_user_closes_page(fixture_recipe, tmp_path):
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(fixture_recipe, tmp_path, pool)
+        async for _delta in provider.stream([{"role": "user", "content": "hi"}], "fixture-web"):
+            pass
+        await provider._pages["fixture"].close()
+        out = []
+        async for delta in provider.stream([{"role": "user", "content": "hi"}], "fixture-web"):
+            out.append(delta)
+        assert "".join(out).strip() == "This is the reply."
+    finally:
+        await pool.aclose()
+
+
+async def test_new_chat_selector_starts_fresh_session(fixture_recipe, tmp_path):
+    """Context được tái sử dụng nên mỗi request phải tự mở phiên chat mới."""
+    recipe = {**fixture_recipe, "new_chat": {"selector": "#new-chat"}}
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(recipe, tmp_path, pool)
+        out = []
+        async for delta in provider.stream([{"role": "user", "content": "hi"}], "fixture-web"):
+            out.append(delta)
+        assert "".join(out).strip() == "This is the reply."
+    finally:
+        await pool.aclose()
+
+
+async def test_timing_delays_applied_before_typing(fixture_recipe, tmp_path):
+    recipe = {**fixture_recipe, "timing": {"ready_delay_ms": 300, "input_delay_ms": 300}}
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(recipe, tmp_path, pool)
+        started = time.monotonic()
+        async for _delta in provider.stream([{"role": "user", "content": "hi"}], "fixture-web"):
+            pass
+        assert time.monotonic() - started >= 0.6
+    finally:
+        await pool.aclose()
+
+
+async def test_timing_defaults_come_from_env(fixture_recipe, tmp_path, monkeypatch):
+    monkeypatch.setenv("RECIPE_READY_DELAY_MS", "250")
+    monkeypatch.setenv("RECIPE_INPUT_DELAY_MS", "150")
+    recipe = {k: v for k, v in fixture_recipe.items() if k != "timing"}
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(recipe, tmp_path, pool)
+        assert (provider._ready_delay_ms, provider._input_delay_ms) == (250, 150)
     finally:
         await pool.aclose()

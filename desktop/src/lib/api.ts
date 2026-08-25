@@ -39,15 +39,62 @@ export interface JobStatus {
   can_complete_login?: boolean;
 }
 
+export interface AccountInfo {
+  name: string;
+  size: number;
+  updated_at: number;
+}
+
+/** Account thuộc về domain, không thuộc recipe: mọi recipe trong `recipes` dùng chung. */
+export interface DomainAccounts {
+  domain: string;
+  accounts: AccountInfo[];
+  recipes: string[];
+}
+
+export interface SettingField {
+  key: string;
+  type: "int" | "bool" | "str" | "secret" | "choice";
+  value: string;
+  label: string;
+  group: string;
+  apply: "reload" | "restart";
+  help?: string;
+  choices?: string[];
+  is_set?: boolean;
+}
+
+export interface Overview {
+  engine: string;
+  contexts: number;
+  models: number;
+  recipes: number;
+  browser_recipes: number;
+  unhealthy: string[];
+  domains: number;
+  accounts: number;
+  open_browsers: string[];
+}
+
 const FALLBACK_BASE_URL = "http://127.0.0.1:8100";
 
 let cachedBase: string | null = null;
 
-/** Resolves the chat2api server URL. Asks the Tauri host for the sidecar's
- * port; falls back to the default dev port when running outside Tauri
- * (e.g. `npm run dev` in a plain browser against a manually-started server). */
+/** Resolves the chat2api server URL. Order: `?api=` URL param (per load),
+ * `localStorage.c2a_api_base` (persisted dev override — useful when the
+ * default 8100 is blocked by Windows reserved ranges), then the Tauri host's
+ * sidecar port, then the default dev port when running outside Tauri. */
 export async function apiBase(): Promise<string> {
   if (cachedBase) return cachedBase;
+  const fromQuery = typeof location !== "undefined"
+    ? new URLSearchParams(location.search).get("api")
+    : null;
+  const override = fromQuery
+    ?? (typeof localStorage !== "undefined" ? localStorage.getItem("c2a_api_base") : null);
+  if (override) {
+    cachedBase = override.replace(/\/+$/, "");
+    return cachedBase;
+  }
   try {
     cachedBase = await invoke<string>("api_base_url");
   } catch {
@@ -83,17 +130,26 @@ export async function fetchModels(key: string): Promise<ModelInfo[]> {
   return ((data.data ?? []) as ModelInfo[]).filter((m) => m.ready !== false);
 }
 
+export interface ChatMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
 /** Streams an SSE chat completion, invoking onDelta for each content chunk.
+ * `messages` is the full conversation (real-chat semantics) sent as-is to
+ * /v1/chat/completions.
  * `headed` asks the server to run the underlying browser recipe with a
  * visible Chromium window instead of headless (recipe providers only — the
  * server ignores it for non-browser providers like Gemini/OpenAI passthrough).
  * When the server grants a live view, `onWatchId` fires with the id to poll
  * via `fetchScreenshot` — this works whether or not a native window actually
- * shows up on the user's machine. */
+ * shows up on the user's machine.
+ * Throws when the server reports an error before or MID-stream (SSE error
+ * payload) so callers can render the real message instead of a dead pipe. */
 export async function streamChat(
   key: string,
   model: string,
-  prompt: string,
+  messages: ChatMessage[],
   onDelta: (text: string) => void,
   signal?: AbortSignal,
   headed = false,
@@ -107,7 +163,7 @@ export async function streamChat(
     body: JSON.stringify({
       model,
       stream: true,
-      messages: [{ role: "user", content: prompt }],
+      messages,
     }),
   });
   if (!r.ok || !r.body) {
@@ -130,7 +186,11 @@ export async function streamChat(
       if (!line.startsWith("data: ")) continue;
       const payload = line.slice(6);
       if (payload === "[DONE]") continue;
-      const delta = JSON.parse(payload).choices?.[0]?.delta?.content ?? "";
+      const parsed = JSON.parse(payload);
+      // Lỗi nổ giữa stream được server bọc trong SSE event thay vì cắt
+      // kết nối — surface đúng thông điệp (timeout, hết lượt thử...).
+      if (parsed.error) throw new Error(parsed.error.message || String(parsed.error));
+      const delta = parsed.choices?.[0]?.delta?.content ?? "";
       if (delta) onDelta(delta);
     }
   }
@@ -161,6 +221,16 @@ export async function reloadRecipe(key: string, slug: string): Promise<void> {
     method: "POST",
     headers: headers(key),
   });
+}
+
+export async function closeRecipeBrowser(key: string, slug: string): Promise<number> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug) + "/browser/close", {
+    method: "POST",
+    headers: headers(key),
+  });
+  const data = await asJson(r);
+  return data.closed ?? 0;
 }
 
 export async function deleteRecipe(key: string, slug: string): Promise<void> {
@@ -255,6 +325,93 @@ export async function reopenAccountLogin(
     base + "/admin/recipes/" + encodeURIComponent(slug) + "/accounts/" + encodeURIComponent(name) + "/reopen",
     { method: "POST", headers: headers(key) },
   );
+  return asJson(r);
+}
+
+/** Every domain that has saved accounts, plus which recipes use each domain. */
+export async function fetchAccounts(key: string): Promise<DomainAccounts[]> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/accounts", { headers: headers(key) });
+  return asJson(r);
+}
+
+/** Opens a Chromium window for a domain (not tied to any recipe). Pass `name`
+ * to preload an existing account's profile for re-login. */
+export async function startDomainLogin(
+  key: string,
+  domain: string,
+  url = "",
+  name = "",
+): Promise<{ session_id: string; domain: string }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/accounts/login", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify({ domain, url, name }),
+  });
+  return asJson(r);
+}
+
+export async function completeDomainLogin(
+  key: string,
+  sessionId: string,
+  domain: string,
+  name: string,
+): Promise<{ ok: true; domain: string; name: string }> {
+  const base = await apiBase();
+  const r = await fetch(
+    base + "/admin/accounts/login/" + encodeURIComponent(sessionId) + "/complete",
+    { method: "POST", headers: headers(key), body: JSON.stringify({ domain, name }) },
+  );
+  return asJson(r);
+}
+
+export async function reopenDomainAccount(
+  key: string,
+  domain: string,
+  name: string,
+): Promise<{ session_id: string; domain: string; name: string }> {
+  const base = await apiBase();
+  const r = await fetch(
+    base + "/admin/accounts/" + encodeURIComponent(domain) + "/" + encodeURIComponent(name) + "/reopen",
+    { method: "POST", headers: headers(key) },
+  );
+  return asJson(r);
+}
+
+export async function deleteDomainAccount(key: string, domain: string, name: string): Promise<void> {
+  const base = await apiBase();
+  const r = await fetch(
+    base + "/admin/accounts/" + encodeURIComponent(domain) + "/" + encodeURIComponent(name),
+    { method: "DELETE", headers: headers(key) },
+  );
+  await asJson(r);
+}
+
+export async function fetchSettings(
+  key: string,
+): Promise<{ fields: SettingField[]; env_path: string }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/settings", { headers: headers(key) });
+  return asJson(r);
+}
+
+export async function saveSettings(
+  key: string,
+  values: Record<string, string>,
+): Promise<{ saved: string[]; needs_restart: string[] }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/settings", {
+    method: "PUT",
+    headers: headers(key),
+    body: JSON.stringify({ values }),
+  });
+  return asJson(r);
+}
+
+export async function fetchOverview(key: string): Promise<Overview> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/overview", { headers: headers(key) });
   return asJson(r);
 }
 

@@ -30,6 +30,8 @@ def fixture_recipe(site):
             "done_signal": {"type": "stable_text", "quiet_ms": 400, "timeout_ms": 8000},
         },
         "models": [{"id": "fixture-web"}],
+        # Bỏ delay mặc định để test không phải chờ thật; test riêng kiểm delay.
+        "timing": {"ready_delay_ms": 0, "input_delay_ms": 0},
     }
 
 @pytest.fixture

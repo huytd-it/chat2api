@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 from fastapi import FastAPI
 
@@ -7,9 +8,13 @@ from chat2api.config import Config
 from chat2api.errors import OpenAIError
 
 
-def test_config_defaults(monkeypatch):
+def test_config_defaults(monkeypatch, tmp_path):
+    # Config() nạp `.env` ở cwd vào os.environ, nên delenv một mình không đủ:
+    # .env của máy dev sẽ chen ngược vào và test đọc ra giá trị của người khác.
+    # Đổi cwd sang thư mục rỗng để "mặc định" đúng nghĩa là mặc định.
+    monkeypatch.chdir(tmp_path)
     for k in ("CHAT2API_KEYS", "RECIPES_DIR", "AGENT_LLM_BASE_URL", "ENABLE_AGENT_FALLBACK",
-             "ANON_TRIAL_LIMIT"):
+             "ANON_TRIAL_LIMIT", "CHAT2API_DATA_DIR"):
         monkeypatch.delenv(k, raising=False)
     cfg = Config()
     assert cfg.api_keys == []
@@ -17,6 +22,8 @@ def test_config_defaults(monkeypatch):
     assert cfg.recipe_timeout_ms == 120000
     assert cfg.enable_fallback is False
     assert cfg.anon_trial_limit == 20
+    assert cfg.data_dir == Path("./data")
+    assert cfg.db_path == Path("./data/chat2api.db")
 
 
 def test_config_parse(monkeypatch):

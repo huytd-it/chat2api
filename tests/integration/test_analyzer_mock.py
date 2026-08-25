@@ -225,7 +225,7 @@ models:
     observed = {}
 
     class FakeBrowserRecipe:
-        def __init__(self, recipe, base_dir, pool, headed=False):
+        def __init__(self, recipe, base_dir, pool, headed=False, accounts_root=None):
             observed["slug"] = recipe["slug"]
             observed["base_dir"] = base_dir
             observed["state"] = (base_dir / recipe["login"]["storage_state"]).read_text()
@@ -338,7 +338,7 @@ async def test_concurrent_authenticated_publication_separates_hosts_and_state(tm
             return Context(f"https://{host}/chat")
         async def drop(self, key): self.dropped.append(key)
     class Recipe:
-        def __init__(self, recipe, base_dir, pool, headed=False):
+        def __init__(self, recipe, base_dir, pool, headed=False, accounts_root=None):
             trial_slugs.add(recipe["slug"])
             self.marker = (base_dir / recipe["login"]["storage_state"]).read_text()
         async def stream(self, *args, **kwargs):

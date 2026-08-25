@@ -1,6 +1,6 @@
 <script lang="ts">
   import { fade } from "svelte/transition";
-  import { apiKey, currentView, headedPlayground, serverStatus } from "../stores";
+  import { apiKey, headedPlayground, serverStatus } from "../stores";
   import { models, modelsLoading, selectedModel, refreshModels, refreshRecipes } from "../sync";
 
   let keyVisible = $state(false);
@@ -82,7 +82,5 @@
       <div class="metric"><strong>OpenAI</strong><span>compatible</span></div>
     </div>
   </section>
-  <button class="button secondary full" onclick={() => currentView.set("integrations")}>
-    Quản lý integrations
-  </button>
+  <a class="button secondary full" href="/integrations">Quản lý integrations</a>
 </aside>

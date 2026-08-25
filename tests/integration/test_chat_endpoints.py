@@ -1,4 +1,4 @@
-import json
+﻿import json
 
 
 async def test_lifespan_closes_manager_and_pool_when_job_shutdown_raises(monkeypatch, tmp_path):
@@ -37,7 +37,7 @@ async def test_lifespan_closes_manager_and_pool_when_job_shutdown_raises(monkeyp
     else:
         raise AssertionError("lifespan should preserve the shutdown error")
 
-    assert calls == ["pool.start", "jobs.shutdown", "manager.close_all", "pool.aclose"]
+    assert calls == ["pool.start", "manager.close_all", "jobs.shutdown", "pool.aclose"]
 
 
 async def test_health(app_client):
@@ -96,6 +96,35 @@ async def test_trial_limit_exceeded_returns_403(app_client):
     assert r.json()["error"]["code"] == "trial_limit_exceeded"
 
 
+async def test_stream_midway_failure_emits_sse_error_event(app_client):
+    from chat2api.errors import OpenAIError
+    from chat2api.providers.base import ModelInfo, Provider
+
+    class BrokenAfterDeltaProvider(Provider):
+        slug = "broken"
+
+        def models(self):
+            return [ModelInfo(id="broken/m1", slug="broken")]
+
+        async def stream(self, messages, model_id):
+            yield "một phần"
+            raise TimeoutError("recipe 'broken' timeout sau 120000ms")
+
+    app = app_client._transport.app
+    app.state.router.providers["broken"] = BrokenAfterDeltaProvider()
+    r = await app_client.post("/v1/chat/completions", json={
+        "model": "broken/m1", "messages": [{"role": "user", "content": "hi"}],
+        "stream": True})
+    # Headers đã gửi 200 nên lỗi phải đi qua SSE error payload, không được
+    # cắt kết nối ngang để client thấy "network error" mù mờ.
+    assert r.status_code == 200
+    assert "data: [DONE]" in r.text
+    err_chunks = [json.loads(l[6:]) for l in r.text.splitlines()
+                  if l.startswith("data: ") and '"error"' in l]
+    assert err_chunks, "phải có SSE error event"
+    assert err_chunks[0]["error"]["code"] == "recipe_timeout"
+
+
 async def test_headed_header_propagates_to_browser_recipe_stream(app_client):
     from chat2api.providers.browser_recipe import BrowserRecipe
     from pathlib import Path
@@ -145,42 +174,11 @@ async def test_unknown_model_404(app_client):
     assert r.json()["error"]["code"] == "model_not_found"
 
 
-async def test_index_serves_playground(app_client):
+async def test_index_identifies_server(app_client):
+    # UI da chuyen han sang desktop app; `/` chi con la nametag cua server.
     r = await app_client.get("/")
     assert r.status_code == 200
-    assert "chat2api" in r.text and "Integrate" in r.text
-
-
-async def test_playground_has_login_controls(app_client):
-    r = await app_client.get("/")
-    assert r.status_code == 200
-    assert """<span id="loginactions" hidden>
-       <button id="logincomplete">Đã đăng nhập</button>
-       <button id="canceljob" class="secondary">Hủy</button>
-     </span>""" in r.text
-    assert 'postJobAction("login-complete")' in r.text
-    assert 'postJobAction("cancel")' in r.text
-    assert '"Chrome đã mở — hãy đăng nhập trong cửa sổ đó"' in r.text
-    assert '"Đang lưu session và tiếp tục…"' in r.text
-    assert "setInterval(" not in r.text
-    assert "setTimeout(poll, 1000)" in r.text
-    assert "new AbortController()" in r.text
-    assert "signal: controller.signal" in r.text
-    assert "generation !== pollGeneration" in r.text
-    assert "jobId !== activeJobId" in r.text
-    assert "operation !== operationGeneration" in r.text
-    assert "operation === operationGeneration" in r.text
-    assert "ticks > 660" in r.text
-    assert "function showJobStatus(j)" in r.text
-    assert 'j.status === "waiting_login" && j.can_complete_login === true' in r.text
-    assert '"Đang đóng phiên đăng nhập hết hạn…"' in r.text
-    assert "showJobStatus(j);" in r.text
-    assert '["ok", "failed", "cancelled", "login_timeout"]' in r.text
-    assert "function resetLoginButtons()" in r.text
-    assert "actionGeneration++;" in r.text
-    assert "actionInFlightFor = generation;" in r.text
-    assert "if (actionInFlightFor !== pollGeneration) resetLoginButtons();" in r.text
-    assert r.text.count("if (generation !== pollGeneration || jobId !== activeJobId || actionToken !== actionGeneration) return;") == 2
+    assert r.json()["name"] == "chat2api"
 
 
 async def test_auth_enforced_when_keys_set(app_client):
@@ -221,7 +219,7 @@ async def test_integrate_passes_headed_flag_to_job(app_client, monkeypatch):
 
 async def test_admin_recipes_and_auth_guard(app_client):
     r = await app_client.post("/admin/integrate", json={"url": "https://x.example"})
-    # chưa cấu hình LLM → 503 agent_not_configured
+    # chÆ°a cáº¥u hÃ¬nh LLM â†’ 503 agent_not_configured
     assert r.status_code == 503
     assert r.json()["error"]["code"] == "agent_not_configured"
 

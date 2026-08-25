@@ -4,6 +4,7 @@
   import {
     reloadRecipe,
     deleteRecipe,
+    closeRecipeBrowser,
     startAccountLogin,
     reopenAccountLogin,
     completeAccountLogin,
@@ -13,6 +14,7 @@
 
   let reloadingSlug = $state<string | null>(null);
   let deletingSlug = $state<string | null>(null);
+  let closingSlug = $state<string | null>(null);
 
   let accountSlug = $state<string | null>(null);
   let accountSessionId = $state<string | null>(null);
@@ -44,6 +46,18 @@
       showToast((e as Error).message);
     } finally {
       deletingSlug = null;
+    }
+  }
+
+  async function onCloseBrowser(slug: string) {
+    closingSlug = slug;
+    try {
+      const closed = await closeRecipeBrowser($apiKey, slug);
+      showToast(closed ? "Đã tắt browser của " + slug : "Browser của " + slug + " chưa mở");
+    } catch (e) {
+      showToast((e as Error).message);
+    } finally {
+      closingSlug = null;
     }
   }
 
@@ -195,6 +209,13 @@
                 {#if isBrowserRecipe}
                   <button class="button secondary small" onclick={() => onAddAccount(rec.slug)}>
                     Thêm account
+                  </button>
+                  <button
+                    class="button secondary small"
+                    disabled={closingSlug === rec.slug}
+                    onclick={() => onCloseBrowser(rec.slug)}
+                  >
+                    Tắt browser
                   </button>
                 {/if}
                 <button

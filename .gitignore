@@ -5,4 +5,8 @@ __pycache__/
 .pytest_cache/
 **/auth/
 **/secrets/
+# Kho account dùng chung: chứa cookie phiên đăng nhập, không được commit.
+**/.accounts/
+# DB SQLite, Chromium profile và blob đính kèm (xem docs/design-v2.md §1).
+data/
 .superpowers/

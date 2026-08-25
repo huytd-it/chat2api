@@ -27,8 +27,16 @@ response:
     type: stable_text       # stable_text khi không có tín hiệu khác rõ ràng
     quiet_ms: 3000          # text không đổi trong khoảng này là coi như xong
     timeout_ms: 120000
+new_chat:                   # tùy chọn, bỏ hẳn nếu trang luôn mở sẵn chat trống
+  selector: "<css selector nút tạo chat mới>"   # hoặc: url: <url mở chat mới>
+timing:                     # tùy chọn, chỉ thêm khi trang load chậm
+  ready_delay_ms: 2000      # chờ thêm sau khi ô input hiện ra
+  input_delay_ms: 600       # chờ trước khi đổ prompt vào ô input
 models:
   - id: <model-id-ngắn>     # ví dụ: chat-web
+
+Browser context được tái sử dụng giữa các request, nên nếu trang khôi phục hội
+thoại cũ khi mở lại thì BẮT BUỘC khai báo new_chat.
 
 Chỉ trả về JSON duy nhất: {"recipe_yaml": "<toàn bộ yaml dưới dạng string>", "notes": "..."}"""
 
@@ -143,7 +151,10 @@ async def integrate(url: str, pool, cfg, log, storage_state: Path | None = None,
                 trial_recipe.setdefault("login", {})["storage_state"] = "auth/state.json"
             trial_dir.mkdir(parents=True, exist_ok=True)
             await pool.drop(trial_slug)
-            runner = BrowserRecipe(trial_recipe, trial_dir, pool, headed=headed)
+            # accounts_root trỏ về kho chung: site đã có account của domain thì
+            # recipe mới dùng lại được ngay khi thử, khỏi đăng nhập lần nữa.
+            runner = BrowserRecipe(trial_recipe, trial_dir, pool, headed=headed,
+                                   accounts_root=cfg.recipes_dir)
             trial = [{"role": "user", "content": "Reply with exactly: OK"}]
             try:
                 log(f"Lần {rnd}: thử round-trip ...")

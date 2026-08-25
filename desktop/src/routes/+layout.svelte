@@ -1,7 +1,56 @@
 <script lang="ts">
   import "../app.css";
+  import { onMount } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
+  import TopBar from "$lib/components/TopBar.svelte";
+  import InstrumentRail from "$lib/components/InstrumentRail.svelte";
+  import Toast from "$lib/components/Toast.svelte";
+  import { serverStatus, serverLog } from "$lib/stores";
+  import { fetchHealth } from "$lib/api";
+  import { refreshModels, refreshRecipes, refreshAccounts, refreshOverview } from "$lib/sync";
 
   let { children } = $props();
+
+  /** The sidecar can take a few seconds to boot (browser engine startup, etc.),
+   * so unlike the browser build's single /health check, retry until it answers. */
+  async function waitForHealth(): Promise<boolean> {
+    for (let attempt = 0; attempt < 40; attempt++) {
+      try {
+        const h = await fetchHealth();
+        serverStatus.set({ state: "ok", contexts: String(h.contexts), engine: h.engine });
+        return true;
+      } catch {
+        serverStatus.set({ state: "loading", contexts: "-", engine: "-" });
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
+    }
+    serverStatus.set({ state: "error", contexts: "-", engine: "-" });
+    return false;
+  }
+
+  onMount(() => {
+    let unlisten: (() => void) | undefined;
+    listen<string>("server-log", (event) => {
+      serverLog.update((lines) => [...lines.slice(-199), event.payload]);
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => {
+        // Not running inside Tauri (e.g. `npm run dev` in a plain browser); nothing to listen to.
+      });
+
+    (async () => {
+      if (await waitForHealth()) {
+        refreshModels();
+        refreshRecipes();
+        refreshAccounts();
+        refreshOverview();
+      }
+    })();
+
+    return () => unlisten?.();
+  });
 
   // Plain Svelte template comments are stripped at compile time, so the
   // direction contract is injected via {@html} to survive as a real DOM
@@ -32,4 +81,9 @@ its provenance.
 </script>
 
 {@html directionContract}
-{@render children()}
+<InstrumentRail />
+<TopBar />
+<main>
+  {@render children()}
+</main>
+<Toast />

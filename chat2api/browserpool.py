@@ -1,7 +1,10 @@
+import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
+
 from collections import OrderedDict
 from pathlib import Path
-
-import asyncio
 
 
 async def _finish_cleanup(cleanup) -> None:
@@ -20,7 +23,7 @@ class BrowserPool:
     chấp nhận vì cloak chỉ bật cho site bot-detect khó.
     """
 
-    def __init__(self, engine: str = "playwright", max_contexts: int = 3):
+    def __init__(self, engine: str = "playwright", max_contexts: int = 10):
         self.engine = engine
         self.max_contexts = max(1, int(max_contexts))
         self._contexts: OrderedDict[str, object] = OrderedDict()
@@ -48,22 +51,43 @@ class BrowserPool:
         self._pw = await async_playwright().start()
         self._browser = await self._pw.chromium.launch(headless=True)
 
+    @staticmethod
+    def _alive(ctx) -> bool:
+        """Context chết khi người dùng tự tay tắt cửa sổ browser headed."""
+        browser = getattr(ctx, "browser", None)
+        if browser is None:
+            return True
+        return browser.is_connected()
+
+    def _cached(self, slug: str):
+        ctx = self._contexts.get(slug)
+        if ctx is None:
+            return None
+        if not self._alive(ctx):
+            del self._contexts[slug]
+            logger.info("BrowserPool: browser của '%s' đã bị đóng tay, sẽ mở lại", slug)
+            return None
+        self._contexts.move_to_end(slug)
+        return ctx
+
     async def context_for(self, slug: str, storage_state: Path | None = None,
                           headed: bool = False):
-        if slug in self._contexts:
-            self._contexts.move_to_end(slug)
-            return self._contexts[slug]
+        ctx = self._cached(slug)
+        if ctx is not None:
+            return ctx
         async with self._lock:
-            if slug in self._contexts:
-                self._contexts.move_to_end(slug)
-                return self._contexts[slug]
+            ctx = self._cached(slug)
+            if ctx is not None:
+                return ctx
             while len(self._contexts) >= self.max_contexts:
-                # ponytail: eviction có thể đóng context đang có page streaming khi vượt N slug khác nhau — cần refcount nếu gặp thực tế
                 _, old_ctx = self._contexts.popitem(last=False)
                 try:
                     await old_ctx.close()
                 except Exception:
                     pass
+                logger.warning(
+                    "BrowserPool context evicted for slug (max_contexts=%s)", self.max_contexts
+                )
             state = str(storage_state) if storage_state and storage_state.exists() else None
             if self.engine == "cloak":
                 from cloakbrowser import launch_context_async
@@ -78,6 +102,10 @@ class BrowserPool:
     async def _browser_for(self, headed: bool):
         if not headed:
             return self._browser
+        # Người dùng tắt tay cửa sổ headed thì browser mất kết nối — mở lại cho
+        # request kế tiếp thay vì để nó lỗi.
+        if self._browser_headed is not None and not self._browser_headed.is_connected():
+            self._browser_headed = None
         if self._browser_headed is None:
             self._browser_headed = await self._pw.chromium.launch(headless=False)
         return self._browser_headed

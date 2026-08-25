@@ -5,7 +5,7 @@ import uuid
 from contextlib import suppress
 from pathlib import Path
 
-from . import applog
+from . import applog, store
 from .agents.analyzer import integrate
 
 LOGIN_TIMEOUT_SECONDS = 600
@@ -13,6 +13,52 @@ MAX_LOGIN_ATTEMPTS = 2
 TERMINAL_STATUSES = {"ok", "failed", "cancelled", "login_timeout"}
 CANCELLABLE_STATUSES = {"running", "waiting_login", "resuming"}
 JOBS: dict[str, dict] = {}
+
+
+class _JobLog(list):
+    """Log của một job; mỗi dòng append vào đây cũng rơi xuống bảng `job_log`.
+
+    Là subclass của list chứ không phải lớp bọc, vì `job["log"].append` được
+    truyền thẳng làm callback cho analyzer, và `list(...)` / `len(...)` trên nó
+    đang được dùng ở nhiều chỗ.
+    """
+
+    __slots__ = ("_job_id",)
+
+    def __init__(self, job_id: str):
+        super().__init__()
+        self._job_id = job_id
+
+    def append(self, line: str) -> None:
+        seq = len(self)
+        super().append(line)
+        db = store.default()
+        if db is not None:
+            db.submit(
+                "INSERT OR IGNORE INTO job_log(job_id, seq, ts, level, line)"
+                " VALUES (?, ?, ?, 'info', ?)",
+                (self._job_id, seq, store.now_ms(), line))
+
+
+def _save(job: dict) -> None:
+    """Ghi trạng thái job xuống DB (bắn-rồi-quên, không chờ, không ném lỗi).
+
+    JOBS vẫn là nguồn đọc; bảng `job` để job sống sót qua restart và xem lại
+    được sau này. Gọi tại mỗi lần đổi status.
+    """
+    db = store.default()
+    if db is None:
+        return
+    now = store.now_ms()
+    db.submit(
+        "INSERT INTO job(id, kind, url, slug, status, headed, login_attempts,"
+        "                created_at, updated_at)"
+        " VALUES (?, 'integrate', ?, ?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(id) DO UPDATE SET"
+        "   slug = excluded.slug, status = excluded.status,"
+        "   login_attempts = excluded.login_attempts, updated_at = excluded.updated_at",
+        (job["id"], job["url"], job.get("slug"), job["status"],
+         1 if job.get("headed") else 0, job["login_attempts"], now, now))
 
 
 async def _critical(coro):
@@ -47,6 +93,7 @@ def _login_failure(job: dict, message: str) -> None:
     job["log"].append(message)
     job["log"].append(f"Chạy trực tiếp trên desktop hoặc dùng: python -m chat2api login {slug}")
     job["status"] = "failed"
+    _save(job)
     applog.log(f"integrate: thất bại {job['id']} ({slug}): {message}", "error")
     _cleanup_staging(job)
 
@@ -74,6 +121,7 @@ async def _finish_login_timeout(job: dict, login_manager) -> None:
             job["status"] = "login_timeout"
             job["log"].append("Hết thời gian chờ đăng nhập.")
             job["timeout_task"] = None
+            _save(job)
 
 
 async def _login_timeout(job: dict, login_manager) -> None:
@@ -126,6 +174,7 @@ async def _open_login(job: dict, expected_status: str, cfg, login_manager) -> No
             job["status"] = "waiting_login"
             job["log"].append("Đã mở cửa sổ Chromium. Hãy đăng nhập rồi xác nhận.")
             job["timeout_task"] = asyncio.create_task(_login_timeout(job, login_manager))
+            _save(job)
     if cancel_session:
         await login_manager.cancel(job["id"])
 
@@ -167,11 +216,15 @@ async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, logi
                 except Exception:
                     job["log"].append("Không thể tải recipe mới.")
                     job["status"] = "failed"
+                    _save(job)
                     _cleanup_staging(job)
                     return
+            # "log" nằm trong danh sách loại trừ để _JobLog không bị thay bằng
+            # list thường — mất luôn đường ghi xuống job_log.
             job.update({key: value for key, value in result.items()
-                        if key not in {"task", "timeout_task", "lock"}})
+                        if key not in {"task", "timeout_task", "lock", "log"}})
             job["status"] = result.get("status", "failed")
+            _save(job)
             if job["status"] in TERMINAL_STATUSES:
                 level = "info" if job["status"] == "ok" else "warn"
                 applog.log(f"integrate: {job['id']} ({job.get('slug')}) -> {job['status']}", level)
@@ -183,6 +236,7 @@ async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, logi
             if job["status"] == expected_status:
                 job["log"].append("Không thể reset analyzer context.")
                 job["status"] = "failed"
+                _save(job)
                 applog.log(f"integrate: {job['id']} lỗi reset context", "error")
                 _cleanup_staging(job)
     except Exception as error:
@@ -190,6 +244,7 @@ async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, logi
             if job["status"] == expected_status:
                 job["log"].append(f"error: {error}")
                 job["status"] = "failed"
+                _save(job)
                 applog.log(f"integrate: {job['id']} lỗi: {error}", "error")
                 _cleanup_staging(job)
 
@@ -202,7 +257,7 @@ def start_integrate(url: str, cfg, pool, router=None, login_manager=None,
         "url": url,
         "slug": None,
         "status": "running",
-        "log": [],
+        "log": _JobLog(job_id),
         "task": None,
         "timeout_task": None,
         "login_attempts": 0,
@@ -215,6 +270,7 @@ def start_integrate(url: str, cfg, pool, router=None, login_manager=None,
         "lock": asyncio.Lock(),
     }
     JOBS[job_id] = job
+    _save(job)
     job["task"] = asyncio.create_task(
         _run_analyzer(job, "running", cfg, pool, router, login_manager)
     )
@@ -254,6 +310,7 @@ async def complete_login(job_id: str, cfg, pool, router, login_manager) -> dict:
         if job["status"] != "waiting_login" or job.get("login_timeout_claimed", False):
             raise InvalidJobState
         job["status"] = "resuming"
+        _save(job)
         _cancel_timeout(job)
         continuation = asyncio.create_task(
             _complete_login(job, cfg, pool, router, login_manager)
@@ -280,6 +337,7 @@ async def _cancel_job(job: dict, login_manager, task) -> dict:
     async with job["lock"]:
         if job.get("cancel_claimed"):
             job["status"] = "cancelled"
+            _save(job)
     return {"ok": True, "status": "cancelled"}
 
 
@@ -322,6 +380,7 @@ async def shutdown(login_manager) -> None:
             if job["status"] == "waiting_login":
                 waiting_ids.append(job["id"])
             job["status"] = "cancelled"
+            _save(job)
             for key in ("task", "timeout_task"):
                 task = job.get(key)
                 if task and task is not current and not task.done():
