@@ -120,7 +120,7 @@
         </div>
       </div>
       <div class="dash-body shortcut-row">
-        <a class="button secondary small" href="/playground">Thử một prompt</a>
+        <a class="button secondary small" href="/sessions">Mở Sessions</a>
         <a class="button secondary small" href="/integrations">Thêm web chat mới</a>
         <a class="button secondary small" href="/accounts">Quản lý account</a>
         <a class="button secondary small" href="/settings">Chỉnh delay</a>

@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from . import accounts, applog, auth, errors, live_view, store  # noqa: F401  (import auth để đăng ký dependency)
+from . import accounts, applog, auth, errors, live_view, profiles, sessions, store  # noqa: F401  (import auth để đăng ký dependency)
 from .config import Config
 from .errors import OpenAIError
 from .providers.browser_recipe import TrialLimitExceeded
@@ -41,7 +41,8 @@ def create_app(cfg: Config) -> FastAPI:
     from .login_sessions import LoginSessionManager
     from .store import importer
 
-    pool = BrowserPool(cfg.browser_engine, cfg.pool_max_contexts)
+    pool = BrowserPool(cfg.browser_engine, cfg.pool_max_contexts,
+                       max_profiles=cfg.pool_max_profiles)
     login_manager = LoginSessionManager()
     router = Router(cfg.recipes_dir, pool)
     router.reload()
@@ -83,6 +84,16 @@ def create_app(cfg: Config) -> FastAPI:
                            " ({versions} bản YAML mới)".format(**counts))
             except Exception as error:
                 applog.log(f"store: import thất bại: {error}", "error")
+            if cfg.browser_profile_mode == "profile":
+                # Dựng profile mặc định ngay lúc khởi động để trang Profiles có
+                # cái để hiện, thay vì chỉ xuất hiện sau request chat đầu tiên.
+                try:
+                    await asyncio.to_thread(
+                        profiles.ensure_profile, profiles.DEFAULT_PROFILE, cfg.profiles_dir,
+                        max_tabs=cfg.profile_max_tabs, make_default=True)
+                    applog.log(f"profile: chế độ profile bật, thư mục {cfg.profiles_dir}")
+                except Exception as error:
+                    applog.log(f"profile: không dựng được profile mặc định: {error}", "error")
         router.reload()
         try:
             yield
@@ -157,6 +168,18 @@ def create_app(cfg: Config) -> FastAPI:
         cid = "chatcmpl-" + uuid.uuid4().hex[:29]
         from .providers.browser_recipe import BrowserRecipe as BR
 
+        # Ghi một transaction trước provider và một transaction khi kết thúc;
+        # tuyệt đối không ghi từng SSE delta. Header này cho desktop nối nhiều
+        # lượt vào cùng session; client API không gửi vẫn được gom theo model +
+        # fingerprint trong cửa sổ 30 phút (xem sessions.begin).
+        recording = await asyncio.to_thread(
+            sessions.begin,
+            request.headers.get("x-chat2api-session-id"), body.model, provider.slug,
+            msgs, body.stream, request.headers.get("authorization", ""),
+            request.headers.get("user-agent", ""),
+        )
+        response.headers["X-Chat2api-Session-Id"] = recording.session_id
+
         # Chỉ dùng cho playground/desktop test thủ công: bật browser hiện lên
         # (không headless) để xem trực tiếp recipe chạy, thay vì đợi kết quả mù.
         # Dù cửa sổ Chromium có thực sự hiện ra hay không (tùy máy), watch_id
@@ -175,6 +198,7 @@ def create_app(cfg: Config) -> FastAPI:
         async def agent_stream():
             from .agents import fallback
 
+            recording.fallback_used = True
             log_lines = [f"[fallback:{provider.slug}] recipe lỗi, agent chạy trực tiếp"]
             async for d in fallback.run(provider.url, msgs, request.app.state.pool, cfg_,
                                         log_lines.append):
@@ -225,28 +249,81 @@ def create_app(cfg: Config) -> FastAPI:
 
         if body.stream:
             async def gen():
+                parts: list[str] = []
+                final_error: OpenAIError | None = None
+                cancelled = False
                 try:
                     async for d in upstream():
+                        if not parts:
+                            sessions.first_delta(recording)
+                        parts.append(d)
                         yield _sse(cid, body.model, d)
-                except OpenAIError as e:
-                    yield _sse_error(e)
+                except OpenAIError as error:
+                    final_error = error
+                    yield _sse_error(error)
                 except TimeoutError:
-                    yield _sse_error(OpenAIError(
+                    final_error = OpenAIError(
                         504, "recipe_timeout",
                         f"Không nhận được reply trong thời hạn ({cfg_.recipe_timeout_ms}ms)",
-                        "api_error"))
-                yield "data: [DONE]\n\n"
+                        "api_error")
+                    yield _sse_error(final_error)
+                except asyncio.CancelledError:
+                    cancelled = True
+                    raise
+                finally:
+                    text = "".join(parts)
+                    html = provider.last_response_html if isinstance(provider, BR) else None
+                    if cancelled:
+                        await asyncio.to_thread(
+                            sessions.finish, recording, text,
+                            status="cancelled", error_code="client_cancelled",
+                            error_message="Client đã ngắt stream", finish_reason="error")
+                    elif final_error is not None:
+                        status = ("timeout" if final_error.code == "recipe_timeout" else
+                                  "trial_limit" if final_error.code == "trial_limit_exceeded" else "error")
+                        await asyncio.to_thread(
+                            sessions.finish, recording, text,
+                            html=html, status=status, error_code=final_error.code,
+                            error_message=final_error.message, http_status=final_error.status,
+                            finish_reason="error")
+                    else:
+                        await asyncio.to_thread(
+                            sessions.finish, recording, text, html=html)
+                if not cancelled:
+                    yield "data: [DONE]\n\n"
 
-            sse_headers = {"X-Chat2api-Watch-Id": watch_id} if watch_id else None
+            sse_headers = {"X-Chat2api-Session-Id": recording.session_id}
+            if watch_id:
+                sse_headers["X-Chat2api-Watch-Id"] = watch_id
             return StreamingResponse(gen(), media_type="text/event-stream", headers=sse_headers)
 
-        parts = []
+        parts: list[str] = []
         try:
             async for d in upstream():
+                if not parts:
+                    sessions.first_delta(recording)
                 parts.append(d)
         except TimeoutError:
-            raise OpenAIError(504, "recipe_timeout", "Recipe timeout", "api_error")
+            error = OpenAIError(504, "recipe_timeout", "Recipe timeout", "api_error")
+            await asyncio.to_thread(
+                sessions.finish, recording, "".join(parts),
+                status="timeout", error_code=error.code,
+                error_message=error.message, http_status=error.status,
+                finish_reason="error")
+            raise error
+        except OpenAIError as error:
+            status = "trial_limit" if error.code == "trial_limit_exceeded" else "error"
+            await asyncio.to_thread(
+                sessions.finish, recording, "".join(parts),
+                status=status, error_code=error.code,
+                error_message=error.message, http_status=error.status,
+                finish_reason="error")
+            raise
         text = "".join(parts)
+        html = provider.last_response_html if isinstance(provider, BR) else None
+        await asyncio.to_thread(
+            sessions.finish, recording, text, html=html)
+        response.headers["X-Chat2api-Session-Id"] = recording.session_id
         return {"id": cid, "object": "chat.completion", "created": int(time.time()),
                 "model": body.model,
                 "choices": [{"index": 0,
@@ -269,7 +346,8 @@ def register_admin(app: FastAPI, admin) -> None:
     from .agents import llm
     from . import jobs, settings
     from .schemas import (AccountLoginRequest, AddAccountRequest, IntegrateRequest,
-                          SaveAccountRequest, SettingsRequest)
+                          SaveAccountRequest, SessionForkRequest, SessionUpdateRequest,
+                          SettingsRequest)
 
     @admin.post("/integrate")
     async def integrate(body: IntegrateRequest, request: Request):
@@ -338,6 +416,74 @@ def register_admin(app: FastAPI, admin) -> None:
                 await asyncio.sleep(0.5)
 
         return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @admin.get("/profiles")
+    async def profile_list(request: Request):
+        cfg = request.app.state.cfg
+        pool_ = request.app.state.pool
+        items = await asyncio.to_thread(profiles.list_profiles)
+        open_now = set(pool_.open_profiles)
+        for item in items:
+            item["open"] = item["name"] in open_now
+            item["tabs"] = pool_.tab_count(item["name"])
+        return {"profiles": items, "mode": cfg.browser_profile_mode,
+                "profiles_dir": str(cfg.profiles_dir),
+                "max_profiles": cfg.pool_max_profiles}
+
+    @admin.post("/profiles/{name}/close")
+    async def profile_close(name: str, request: Request):
+        closed = await request.app.state.pool.drop_profile(name)
+        if closed:
+            applog.log(f"profile: đã đóng '{name}'")
+        return {"ok": True, "closed": closed}
+
+    @admin.get("/sessions")
+    async def session_list(q: str = "", model: str = "", archived: bool = False,
+                           limit: int = 100):
+        items = await asyncio.to_thread(sessions.list_sessions, q, model, archived, limit)
+        return {"sessions": items, "persisted": store.default() is not None}
+
+    @admin.get("/sessions/{session_id}")
+    async def session_detail(session_id: str):
+        item = await asyncio.to_thread(sessions.get_session, session_id)
+        if item is None:
+            raise OpenAIError(404, "not_found", "Session không tồn tại")
+        return item
+
+    @admin.patch("/sessions/{session_id}")
+    async def session_update(session_id: str, body: SessionUpdateRequest):
+        values = body.model_dump(exclude_none=True)
+        item = await asyncio.to_thread(sessions.update_session, session_id, values)
+        if item is None:
+            raise OpenAIError(404, "not_found", "Session không tồn tại")
+        return item
+
+    @admin.delete("/sessions/{session_id}")
+    async def session_delete(session_id: str):
+        if not await asyncio.to_thread(sessions.delete_session, session_id):
+            raise OpenAIError(404, "not_found", "Session không tồn tại")
+        return {"ok": True}
+
+    @admin.post("/sessions/{session_id}/fork")
+    async def session_fork(session_id: str, body: SessionForkRequest):
+        item = await asyncio.to_thread(sessions.fork_session, session_id, body.up_to_seq)
+        if item is None:
+            raise OpenAIError(404, "not_found", "Session không tồn tại")
+        return item
+
+    @admin.get("/sessions/{session_id}/export")
+    async def session_export(session_id: str, format: str = "md"):
+        if format not in {"md", "html", "json", "jsonl"}:
+            raise OpenAIError(400, "invalid_format", "Format phải là md, html, json hoặc jsonl")
+        result = await asyncio.to_thread(sessions.export_session, session_id, format)
+        if result is None:
+            raise OpenAIError(404, "not_found", "Session không tồn tại")
+        content, media_type = result
+        suffix = "md" if format == "md" else format
+        return Response(
+            content=content, media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="session-{session_id[:8]}.{suffix}"'},
+        )
 
     @admin.get("/logs")
     async def get_logs(after: int = 0, limit: int = 200):

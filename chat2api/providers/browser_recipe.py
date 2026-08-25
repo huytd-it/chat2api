@@ -190,6 +190,11 @@ class BrowserRecipe(Provider):
         self.prompt_cfg = recipe.get("prompt", {})
         self.response_cfg = recipe.get("response", {})
         self.ds = self.response_cfg.get("done_signal", {})
+        # HTML gốc chỉ được chụp khi recipe bật tường minh để recipe cũ không
+        # đổi hành vi và DB không phình ngoài ý muốn. Main đọc giá trị cuối này
+        # sau khi stream kết thúc để lưu cùng message assistant.
+        self._capture_html = bool(self.response_cfg.get("capture_html", False))
+        self.last_response_html: str | None = None
         login_cfg = recipe.get("login") or {}
         # Kho account chung nằm cạnh các recipe (recipes/.accounts). Analyzer chạy
         # recipe thử ở thư mục tạm nên truyền accounts_root tường minh.
@@ -214,6 +219,14 @@ class BrowserRecipe(Provider):
         # cùng account phải xếp hàng qua _locks.
         self._pages: dict[str, object] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        # Chế độ profile là opt-in và đọc từ env ngay tại đây thay vì nhận qua
+        # tham số: provider được dựng ở nhiều chỗ (router, analyzer, test) mà
+        # không phải chỗ nào cũng cầm Config.
+        mode = os.environ.get("BROWSER_PROFILE_MODE", "storage_state").strip().lower()
+        self._profile_mode = mode == "profile" and os.environ.get("BROWSER_ENGINE",
+                                                                  "playwright") != "cloak"
+        self._profiles_dir = Path(os.environ.get("CHAT2API_DATA_DIR", "./data")) / "profiles"
+        self._profile_max_tabs = max(1, int(os.environ.get("PROFILE_MAX_TABS", "4")))
         self._rotator = _AccountRotator(
             self._accounts,
             login_cfg.get("strategy", "round_robin"),
@@ -275,6 +288,40 @@ class BrowserRecipe(Provider):
             lock = self._locks[ctx_key] = asyncio.Lock()
         return lock
 
+    async def _acquire_page(self, ctx_key: str, storage_state, headed: bool):
+        """Lấy tab để chạy request, theo chế độ đang bật.
+
+        `storage_state` (mặc định): một context riêng cho mỗi ctx_key, y như cũ.
+        `profile`: một persistent context dùng chung cho nhiều recipe, mỗi
+        recipe một tab — nên các recipe khác nhau chạy song song được.
+        Chế độ profile không áp dụng cho engine `cloak`
+        (`launch_context_async` không nhận `user_data_dir`) và cho request
+        headed thủ công, hai đường đó rơi về cách cũ.
+        """
+        profile = None
+        if self._profile_mode and not headed and self.pool is not None:
+            from .. import profiles as profiles_mod
+
+            try:
+                name = await asyncio.to_thread(profiles_mod.profile_for_recipe, self.slug)
+                profile = await asyncio.to_thread(
+                    profiles_mod.ensure_profile, name, self._profiles_dir,
+                    headless=True, max_tabs=self._profile_max_tabs)
+            except Exception as error:
+                # Kho chưa mở, tên hỏng, hay khoá pid — báo rồi chạy tiếp bằng
+                # đường cũ chứ không để chat chết vì một tính năng opt-in.
+                print(f"[chat2api] profile cho '{self.slug}' không dùng được: {error}",
+                      file=sys.stderr)
+                profile = None
+        if profile is not None:
+            try:
+                return await self.pool.page_for(profile, self.slug)
+            except Exception as error:
+                print(f"[chat2api] mở profile '{profile.name}' thất bại, dùng storage_state: "
+                      f"{error}", file=sys.stderr)
+        ctx = await self.pool.context_for(ctx_key, storage_state, headed=headed)
+        return await self._page_for(ctx, ctx_key)
+
     async def _page_for(self, ctx, ctx_key: str):
         """Tái sử dụng page đang mở; chỉ mở page mới khi chưa có hoặc bị đóng tay."""
         page = self._pages.get(ctx_key)
@@ -311,13 +358,24 @@ class BrowserRecipe(Provider):
     def models(self) -> list[ModelInfo]:
         return [ModelInfo(id=f"{self.slug}/{m['id']}", slug=self.slug) for m in self._recipe["models"]]
 
-    async def _reply_text(self, page) -> str:
+    async def _reply(self, page) -> tuple[str, str | None]:
+        """Đọc reply hiện tại và, khi bật, outerHTML của cùng một element."""
         sel = self.response_cfg["last_message_selector"]
-        return await page.evaluate(
-            """(sel) => { const els = document.querySelectorAll(sel);
-                 return els.length ? els[els.length - 1].innerText : ""; }""",
-            sel,
+        result = await page.evaluate(
+            """([sel, captureHtml]) => {
+                 const els = document.querySelectorAll(sel);
+                 if (!els.length) return ["", null];
+                 const el = els[els.length - 1];
+                 return [el.innerText || "", captureHtml ? el.outerHTML : null];
+               }""",
+            [sel, self._capture_html],
         )
+        return str(result[0] or ""), result[1]
+
+    async def _reply_text(self, page) -> str:
+        """Compatibility helper cho code/test ngoài module chỉ cần innerText."""
+        text, _ = await self._reply(page)
+        return text
 
     async def _wait_chat_ready(self, page, box) -> None:
         """Chờ trang chat sẵn sàng nhận prompt, rồi mở phiên chat mới nếu cần.
@@ -335,6 +393,7 @@ class BrowserRecipe(Provider):
     async def stream(self, messages: list[dict], model_id: str,
                      headed: bool | None = None, watch_id: str | None = None) -> AsyncIterator[str]:
         prompt = flatten_messages(messages)
+        self.last_response_html = None
         account_name, storage_state = await self._rotator.next()
         ctx_key = self.slug if len(self._accounts) <= 1 else f"{self.slug}::{account_name}"
         effective_headed = self._headed if headed is None else headed
@@ -343,8 +402,7 @@ class BrowserRecipe(Provider):
         # Page dùng chung cho mỗi ctx_key nên hai request cùng account phải nối
         # đuôi nhau, không chen ngang vào cùng một ô input.
         async with self._lock_for(ctx_key):
-            ctx = await self.pool.context_for(ctx_key, storage_state, headed=effective_headed)
-            page = await self._page_for(ctx, ctx_key)
+            page = await self._acquire_page(ctx_key, storage_state, effective_headed)
             if watch_id:
                 await live_view.register(watch_id, page)
             deadline = time.monotonic() + timeout_ms / 1000
@@ -371,7 +429,9 @@ class BrowserRecipe(Provider):
                 while True:
                     if time.monotonic() > deadline:
                         raise TimeoutError(f"recipe '{self.slug}' timeout sau {timeout_ms}ms")
-                    text = await self._reply_text(page)
+                    text, reply_html = await self._reply(page)
+                    if reply_html is not None:
+                        self.last_response_html = reply_html
                     if text != last:
                         if text.startswith(last) and text.strip() != prompt.strip():
                             yield text[len(last):]

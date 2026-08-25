@@ -39,3 +39,12 @@ class SaveAccountRequest(BaseModel):
 
 class SettingsRequest(BaseModel):
     values: dict[str, str]
+
+class SessionUpdateRequest(BaseModel):
+    title: str | None = None
+    pinned: bool | None = None
+    archived: bool | None = None
+    tags: list[str] | None = None
+
+class SessionForkRequest(BaseModel):
+    up_to_seq: int

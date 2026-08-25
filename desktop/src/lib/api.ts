@@ -103,10 +103,11 @@ export async function apiBase(): Promise<string> {
   return cachedBase;
 }
 
-function headers(key: string, headed = false): HeadersInit {
+function headers(key: string, headed = false, sessionId = ""): HeadersInit {
   const h: Record<string, string> = { "Content-Type": "application/json" };
   if (key) h["Authorization"] = "Bearer " + key;
   if (headed) h["X-Chat2api-Headed"] = "true";
+  if (sessionId) h["X-Chat2api-Session-Id"] = sessionId;
   return h;
 }
 
@@ -135,6 +136,68 @@ export interface ChatMessage {
   content: string;
 }
 
+export interface RequestRecord {
+  id: number;
+  status: string;
+  ttfb_ms: number | null;
+  duration_ms: number | null;
+  fallback_used: number;
+  error_code: string | null;
+  error_message: string | null;
+  prompt_chars: number;
+  completion_chars: number;
+}
+
+export interface SessionArtifact {
+  id: number;
+  idx: number;
+  kind: string;
+  language: string;
+  title: string;
+  body: string;
+}
+
+export interface SessionMessage {
+  id: number;
+  seq: number;
+  role: "system" | "user" | "assistant" | "tool";
+  content: string;
+  content_markdown: string | null;
+  content_html: string | null;
+  reasoning: string | null;
+  finish_reason: string | null;
+  error: string | null;
+  ttfb_ms: number | null;
+  duration_ms: number | null;
+  char_count: number;
+  created_at: number;
+  artifacts: SessionArtifact[];
+  request: RequestRecord | null;
+}
+
+export interface SessionSummary {
+  id: string;
+  title: string;
+  kind: "chat" | "api" | "probe";
+  model_public_id: string;
+  recipe_slug: string | null;
+  profile_name: string | null;
+  account_label: string | null;
+  pinned: number;
+  archived: number;
+  message_count: number;
+  total_chars: number;
+  error_count: number;
+  first_prompt: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SessionDetail extends SessionSummary {
+  tags: string[];
+  messages: SessionMessage[];
+}
+
 /** Streams an SSE chat completion, invoking onDelta for each content chunk.
  * `messages` is the full conversation (real-chat semantics) sent as-is to
  * /v1/chat/completions.
@@ -154,11 +217,13 @@ export async function streamChat(
   signal?: AbortSignal,
   headed = false,
   onWatchId?: (watchId: string) => void,
+  sessionId = "",
+  onSessionId?: (sessionId: string) => void,
 ): Promise<void> {
   const base = await apiBase();
   const r = await fetch(base + "/v1/chat/completions", {
     method: "POST",
-    headers: headers(key, headed),
+    headers: headers(key, headed, sessionId),
     signal,
     body: JSON.stringify({
       model,
@@ -172,6 +237,8 @@ export async function streamChat(
   }
   const watchId = r.headers.get("X-Chat2api-Watch-Id");
   if (watchId && onWatchId) onWatchId(watchId);
+  const resolvedSessionId = r.headers.get("X-Chat2api-Session-Id");
+  if (resolvedSessionId && onSessionId) onSessionId(resolvedSessionId);
   const reader = r.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
@@ -423,4 +490,121 @@ export async function fetchLogs(key: string, after = 0): Promise<LogEntry[]> {
   const r = await fetch(base + "/admin/logs?after=" + after, { headers: headers(key) });
   const data = await asJson(r);
   return data.entries as LogEntry[];
+}
+
+export interface ProfileInfo {
+  id: number;
+  name: string;
+  user_data_dir: string;
+  headless: number;
+  max_tabs: number;
+  engine: string;
+  is_default: number;
+  domains: number;
+  locked: boolean;
+  open: boolean;
+  tabs: number;
+  last_used_at: number | null;
+}
+
+export interface ProfileList {
+  profiles: ProfileInfo[];
+  mode: "storage_state" | "profile";
+  profiles_dir: string;
+  max_profiles: number;
+}
+
+export async function fetchProfiles(key: string): Promise<ProfileList> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/profiles", { headers: headers(key) });
+  return asJson(r);
+}
+
+export async function closeProfile(key: string, name: string): Promise<void> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/profiles/" + encodeURIComponent(name) + "/close", {
+    method: "POST",
+    headers: headers(key),
+  });
+  await asJson(r);
+}
+
+export async function fetchSessions(
+  key: string,
+  query = "",
+  model = "",
+  archived = false,
+): Promise<SessionSummary[]> {
+  const base = await apiBase();
+  const params = new URLSearchParams();
+  if (query) params.set("q", query);
+  if (model) params.set("model", model);
+  if (archived) params.set("archived", "true");
+  const r = await fetch(base + "/admin/sessions?" + params, { headers: headers(key) });
+  const data = await asJson(r);
+  return data.sessions as SessionSummary[];
+}
+
+export async function fetchSession(key: string, sessionId: string): Promise<SessionDetail> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/sessions/" + encodeURIComponent(sessionId), {
+    headers: headers(key),
+  });
+  return asJson(r);
+}
+
+export async function updateSession(
+  key: string,
+  sessionId: string,
+  values: {
+    title?: string;
+    pinned?: boolean | number;
+    archived?: boolean | number;
+    tags?: string[];
+  },
+): Promise<SessionDetail> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/sessions/" + encodeURIComponent(sessionId), {
+    method: "PATCH",
+    headers: headers(key),
+    body: JSON.stringify(values),
+  });
+  return asJson(r);
+}
+
+export async function deleteSession(key: string, sessionId: string): Promise<void> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/sessions/" + encodeURIComponent(sessionId), {
+    method: "DELETE",
+    headers: headers(key),
+  });
+  await asJson(r);
+}
+
+export async function forkSession(
+  key: string,
+  sessionId: string,
+  upToSeq: number,
+): Promise<SessionDetail> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/sessions/" + encodeURIComponent(sessionId) + "/fork", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify({ up_to_seq: upToSeq }),
+  });
+  return asJson(r);
+}
+
+export async function exportSession(
+  key: string,
+  sessionId: string,
+  format: "md" | "html" | "json" | "jsonl",
+): Promise<Blob> {
+  const base = await apiBase();
+  const r = await fetch(
+    base + "/admin/sessions/" + encodeURIComponent(sessionId) + "/export?format=" + format,
+    { headers: headers(key) },
+  );
+  if (!r.ok) await asJson(r);
+  return r.blob();
 }

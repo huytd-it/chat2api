@@ -14,12 +14,12 @@ function createApiKeyStore() {
   };
 }
 
-/** The playground/admin bearer key, persisted locally like the browser build. */
+/** Bearer key dùng cho mọi request chat + admin, lưu cục bộ trên máy này. */
 export const apiKey = createApiKeyStore();
 
-/** Khi bật, request chat test trong Playground yêu cầu server hiện cửa sổ
+/** Khi bật, request chat từ trang Sessions yêu cầu server hiện cửa sổ
  * Chromium (không headless) thay vì chạy ẩn ở nền. */
-export const headedPlayground = writable(false);
+export const headedBrowser = writable(false);
 
 export const toastMessage = writable<string | null>(null);
 let toastTimer: ReturnType<typeof setTimeout> | undefined;

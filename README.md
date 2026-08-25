@@ -11,7 +11,6 @@ Biến web chat AI bất kỳ thành API OpenAI-compatible. Thay việc copy/pas
 ## Chạy
 
     python -m chat2api serve --port 8100
-    # mở http://localhost:8100 — playground
 
 ## Dùng như API chuẩn OpenAI
 
@@ -34,7 +33,7 @@ Model id: `<provider>/<model>`, ví dụ `gemini/gemini-flash`, `qwen/qwen-max`.
     AGENT_LLM_API_KEY=sk-...
     AGENT_LLM_MODEL=gpt-4o
 
-Rồi bấm **Integrate** trong playground, hoặc:
+Rồi bấm **Integrate** trong desktop app, hoặc:
 
     python -m chat2api integrate https://chat.example.com
 
@@ -44,7 +43,7 @@ Chromium có thể không hiện ra tùy máy/session (remote desktop, sandbox..
 nên khi tick ô này app còn hiện thêm một **live view** — ảnh chụp trực tiếp
 trang đang chạy, tự refresh khoảng 700ms/lần qua
 `GET /admin/watch/{id}/screenshot` — hoạt động cả khi cửa sổ không hiện ra.
-Live view cũng dùng được khi test chat ở tab Playground, không chỉ lúc
+Live view cũng dùng được khi chat ở trang Sessions, không chỉ lúc
 Integrate.
 
 Site cần đăng nhập: chạy `python -m chat2api login <slug>`, đăng nhập tay,
@@ -76,12 +75,30 @@ tạo sau, và cả lúc Integrate đang thử recipe mới.
 | Trang | Dùng để |
 |---|---|
 | `/` Tổng quan | Trạng thái server, cảnh báo recipe hỏng / domain chưa có account |
-| `/playground` | Thử prompt, live view |
+| `/sessions` | Chat + xem lại mọi hội thoại: pretty / markdown / HTML gốc / JSON, tìm toàn văn, fork, xuất file |
 | `/recipes` | Reload, xóa, tắt browser, xem trạng thái unhealthy |
 | `/accounts` | Account dùng chung theo domain |
 | `/integrations` | Tích hợp web chat mới bằng agent |
 | `/logs` | Log hoạt động server + output tiến trình nền |
 | `/settings` | Sửa delay/timeout/engine... ghi thẳng vào `.env` |
+
+## Lưu hội thoại
+
+Mọi request qua `/v1/chat/completions` được ghi vào `session` + `message` +
+`request_log`, kể cả request từ client API ngoài. Đúng hai transaction cho mỗi
+request (mở và đóng) — không ghi từng SSE delta.
+
+- Header `X-Chat2api-Session-Id` (tùy chọn) nối nhiều lượt vào cùng một phiên;
+  server luôn trả lại header này để client biết mình vừa ghi vào đâu.
+- Không gửi header thì vẫn được lưu dưới `kind='api'`, gom theo model + hash của
+  `Authorization` và `User-Agent` trong cửa sổ 30 phút.
+- Reply lỗi / timeout / hết lượt / client ngắt giữa chừng đều được lưu kèm phần
+  text đã nhận được, không mất trắng.
+- Recipe khai báo `response.capture_html: true` thì lưu thêm outerHTML gốc của
+  site, trang Sessions render nó trong `<iframe sandbox>` để xem bảng/công thức
+  đúng như trên site. Mặc định tắt.
+
+Kho rỗng (chưa mở được SQLite) chỉ làm mất phần lịch sử — API chat vẫn chạy.
 
 ## Duy trì browser & delay khi chạy recipe
 

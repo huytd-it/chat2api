@@ -237,7 +237,7 @@
         </div>
         <div class="step">
           <span class="step-index">3</span>
-          <div><strong>Xuất bản recipe</strong><p>Model mới xuất hiện ngay trong playground.</p></div>
+          <div><strong>Xuất bản recipe</strong><p>Model mới xuất hiện ngay trong Sessions.</p></div>
         </div>
       </div>
     </aside>

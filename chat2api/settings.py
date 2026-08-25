@@ -22,6 +22,18 @@ FIELDS: list[dict] = [
      "apply": "restart", "label": "Số browser context tối đa"},
     {"key": "BROWSER_ENGINE", "type": "choice", "default": "playwright", "group": "Browser",
      "apply": "restart", "label": "Engine browser", "choices": ["playwright", "cloak"]},
+    {"key": "BROWSER_PROFILE_MODE", "type": "choice", "default": "storage_state",
+     "group": "Browser", "apply": "restart", "label": "Chế độ danh tính trình duyệt",
+     "choices": ["storage_state", "profile"],
+     "help": "storage_state: mỗi recipe một context, chỉ cookie + localStorage. "
+             "profile: một Chromium profile giữ đăng nhập mọi domain, mỗi recipe một tab "
+             "chạy song song. Không áp dụng cho engine cloak."},
+    {"key": "POOL_MAX_PROFILES", "type": "int", "default": "2", "group": "Browser",
+     "apply": "restart", "label": "Số profile mở cùng lúc",
+     "help": "Mỗi profile là một tiến trình Chromium. Chỉ dùng ở chế độ profile."},
+    {"key": "PROFILE_MAX_TABS", "type": "int", "default": "4", "group": "Browser",
+     "apply": "restart", "label": "Số tab tối đa trong một profile",
+     "help": "Vượt thì tab ít dùng nhất bị đóng, browser vẫn mở."},
     {"key": "RECIPE_TIMEOUT_MS", "type": "int", "default": "120000", "group": "Server",
      "apply": "restart", "label": "Hạn chờ recipe trả lời (ms)"},
     {"key": "ANON_TRIAL_LIMIT", "type": "int", "default": "20", "group": "Server",

@@ -1,10 +1,20 @@
 import asyncio
+import json
 import logging
 
 logger = logging.getLogger(__name__)
 
 from collections import OrderedDict
 from pathlib import Path
+
+# Chromium bóp CPU của tab nền. Trang chat đang stream trả lời sẽ đứng lại và
+# vòng poll `stable_text` trong browser_recipe.stream() sẽ timeout — nên khi
+# chạy nhiều recipe song song trong một profile, ba cờ này là bắt buộc.
+PROFILE_ARGS = [
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+]
 
 
 async def _finish_cleanup(cleanup) -> None:
@@ -23,13 +33,22 @@ class BrowserPool:
     chấp nhận vì cloak chỉ bật cho site bot-detect khó.
     """
 
-    def __init__(self, engine: str = "playwright", max_contexts: int = 10):
+    def __init__(self, engine: str = "playwright", max_contexts: int = 10,
+                 max_profiles: int = 2):
         self.engine = engine
         self.max_contexts = max(1, int(max_contexts))
+        self.max_profiles = max(1, int(max_profiles))
         self._contexts: OrderedDict[str, object] = OrderedDict()
         self._lock = asyncio.Lock()
         self._pw = None
         self._browser = None
+        # Đường profile (BROWSER_PROFILE_MODE=profile) — sống SONG SONG với
+        # _contexts ở trên, không thay thế. Mỗi profile là một persistent
+        # context (vừa là browser vừa là context), giữ nhiều tab bên trong.
+        self._profiles: OrderedDict[str, object] = OrderedDict()
+        self._profile_ids: dict[str, int] = {}
+        self._pages: OrderedDict[str, object] = OrderedDict()
+        self._profile_lock = asyncio.Lock()
         # Browser headed (cửa sổ hiện ra) dùng khi test recipe trong lúc
         # Integrate, để xem trực quan trang web bên cạnh app — chỉ khởi
         # động khi có context nào đó yêu cầu headed=True.
@@ -110,6 +129,187 @@ class BrowserPool:
             self._browser_headed = await self._pw.chromium.launch(headless=False)
         return self._browser_headed
 
+    # ------------------------------------------------------- đường profile
+
+    async def context_for_profile(self, profile):
+        """Persistent context của một profile, mở nếu chưa có.
+
+        Khác `context_for`: một profile giữ đăng nhập của mọi domain và chứa
+        nhiều tab, nên nó được khoá theo tên profile chứ không theo slug recipe.
+        """
+        from . import profiles as profiles_mod
+
+        ctx = self._profiles.get(profile.name)
+        if ctx is not None and self._profile_alive(ctx):
+            self._profiles.move_to_end(profile.name)
+            return ctx
+        async with self._profile_lock:
+            ctx = self._profiles.get(profile.name)
+            if ctx is not None and self._profile_alive(ctx):
+                self._profiles.move_to_end(profile.name)
+                return ctx
+            self._profiles.pop(profile.name, None)
+            while len(self._profiles) >= self.max_profiles:
+                name, old = self._profiles.popitem(last=False)
+                await self._close_profile(name, old)
+                logger.info("BrowserPool: đóng profile '%s' (max_profiles=%s)",
+                            name, self.max_profiles)
+
+            # Khoá pid phải giành TRƯỚC khi Chromium chạm vào thư mục.
+            await asyncio.to_thread(profiles_mod.acquire_lock, profile)
+            try:
+                ctx = await self._launch_profile(profile)
+            except Exception:
+                await asyncio.to_thread(profiles_mod.release_lock, profile.id)
+                raise
+            self._profiles[profile.name] = ctx
+            self._profile_ids[profile.name] = profile.id
+            await self._seed_profile(profile, ctx)
+            await asyncio.to_thread(profiles_mod.touch, profile.id)
+            return ctx
+
+    async def _launch_profile(self, profile):
+        kwargs = {
+            "user_data_dir": profile.user_data_dir,
+            "headless": profile.headless,
+            "args": list(PROFILE_ARGS),
+        }
+        viewport = profile.viewport_size
+        if viewport:
+            kwargs["viewport"] = viewport
+        for key, value in (("proxy", {"server": profile.proxy} if profile.proxy else None),
+                           ("user_agent", profile.user_agent),
+                           ("locale", profile.locale),
+                           ("timezone_id", profile.timezone)):
+            if value:
+                kwargs[key] = value
+        return await self._pw.chromium.launch_persistent_context(**kwargs)
+
+    async def _seed_profile(self, profile, ctx) -> None:
+        """Đổ storage_state cũ vào profile lần đầu, rồi bỏ đánh dấu.
+
+        Cookie đổ thẳng được; localStorage phải mở đúng origin mới ghi được, nên
+        mỗi origin tốn một lần goto. Lỗi ở đây không được chặn request: profile
+        chưa seed vẫn chạy được, chỉ là người dùng phải đăng nhập lại.
+        """
+        from . import profiles as profiles_mod
+
+        pending = await asyncio.to_thread(profiles_mod.pending_seeds, profile.id)
+        for account_id, path in pending:
+            try:
+                state = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as error:
+                logger.warning("seed profile '%s': không đọc được %s: %s",
+                               profile.name, path, error)
+                continue
+            try:
+                cookies = state.get("cookies") or []
+                if cookies:
+                    await ctx.add_cookies(cookies)
+                for origin in state.get("origins") or []:
+                    items = origin.get("localStorage") or []
+                    if not items:
+                        continue
+                    page = await ctx.new_page()
+                    try:
+                        await page.goto(origin["origin"], wait_until="domcontentloaded",
+                                        timeout=20000)
+                        await page.evaluate(
+                            "(items) => { for (const it of items)"
+                            " localStorage.setItem(it.name, it.value); }", items)
+                    finally:
+                        await page.close()
+                await asyncio.to_thread(profiles_mod.clear_seed, account_id)
+                logger.info("seed profile '%s' từ %s", profile.name, path.name)
+            except Exception as error:
+                logger.warning("seed profile '%s' từ %s thất bại: %s",
+                               profile.name, path, error)
+
+    async def page_for(self, profile, slug: str):
+        """Tab dài hạn cho một cặp (profile, recipe).
+
+        Mỗi recipe một tab riêng nên các recipe khác nhau trong cùng profile
+        chạy song song được — đây chính là phần "chia tab dùng nhiều web chat
+        một lúc".
+        """
+        ctx = await self.context_for_profile(profile)
+        key = f"{profile.name}::{slug}"
+        page = self._pages.get(key)
+        if page is not None and not page.is_closed():
+            self._pages.move_to_end(key)
+            return page
+        self._pages.pop(key, None)
+        # Persistent context luôn mở sẵn một about:blank; nhận nó làm tab đầu
+        # thay vì để một cửa sổ trống lơ lửng.
+        existing = [p for p in ctx.pages if not p.is_closed()]
+        claimed = {id(p) for p in self._pages.values()}
+        page = next((p for p in existing if id(p) not in claimed and p.url in ("about:blank", "")),
+                    None)
+        if page is None:
+            page = await ctx.new_page()
+        self._pages[key] = page
+        await self._evict_tabs(profile)
+        return page
+
+    async def _evict_tabs(self, profile) -> None:
+        prefix = f"{profile.name}::"
+        keys = [k for k in self._pages if k.startswith(prefix)]
+        while len(keys) > profile.max_tabs:
+            oldest = keys.pop(0)
+            page = self._pages.pop(oldest, None)
+            if page is not None and not page.is_closed():
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+            logger.info("BrowserPool: đóng tab '%s' (max_tabs=%s)", oldest, profile.max_tabs)
+
+    @staticmethod
+    def _profile_alive(ctx) -> bool:
+        browser = getattr(ctx, "browser", None)
+        if browser is not None:
+            return browser.is_connected()
+        # Persistent context không có .browser trong vài bản Playwright; mất
+        # hết page là dấu hiệu người dùng đã tắt tay cửa sổ.
+        try:
+            return any(not p.is_closed() for p in ctx.pages) or not ctx.pages
+        except Exception:
+            return False
+
+    async def _close_profile(self, name: str, ctx) -> None:
+        from . import profiles as profiles_mod
+
+        for key in [k for k in self._pages if k.startswith(f"{name}::")]:
+            self._pages.pop(key, None)
+        try:
+            await ctx.close()
+        except Exception:
+            pass
+        profile_id = self._profile_ids.pop(name, None)
+        if profile_id is not None:
+            await asyncio.to_thread(profiles_mod.release_lock, profile_id)
+
+    async def drop_profile(self, name: str) -> bool:
+        async with self._profile_lock:
+            ctx = self._profiles.pop(name, None)
+        if ctx is None:
+            return False
+        await _finish_cleanup(self._close_profile(name, ctx))
+        return True
+
+    @property
+    def profile_count(self) -> int:
+        return len(self._profiles)
+
+    @property
+    def open_profiles(self) -> list[str]:
+        return list(self._profiles)
+
+    def tab_count(self, profile_name: str) -> int:
+        prefix = f"{profile_name}::"
+        return sum(1 for k, p in self._pages.items()
+                   if k.startswith(prefix) and not p.is_closed())
+
     async def drop(self, slug: str) -> None:
         async with self._lock:
             context = self._contexts.pop(slug, None)
@@ -129,6 +329,10 @@ class BrowserPool:
             except Exception:
                 pass
         self._contexts.clear()
+        for name, ctx in list(self._profiles.items()):
+            await self._close_profile(name, ctx)
+        self._profiles.clear()
+        self._pages.clear()
         if self._browser:
             try:
                 await self._browser.close()

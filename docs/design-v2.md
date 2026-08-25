@@ -246,7 +246,9 @@ response:
   capture_html: true       # mới — chụp outerHTML cùng lúc với innerText
 ```
 
-`_reply_text()` trong `browser_recipe.py` đổi thành `_reply()` trả `(text, html|None)`. Mặc định `false` để recipe cũ không đổi hành vi và không phình DB.
+`_reply_text()` trong `browser_recipe.py` đổi thành `_reply()` trả `(text, html|None)`; `_reply_text()` giữ lại làm wrapper cho code chỉ cần innerText. Mặc định `false` để recipe cũ không đổi hành vi và không phình DB.
+
+HTML không đi kèm từng delta (nó là outerHTML *toàn bộ* element, không phải phần thêm): provider giữ bản chụp cuối ở `last_response_html`, `main.py` đọc sau khi stream đóng.
 
 ### 5.3 Tiện ích
 
@@ -264,7 +266,9 @@ Toàn cục: tìm kiếm qua `message_fts` (`MATCH`, có `snippet()`, bỏ dấu
 2. Trong lúc stream: **không** ghi DB từng delta. Gom vào buffer trong RAM; ghi `ttfb_ms` một lần khi có delta đầu.
 3. Khi xong/lỗi: một transaction — chèn message `assistant`, tách `artifact`, chèn `tool_call`, cập nhật `request_log` và số đếm của `session`.
 
-Client API không gửi header vẫn được lưu, dưới `session.kind='api'`, gom theo `(api_key_id, model)` trong 30 phút — để mọi thứ đi qua server đều xem lại được.
+Client API không gửi header vẫn được lưu, dưới `session.kind='api'`, gom trong cửa sổ 30 phút — để mọi thứ đi qua server đều xem lại được. `api_key_id` chỉ có từ pha 6, nên hiện gom theo `(model, sha256(authorization + user-agent)[:20])`; hash lưu trong `session.params.client` và không khôi phục lại được token thô.
+
+**Nối history.** Desktop gửi lại toàn bộ hội thoại mỗi lượt. Chỉ phần *đuôi* được chèn thêm khi history gửi lên là prefix khớp đúng với những gì đã lưu; nếu client sửa một nhánh cũ thì chỉ lấy message cuối, thay vì nhân đôi cả session.
 
 ---
 
@@ -418,7 +422,7 @@ Pha 4 là chỗ nguy hiểm nhất: nó thay cách mọi recipe lấy trình duy
 |---|---|
 | 1 — `store/` + migration runner + applog/jobs xuống DB | ✅ xong |
 | 2 — import `recipes/` và `.accounts/` vào DB | ✅ xong |
-| 3 — session/message + `capture_html` + trang `/sessions` | chưa |
+| 3 — session/message + `capture_html` + trang `/sessions` | ✅ xong |
 | 4 — persistent profile (opt-in) | chưa |
 | 5 — gộp `/integrations` | chưa |
 | 6 — settings + api_key vào DB | chưa |

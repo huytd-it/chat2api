@@ -6,7 +6,9 @@
   // URL thay vì một store riêng — back/forward và deep link đều đúng.
   const links = [
     { href: "/", label: "Tổng quan" },
-    { href: "/playground", label: "Playground" },
+    { href: "/sessions", label: "Sessions" },
+    // Recipes và Accounts còn đứng riêng cho tới pha 5 (gộp vào Integrations);
+    // bỏ khỏi nav sớm sẽ khiến hai trang đó không tới được.
     { href: "/recipes", label: "Recipes" },
     { href: "/accounts", label: "Accounts" },
     { href: "/integrations", label: "Integrate" },

@@ -26,6 +26,17 @@ class Config:
         self.pool_max_contexts = int(_env("POOL_MAX_CONTEXTS", "3"))
         self.pool_acquire_timeout = int(_env("POOL_ACQUIRE_TIMEOUT", "30"))
         self.browser_engine = _env("BROWSER_ENGINE", "playwright")
+        # storage_state (mặc định) | profile. Đường profile dùng
+        # launch_persistent_context: một profile giữ đăng nhập của MỌI domain và
+        # chạy nhiều recipe song song, mỗi recipe một tab. Đây là opt-in lâu dài,
+        # không phải giai đoạn chuyển tiếp — xem docs/design-v2.md §9.
+        mode = _env("BROWSER_PROFILE_MODE", "storage_state").strip().lower()
+        self.browser_profile_mode = mode if mode in {"storage_state", "profile"} else "storage_state"
+        self.profiles_dir = self.data_dir / "profiles"
+        # Số profile (mỗi profile = 1 tiến trình Chromium) giữ mở cùng lúc.
+        self.pool_max_profiles = max(1, int(_env("POOL_MAX_PROFILES", "2")))
+        # Trần số tab trong một profile; vượt thì đóng tab ít dùng nhất.
+        self.profile_max_tabs = max(1, int(_env("PROFILE_MAX_TABS", "4")))
         self.recipe_timeout_ms = int(_env("RECIPE_TIMEOUT_MS", "120000"))
         self.integrate_max_rounds = int(_env("INTEGRATE_MAX_ROUNDS", "5"))
         # Site không yêu cầu đăng nhập vẫn được publish, nhưng chỉ cho dùng thử
