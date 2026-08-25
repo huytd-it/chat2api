@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 
-from . import auth, errors, live_view  # noqa: F401  (import auth để đăng ký dependency)
+from . import applog, auth, errors, live_view  # noqa: F401  (import auth để đăng ký dependency)
 from .config import Config
 from .errors import OpenAIError
 from .providers.browser_recipe import TrialLimitExceeded
@@ -43,9 +43,11 @@ def create_app(cfg: Config) -> FastAPI:
         from . import jobs
 
         await pool.start()
+        applog.log(f"Server khởi động (engine={cfg.browser_engine})")
         try:
             yield
         finally:
+            applog.log("Server đang tắt")
             try:
                 try:
                     await jobs.shutdown(login_manager)
@@ -99,7 +101,9 @@ def create_app(cfg: Config) -> FastAPI:
         try:
             provider, local = rt.resolve(body.model)
         except ModelNotFound:
+            applog.log(f"chat: model không tồn tại: {body.model}", "error")
             raise OpenAIError(404, "model_not_found", f"The model '{body.model}' does not exist")
+        applog.log(f"chat: model={body.model} stream={body.stream}")
         msgs = body.as_list()
         cid = "chatcmpl-" + uuid.uuid4().hex[:29]
         from .providers.browser_recipe import BrowserRecipe as BR
@@ -141,9 +145,11 @@ def create_app(cfg: Config) -> FastAPI:
                     yield d
                 rt.mark_success(provider.slug)
             except TrialLimitExceeded as e:
+                applog.log(f"chat: hết lượt dùng thử ({provider.slug}): {e}", "warn")
                 raise OpenAIError(403, "trial_limit_exceeded", str(e))
             except TimeoutError:
                 rt.mark_failure(provider.slug)
+                applog.log(f"chat: timeout ({provider.slug})", "error")
                 if sent["n"] > 0:
                     raise
                 if fallback_ok("timeout"):
@@ -158,6 +164,7 @@ def create_app(cfg: Config) -> FastAPI:
                 raise
             except Exception as e:
                 rt.mark_failure(provider.slug)
+                applog.log(f"chat: lỗi ({provider.slug}): {e}", "error")
                 if sent["n"] > 0:
                     raise
                 if fallback_ok(str(e)):
@@ -220,6 +227,7 @@ def register_admin(app: FastAPI, admin) -> None:
             publish_lock=request.app.state.recipe_publish_lock,
             headed=body.headed,
         )
+        applog.log(f"integrate: bắt đầu {body.url} (job={job_id}, headed={body.headed})")
         return {"job_id": job_id}
 
     @admin.get("/integrate/{job_id}")
@@ -273,6 +281,10 @@ def register_admin(app: FastAPI, admin) -> None:
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
+    @admin.get("/logs")
+    async def get_logs(after: int = 0, limit: int = 200):
+        return {"entries": applog.since(after, limit)}
+
     @admin.get("/watch/{watch_id}/screenshot")
     async def watch_screenshot(watch_id: str):
         # Live view: chụp ảnh page Playwright đang chạy (headless hay headed đều
@@ -297,6 +309,7 @@ def register_admin(app: FastAPI, admin) -> None:
                     "type": type(provider).__name__}
             if isinstance(provider, BR):
                 entry["accounts"] = provider.account_count
+                entry["account_names"] = provider.account_names
                 entry["trial"] = provider.trial_status
             out.append(entry)
         return out
@@ -304,6 +317,7 @@ def register_admin(app: FastAPI, admin) -> None:
     @admin.post("/recipes/{slug}/reload")
     async def reload_recipes(slug: str, request: Request):
         request.app.state.router.reload()
+        applog.log(f"recipe: reload {slug}")
         return {"ok": True}
 
     @admin.delete("/recipes/{slug}")
@@ -314,6 +328,7 @@ def register_admin(app: FastAPI, admin) -> None:
         if target.exists():
             shutil.rmtree(target)
         request.app.state.router.reload()
+        applog.log(f"recipe: xóa {slug}", "warn")
         return {"ok": True}
 
     def _browser_recipe_or_404(request: Request, slug: str):
@@ -333,9 +348,32 @@ def register_admin(app: FastAPI, admin) -> None:
             await request.app.state.login_manager.start(
                 session_id, slug, provider.url, cfg.recipes_dir / slug)
         except Exception:
+            applog.log(f"account: không mở được browser cho {slug}", "error")
             raise OpenAIError(500, "login_open_failed",
                               "Không thể mở browser đăng nhập trên máy chạy chat2api.")
+        applog.log(f"account: mở browser thêm account mới cho {slug} (session={session_id})")
         return {"session_id": session_id}
+
+    @admin.post("/recipes/{slug}/accounts/{name}/reopen")
+    async def reopen_account_login(slug: str, name: str, request: Request):
+        # Mở lại browser bằng đúng profile (storage_state) của account đã lưu —
+        # để re-login khi session hết hạn, thay vì phải tạo account mới.
+        provider = _browser_recipe_or_404(request, slug)
+        cfg = request.app.state.cfg
+        state_path = provider.account_storage_state(name)
+        if state_path is None:
+            raise OpenAIError(404, "not_found", f"Account '{name}' không tồn tại")
+        session_id = f"acct-{uuid.uuid4().hex[:10]}"
+        try:
+            await request.app.state.login_manager.start(
+                session_id, slug, provider.url, cfg.recipes_dir / slug,
+                storage_state=state_path)
+        except Exception:
+            applog.log(f"account: không mở lại được browser cho {slug}/{name}", "error")
+            raise OpenAIError(500, "login_open_failed",
+                              "Không thể mở browser đăng nhập trên máy chạy chat2api.")
+        applog.log(f"account: mở lại browser cho {slug}/{name} (session={session_id})")
+        return {"session_id": session_id, "name": name}
 
     @admin.post("/recipes/{slug}/accounts/{session_id}/complete")
     async def complete_account_login(slug: str, session_id: str, request: Request,
@@ -354,6 +392,7 @@ def register_admin(app: FastAPI, admin) -> None:
         try:
             await request.app.state.login_manager.complete(session_id, filename=f"{name}.json")
         except Exception:
+            applog.log(f"account: lưu session thất bại cho {slug}/{name}", "error")
             raise OpenAIError(500, "login_save_failed", "Không thể lưu session đăng nhập")
         async with request.app.state.recipe_publish_lock:
             cli.add_storage_state(recipe_path, name, f"auth/{name}.json")
@@ -364,6 +403,7 @@ def register_admin(app: FastAPI, admin) -> None:
                 recipe_path.write_text(
                     yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
             request.app.state.router.reload()
+        applog.log(f"account: đã lưu {slug}/{name}")
         return {"ok": True, "slug": slug, "account": name}
 
     @admin.post("/recipes/{slug}/accounts/{session_id}/cancel")

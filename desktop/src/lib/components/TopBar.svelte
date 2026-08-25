@@ -34,6 +34,15 @@
       >
         Integrate
       </button>
+      <button
+        class="nav-tab"
+        role="tab"
+        aria-selected={$currentView === "logs"}
+        aria-controls="logs-view"
+        onclick={() => select("logs")}
+      >
+        Logs
+      </button>
     </nav>
     <div class="top-actions">
       <span class="health" data-state={$serverStatus.state}>

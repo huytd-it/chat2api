@@ -14,11 +14,11 @@ class FakeLoginManager:
     async def has(self, session_id: str) -> bool:
         return session_id in self.starts
 
-    async def start(self, session_id, slug, url, recipe_dir) -> None:
-        self.starts[session_id] = (slug, url, recipe_dir)
+    async def start(self, session_id, slug, url, recipe_dir, storage_state=None) -> None:
+        self.starts[session_id] = (slug, url, recipe_dir, storage_state)
 
     async def complete(self, session_id: str, filename: str = "state.json"):
-        _, _, recipe_dir = self.starts.pop(session_id)
+        _, _, recipe_dir, _ = self.starts.pop(session_id)
         self.completed.append(session_id)
         path = recipe_dir / "auth" / filename
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -65,9 +65,10 @@ async def test_add_account_flow_updates_recipe_and_reloads(tmp_path):
         r = await client.post("/admin/recipes/sitea/accounts")
         assert r.status_code == 200
         session_id = r.json()["session_id"]
-        slug, url, recipe_dir = fake.starts[session_id]
+        slug, url, recipe_dir, storage_state = fake.starts[session_id]
         assert slug == "sitea" and url == "https://site.example/chat"
         assert recipe_dir == d
+        assert storage_state is None
 
         r2 = await client.post(
             f"/admin/recipes/sitea/accounts/{session_id}/complete", json={"name": "acct-1"})
@@ -128,5 +129,36 @@ async def test_add_account_unknown_recipe_404(tmp_path):
     client, app, fake, d = await _client(tmp_path)
     async with client:
         r = await client.post("/admin/recipes/does-not-exist/accounts")
+        assert r.status_code == 404
+        assert r.json()["error"]["code"] == "not_found"
+
+
+async def test_recipes_list_exposes_account_names(tmp_path):
+    client, app, fake, d = await _client(
+        tmp_path, login={"accounts": [{"name": "acct-1", "storage_state": "auth/acct-1.json"}]})
+    async with client:
+        r = await client.get("/admin/recipes")
+        entry = next(e for e in r.json() if e["slug"] == "sitea")
+        assert entry["account_names"] == ["acct-1"]
+
+
+async def test_reopen_account_login_uses_saved_storage_state(tmp_path):
+    client, app, fake, d = await _client(
+        tmp_path, login={"accounts": [{"name": "acct-1", "storage_state": "auth/acct-1.json"}]})
+    async with client:
+        r = await client.post("/admin/recipes/sitea/accounts/acct-1/reopen")
+        assert r.status_code == 200
+        session_id = r.json()["session_id"]
+        assert r.json()["name"] == "acct-1"
+        slug, url, recipe_dir, storage_state = fake.starts[session_id]
+        assert slug == "sitea"
+        assert storage_state == d / "auth" / "acct-1.json"
+
+
+async def test_reopen_unknown_account_404(tmp_path):
+    client, app, fake, d = await _client(
+        tmp_path, login={"accounts": [{"name": "acct-1", "storage_state": "auth/acct-1.json"}]})
+    async with client:
+        r = await client.post("/admin/recipes/sitea/accounts/nope/reopen")
         assert r.status_code == 404
         assert r.json()["error"]["code"] == "not_found"

@@ -22,7 +22,15 @@ export interface RecipeInfo {
   unhealthy: boolean;
   type?: string;
   accounts?: number;
+  account_names?: string[];
   trial?: TrialStatus | null;
+}
+
+export interface LogEntry {
+  id: number;
+  ts: number;
+  level: string;
+  message: string;
 }
 
 export interface JobStatus {
@@ -231,4 +239,31 @@ export async function cancelAccountLogin(key: string, slug: string, sessionId: s
     base + "/admin/recipes/" + encodeURIComponent(slug) + "/accounts/" + encodeURIComponent(sessionId) + "/cancel",
     { method: "POST", headers: headers(key) },
   );
+}
+
+/** Re-opens a Chromium window preloaded with an already-saved account's
+ * profile (its storage_state) instead of a blank one — for re-login when a
+ * saved session has expired. Save the result via completeAccountLogin with
+ * the same account name to overwrite its storage_state in place. */
+export async function reopenAccountLogin(
+  key: string,
+  slug: string,
+  name: string,
+): Promise<{ session_id: string; name: string }> {
+  const base = await apiBase();
+  const r = await fetch(
+    base + "/admin/recipes/" + encodeURIComponent(slug) + "/accounts/" + encodeURIComponent(name) + "/reopen",
+    { method: "POST", headers: headers(key) },
+  );
+  return asJson(r);
+}
+
+/** Polls the server-wide activity log (requests, integrate/login/account
+ * events, errors) — distinct from a single Integrate job's `log`. Pass the
+ * last received entry's `id` as `after` to fetch only new lines. */
+export async function fetchLogs(key: string, after = 0): Promise<LogEntry[]> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/logs?after=" + after, { headers: headers(key) });
+  const data = await asJson(r);
+  return data.entries as LogEntry[];
 }

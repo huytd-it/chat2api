@@ -17,7 +17,7 @@ function createApiKeyStore() {
 /** The playground/admin bearer key, persisted locally like the browser build. */
 export const apiKey = createApiKeyStore();
 
-export type ViewName = "playground" | "integrations";
+export type ViewName = "playground" | "integrations" | "logs";
 export const currentView = writable<ViewName>("playground");
 
 /** Khi bật, request chat test trong Playground yêu cầu server hiện cửa sổ

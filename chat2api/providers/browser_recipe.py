@@ -155,6 +155,18 @@ class BrowserRecipe(Provider):
         return 0 if self._accounts[0][0] == "__anon__" else len(self._accounts)
 
     @property
+    def account_names(self) -> list[str]:
+        if self._accounts[0][0] == "__anon__":
+            return []
+        return [name for name, _ in self._accounts]
+
+    def account_storage_state(self, name: str) -> Path | None:
+        for acc_name, storage_state in self._accounts:
+            if acc_name == name:
+                return storage_state
+        return None
+
+    @property
     def trial_status(self) -> dict | None:
         limit = self._rotator.anon_trial_limit
         if limit is None or self.account_count:

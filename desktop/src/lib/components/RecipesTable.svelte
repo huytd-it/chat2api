@@ -1,7 +1,15 @@
 <script lang="ts">
   import { apiKey, showToast } from "../stores";
   import { recipes, recipesLoading, refreshRecipes, refreshModels } from "../sync";
-  import { reloadRecipe, deleteRecipe, startAccountLogin, completeAccountLogin, cancelAccountLogin } from "../api";
+  import {
+    reloadRecipe,
+    deleteRecipe,
+    startAccountLogin,
+    reopenAccountLogin,
+    completeAccountLogin,
+    cancelAccountLogin,
+  } from "../api";
+  import LiveView from "./LiveView.svelte";
 
   let reloadingSlug = $state<string | null>(null);
   let deletingSlug = $state<string | null>(null);
@@ -10,6 +18,7 @@
   let accountSessionId = $state<string | null>(null);
   let accountFlowStatus = $state("");
   let accountName = $state("");
+  let accountNameLocked = $state(false);
   let accountSaving = $state(false);
 
   async function onReload(slug: string) {
@@ -42,6 +51,7 @@
     accountSlug = null;
     accountSessionId = null;
     accountName = "";
+    accountNameLocked = false;
   }
 
   async function onAddAccount(slug: string) {
@@ -53,7 +63,25 @@
       const data = await startAccountLogin($apiKey, slug);
       accountSlug = slug;
       accountSessionId = data.session_id;
+      accountNameLocked = false;
       accountFlowStatus = "Chrome đã mở cho " + slug + ". Đăng nhập xong, đặt tên account rồi bấm Lưu.";
+    } catch (e) {
+      showToast((e as Error).message);
+    }
+  }
+
+  async function onReopenAccount(slug: string, name: string) {
+    if (accountSessionId) {
+      showToast("Đang có phiên thêm account khác, hãy hoàn tất hoặc hủy trước.");
+      return;
+    }
+    try {
+      const data = await reopenAccountLogin($apiKey, slug, name);
+      accountSlug = slug;
+      accountSessionId = data.session_id;
+      accountName = name;
+      accountNameLocked = true;
+      accountFlowStatus = "Chrome đã mở lại profile của " + name + " (" + slug + "). Đăng nhập lại nếu cần rồi bấm Lưu.";
     } catch (e) {
       showToast((e as Error).message);
     }
@@ -136,6 +164,22 @@
                   {:else}
                     <span class="login-badge">{rec.accounts ?? 0} account{(rec.accounts ?? 0) === 1 ? "" : "s"}</span>
                   {/if}
+                  {#if rec.account_names && rec.account_names.length > 0}
+                    <div class="saved-accounts">
+                      {#each rec.account_names as name (name)}
+                        <span class="saved-account">
+                          {name}
+                          <button
+                            class="button secondary small"
+                            title="Mở lại browser bằng profile của account này"
+                            onclick={() => onReopenAccount(rec.slug, name)}
+                          >
+                            Mở lại
+                          </button>
+                        </span>
+                      {/each}
+                    </div>
+                  {/if}
                 {:else}
                   -
                 {/if}
@@ -170,12 +214,14 @@
   {#if accountSessionId}
     <div class="account-flow">
       <p>{accountFlowStatus}</p>
+      <LiveView watchId={accountSessionId} />
       <div class="url-row">
         <input
           type="text"
           inputmode="text"
           placeholder="ten-account"
           aria-label="Tên account"
+          disabled={accountNameLocked}
           bind:value={accountName}
         />
         <button class="button" disabled={accountSaving} onclick={onSaveAccount}>Lưu</button>

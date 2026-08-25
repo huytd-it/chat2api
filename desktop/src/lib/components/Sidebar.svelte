@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fade } from "svelte/transition";
   import { apiKey, currentView, headedPlayground, serverStatus } from "../stores";
   import { models, modelsLoading, selectedModel, refreshModels, refreshRecipes } from "../sync";
 
@@ -60,9 +61,24 @@
   <section class="side-section">
     <h2>Server</h2>
     <div class="metrics">
-      <div class="metric"><strong>{$modelsLoading ? "-" : $models.length}</strong><span>models</span></div>
-      <div class="metric"><strong>{$serverStatus.contexts}</strong><span>contexts</span></div>
-      <div class="metric"><strong>{$serverStatus.engine}</strong><span>engine</span></div>
+      <div class="metric">
+        {#key $modelsLoading ? "-" : $models.length}
+          <strong in:fade={{ duration: 160 }}>{$modelsLoading ? "-" : $models.length}</strong>
+        {/key}
+        <span>models</span>
+      </div>
+      <div class="metric">
+        {#key $serverStatus.contexts}
+          <strong in:fade={{ duration: 160 }}>{$serverStatus.contexts}</strong>
+        {/key}
+        <span>contexts</span>
+      </div>
+      <div class="metric">
+        {#key $serverStatus.engine}
+          <strong in:fade={{ duration: 160 }}>{$serverStatus.engine}</strong>
+        {/key}
+        <span>engine</span>
+      </div>
       <div class="metric"><strong>OpenAI</strong><span>compatible</span></div>
     </div>
   </section>

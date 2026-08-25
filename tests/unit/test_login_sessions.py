@@ -36,6 +36,7 @@ class FakeContext:
         self.page = FakePage(fail_goto, goto_started, allow_goto)
         self.closed = False
         self.saved = None
+        self.storage_state_arg = None
         self.fail_new_page = fail_new_page
         self.fail_save = fail_save
 
@@ -61,9 +62,10 @@ class FakeBrowser:
         self.closed = False
         self.fail_new_context = fail_new_context
 
-    async def new_context(self):
+    async def new_context(self, storage_state=None):
         if self.fail_new_context:
             raise RuntimeError("new_context failed")
+        self.context.storage_state_arg = storage_state
         return self.context
 
     async def close(self):

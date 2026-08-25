@@ -2,8 +2,10 @@
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import TopBar from "$lib/components/TopBar.svelte";
+  import InstrumentRail from "$lib/components/InstrumentRail.svelte";
   import PlaygroundView from "$lib/components/PlaygroundView.svelte";
   import IntegrationsView from "$lib/components/IntegrationsView.svelte";
+  import LogsView from "$lib/components/LogsView.svelte";
   import Toast from "$lib/components/Toast.svelte";
   import { currentView, serverStatus, serverLog } from "$lib/stores";
   import { fetchHealth } from "$lib/api";
@@ -50,6 +52,7 @@
   });
 </script>
 
+<InstrumentRail />
 <TopBar />
 <main>
   <div hidden={$currentView !== "playground"}>
@@ -57,6 +60,9 @@
   </div>
   <div hidden={$currentView !== "integrations"}>
     <IntegrationsView />
+  </div>
+  <div hidden={$currentView !== "logs"}>
+    <LogsView />
   </div>
 </main>
 <Toast />

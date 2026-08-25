@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from . import live_view
+
 
 class LoginSessionError(RuntimeError):
     pass
@@ -80,7 +82,8 @@ class LoginSessionManager:
             if self._pending.get(job_id) is task:
                 self._pending.pop(job_id, None)
 
-    async def start(self, job_id: str, slug: str, url: str, recipe_dir: Path) -> None:
+    async def start(self, job_id: str, slug: str, url: str, recipe_dir: Path,
+                    storage_state: Path | None = None) -> None:
         current_task = asyncio.current_task()
         async with self._lock:
             if self._closing:
@@ -90,6 +93,7 @@ class LoginSessionManager:
             self._pending[job_id] = current_task
 
         browser = None
+        page = None
         try:
             playwright = await self._ensure_driver()
             launch = asyncio.create_task(playwright.chromium.launch(headless=False))
@@ -101,8 +105,14 @@ class LoginSessionManager:
                 except Exception:
                     pass
                 raise
-            context = await browser.new_context()
+            state = str(storage_state) if storage_state and storage_state.exists() else None
+            context = await browser.new_context(storage_state=state)
             page = await context.new_page()
+            # Cửa sổ Chromium headless=False luôn được lệnh mở, nhưng có thể
+            # không thực sự hiện ra trên màn hình tùy máy/session người dùng
+            # (remote desktop, đa màn hình, bị che...) — đăng ký live view
+            # ngay để client luôn có cách xem/theo dõi trang đăng nhập.
+            await live_view.register(job_id, page)
             await page.goto(url)
             session = LoginSession(
                 job_id=job_id,
@@ -119,9 +129,13 @@ class LoginSessionManager:
                     raise LoginSessionError("Login session manager is closed")
                 self._sessions[job_id] = session
         except asyncio.CancelledError:
+            if page is not None:
+                await live_view.unregister(job_id, page)
             await _finish_cleanup(_close(browser, "close"))
             raise
         except Exception as error:
+            if page is not None:
+                await live_view.unregister(job_id, page)
             await _finish_cleanup(_close(browser, "close"))
             if isinstance(error, LoginSessionError):
                 raise
@@ -145,12 +159,14 @@ class LoginSessionManager:
         except Exception as error:
             raise LoginSessionError("Unable to save login session") from error
         finally:
+            await live_view.unregister(job_id, session.page)
             await _finish_cleanup(_close(session.browser, "close"))
 
     async def cancel(self, job_id: str) -> None:
         async with self._lock:
             session = self._sessions.pop(job_id, None)
         if session is not None:
+            await live_view.unregister(job_id, session.page)
             await _finish_cleanup(_close(session.browser, "close"))
 
     async def close_all(self) -> None:

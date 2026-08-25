@@ -5,6 +5,7 @@ import uuid
 from contextlib import suppress
 from pathlib import Path
 
+from . import applog
 from .agents.analyzer import integrate
 
 LOGIN_TIMEOUT_SECONDS = 600
@@ -46,6 +47,7 @@ def _login_failure(job: dict, message: str) -> None:
     job["log"].append(message)
     job["log"].append(f"Chạy trực tiếp trên desktop hoặc dùng: python -m chat2api login {slug}")
     job["status"] = "failed"
+    applog.log(f"integrate: thất bại {job['id']} ({slug}): {message}", "error")
     _cleanup_staging(job)
 
 
@@ -171,6 +173,8 @@ async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, logi
                         if key not in {"task", "timeout_task", "lock"}})
             job["status"] = result.get("status", "failed")
             if job["status"] in TERMINAL_STATUSES:
+                level = "info" if job["status"] == "ok" else "warn"
+                applog.log(f"integrate: {job['id']} ({job.get('slug')}) -> {job['status']}", level)
                 _cleanup_staging(job)
     except asyncio.CancelledError:
         raise
@@ -179,12 +183,14 @@ async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, logi
             if job["status"] == expected_status:
                 job["log"].append("Không thể reset analyzer context.")
                 job["status"] = "failed"
+                applog.log(f"integrate: {job['id']} lỗi reset context", "error")
                 _cleanup_staging(job)
     except Exception as error:
         async with job["lock"]:
             if job["status"] == expected_status:
                 job["log"].append(f"error: {error}")
                 job["status"] = "failed"
+                applog.log(f"integrate: {job['id']} lỗi: {error}", "error")
                 _cleanup_staging(job)
 
 

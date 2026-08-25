@@ -12,6 +12,7 @@
   let jobLog = $state("");
   let loginActionsVisible = $state(false);
   let loginButtonsDisabled = $state(false);
+  let jobLogEl = $state<HTMLElement | null>(null);
   // Watch id doubles as the job id — the server registers the analyzer's
   // page under the job id itself whenever "hiện browser" was checked.
   let watchId = $state<string | null>(null);
@@ -76,6 +77,7 @@
         const j = await fetchJob($apiKey, jobId, controller.signal);
         if (generation !== pollGeneration || jobId !== activeJobId) return;
         jobLog = (j.log || []).join("\n");
+        if (jobLogEl) requestAnimationFrame(() => { if (jobLogEl) jobLogEl.scrollTop = jobLogEl.scrollHeight; });
         showJobStatus(j);
         terminal = terminalStatuses.includes(j.status);
         if (terminal) {
@@ -161,7 +163,11 @@
       if (operation !== operationGeneration) return;
       jobStatusText = "đang chạy job " + data.job_id + "...";
       resetLoginButtons();
-      if (headedMode) watchId = data.job_id;
+      // Luôn theo dõi live view, kể cả khi không bật "hiện browser": bước
+      // đăng nhập thủ công (nếu site yêu cầu) luôn mở cửa sổ Chromium thật,
+      // và cửa sổ đó có thể không hiện ra tùy máy — live view là cách xem
+      // đáng tin cậy duy nhất trong trường hợp đó.
+      watchId = data.job_id;
       startPolling(data.job_id);
     } catch (e) {
       if (operation === operationGeneration) jobStatusText = "lỗi: " + e;
@@ -206,7 +212,17 @@
           </button>
         </span>
       {/if}
-      <pre class="job-log" aria-label="Job log">{#if jobLog}{jobLog}{/if}</pre>
+      <div class="job-log-head">
+        <span class="job-log-label">Nhật ký job</span>
+        <button
+          class="button secondary small"
+          disabled={!jobLog}
+          onclick={() => navigator.clipboard.writeText(jobLog).catch(() => {})}
+        >
+          Copy
+        </button>
+      </div>
+      <pre class="job-log" bind:this={jobLogEl} aria-label="Job log">{#if jobLog}{jobLog}{/if}</pre>
     </section>
     <aside class="panel integration-card">
       <h2>Luồng analyzer</h2>
