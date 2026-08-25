@@ -29,22 +29,36 @@ def _sse(cid: str, model: str, delta: str) -> str:
 def create_app(cfg: Config) -> FastAPI:
     from . import router as router_mod  # trigger LOADERS registration
     from .browserpool import BrowserPool
+    from .login_sessions import LoginSessionManager
 
     pool = BrowserPool(cfg.browser_engine, cfg.pool_max_contexts)
+    login_manager = LoginSessionManager()
     router = Router(cfg.recipes_dir, pool)
     router.reload()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        from . import jobs
+
         await pool.start()
-        yield
-        await pool.aclose()
+        try:
+            yield
+        finally:
+            try:
+                try:
+                    await jobs.shutdown(login_manager)
+                finally:
+                    await login_manager.close_all()
+            finally:
+                await pool.aclose()
 
     app = FastAPI(title="chat2api", lifespan=lifespan)
     errors.register_error_handler(app)
     app.state.cfg = cfg
     app.state.pool = pool
+    app.state.login_manager = login_manager
     app.state.router = router
+    app.state.recipe_publish_lock = asyncio.Lock()
 
     @app.get("/health")
     async def health(request: Request):
@@ -162,8 +176,7 @@ def register_admin(app: FastAPI, admin) -> None:
     import shutil
 
     from .agents import llm
-    from .jobs import get as job_get
-    from .jobs import start_integrate
+    from . import jobs
     from .schemas import IntegrateRequest
 
     @admin.post("/integrate")
@@ -173,23 +186,51 @@ def register_admin(app: FastAPI, admin) -> None:
             raise OpenAIError(503, "agent_not_configured",
                               "Đặt AGENT_LLM_BASE_URL, AGENT_LLM_API_KEY, AGENT_LLM_MODEL "
                               "để dùng tính năng tích hợp tự động.")
-        job_id = start_integrate(body.url, cfg, request.app.state.pool,
-                                 router=request.app.state.router)
+        job_id = jobs.start_integrate(
+            body.url, cfg, request.app.state.pool,
+            router=request.app.state.router,
+            login_manager=request.app.state.login_manager,
+            publish_lock=request.app.state.recipe_publish_lock,
+        )
         return {"job_id": job_id}
 
     @admin.get("/integrate/{job_id}")
     async def integrate_status(job_id: str):
-        job = job_get(job_id)
+        job = await jobs.get(job_id)
         if not job:
             raise OpenAIError(404, "not_found", "Job không tồn tại")
         return job
+
+    @admin.post("/integrate/{job_id}/login-complete")
+    async def integrate_login_complete(job_id: str, request: Request):
+        try:
+            return await jobs.complete_login(
+                job_id, request.app.state.cfg, request.app.state.pool,
+                request.app.state.router, request.app.state.login_manager)
+        except jobs.JobNotFound:
+            raise OpenAIError(404, "not_found", "Job không tồn tại")
+        except jobs.InvalidJobState:
+            raise OpenAIError(409, "invalid_job_state", "Job không chờ đăng nhập")
+        except jobs.LoginSaveFailed:
+            raise OpenAIError(500, "login_save_failed", "Không thể lưu session đăng nhập")
+        except jobs.ContextResetFailed:
+            raise OpenAIError(500, "context_reset_failed", "Không thể reset analyzer context")
+
+    @admin.post("/integrate/{job_id}/cancel")
+    async def integrate_cancel(job_id: str, request: Request):
+        try:
+            return await jobs.cancel_job(job_id, request.app.state.login_manager)
+        except jobs.JobNotFound:
+            raise OpenAIError(404, "not_found", "Job không tồn tại")
+        except jobs.InvalidJobState:
+            raise OpenAIError(409, "invalid_job_state", "Không thể hủy job ở trạng thái này")
 
     @admin.get("/integrate/{job_id}/log")
     async def integrate_log(job_id: str):
         async def gen():
             cursor = 0
             while True:
-                job = job_get(job_id)
+                job = await jobs.get(job_id)
                 if not job:
                     yield "event: error\ndata: job not found\n\n"
                     return
@@ -197,7 +238,7 @@ def register_admin(app: FastAPI, admin) -> None:
                     line = job["log"][cursor]
                     cursor += 1
                     yield f"data: {line}\n\n"
-                if job["status"] != "running":
+                if job["status"] in jobs.TERMINAL_STATUSES:
                     yield f"event: done\ndata: {job['status']}\n\n"
                     return
                 await asyncio.sleep(0.5)

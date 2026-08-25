@@ -39,7 +39,11 @@
 <details>
   <summary>Admin — tích hợp web chat mới</summary>
   <p><input id="siteurl" placeholder="https://chat.example.com" size="40">
-     <button id="integrate">Integrate</button> <span id="jobstatus"></span></p>
+     <button id="integrate">Integrate</button> <span id="jobstatus"></span>
+     <span id="loginactions" hidden>
+       <button id="logincomplete">Đã đăng nhập</button>
+       <button id="canceljob" class="secondary">Hủy</button>
+     </span></p>
   <pre id="joblog"></pre>
   <table id="recipies"><thead><tr><th>slug</th><th>models</th><th></th></tr></thead><tbody></tbody></table>
 </details>
@@ -159,29 +163,160 @@ async function delRecipe(slug) {
   loadRecipes();
 }
 
-$("#integrate").onclick = async () => {
-  $("#joblog").textContent = "";
-  const r = await fetch("/admin/integrate", {method: "POST", headers: headers(),
-    body: JSON.stringify({url: $("#siteurl").value})});
-  const data = await r.json();
-  if (!r.ok) { $("#jobstatus").textContent = data.error?.message || r.statusText; return; }
-  $("#jobstatus").textContent = "đang chạy job " + data.job_id + "...";
+let activeJobId = null;
+let pollGeneration = 0;
+let pollTimer = null;
+let pollAbort = null;
+let operationGeneration = 0;
+let actionGeneration = 0;
+let actionInFlightFor = null;
+const terminalStatuses = ["ok", "failed", "cancelled", "login_timeout"];
+
+function resetLoginButtons() {
+  [$("#logincomplete"), $("#canceljob")].forEach(button => { button.disabled = false; });
+}
+
+function stopPolling() {
+  pollGeneration++;
+  if (pollTimer !== null) clearTimeout(pollTimer);
+  if (pollAbort !== null) pollAbort.abort();
+  pollTimer = null;
+  pollAbort = null;
+  activeJobId = null;
+}
+
+function showJobStatus(j) {
+  const actions = $("#loginactions");
+  const canLogin = j.status === "waiting_login" && j.can_complete_login === true;
+  actions.hidden = !canLogin;
+  if (canLogin) {
+    if (actionInFlightFor !== pollGeneration) resetLoginButtons();
+    $("#jobstatus").textContent = "Chrome đã mở — hãy đăng nhập trong cửa sổ đó";
+  } else if (j.status === "waiting_login") {
+    $("#jobstatus").textContent = "Đang đóng phiên đăng nhập hết hạn…";
+  } else if (j.status === "resuming") {
+    $("#jobstatus").textContent = "Đang lưu session và tiếp tục…";
+  } else {
+    $("#jobstatus").textContent = "trạng thái: " + j.status;
+  }
+}
+
+function startPolling(jobId) {
+  stopPolling();
+  const generation = pollGeneration;
+  activeJobId = jobId;
   let ticks = 0;
-  const timer = setInterval(async () => {
-    ticks++;
+
+  const poll = async () => {
+    if (generation !== pollGeneration || jobId !== activeJobId) return;
+    if (++ticks > 660) {
+      $("#loginactions").hidden = true;
+      $("#jobstatus").textContent = "timeout: job quá lâu, kiểm tra lại sau";
+      stopPolling();
+      return;
+    }
+
+    const controller = new AbortController();
+    pollAbort = controller;
+    let terminal = false;
     try {
-      if (ticks > 300) {
-        clearInterval(timer);
-        $("#jobstatus").textContent = "timeout: job quá lâu, kiểm tra lại sau";
-        return;
-      }
-      const j = await (await fetch("/admin/integrate/" + data.job_id, {headers: headers()})).json();
+      if (generation !== pollGeneration || jobId !== activeJobId) return;
+      const r = await fetch("/admin/integrate/" + jobId,
+        {headers: headers(), signal: controller.signal});
+      if (generation !== pollGeneration || jobId !== activeJobId) return;
+      const j = await r.json();
+      if (generation !== pollGeneration || jobId !== activeJobId) return;
+      if (!r.ok) throw new Error(j.error?.message || r.statusText);
       $("#joblog").textContent = j.log.join("\n");
       $("#joblog").scrollTop = $("#joblog").scrollHeight;
-      $("#jobstatus").textContent = "trạng thái: " + j.status;
-      if (j.status !== "running") { clearInterval(timer); loadModels(); loadRecipes(); }
-    } catch (e) { $("#jobstatus").textContent = "poll lỗi: " + e; }
-  }, 1000);
+      showJobStatus(j);
+      terminal = terminalStatuses.includes(j.status);
+      if (terminal) {
+        stopPolling();
+        loadModels();
+        loadRecipes();
+      }
+    } catch (e) {
+      if (generation === pollGeneration && jobId === activeJobId && e.name !== "AbortError") {
+        $("#jobstatus").textContent = "poll lỗi: " + e;
+      }
+    } finally {
+      if (pollAbort === controller) pollAbort = null;
+      if (!terminal && generation === pollGeneration && jobId === activeJobId) {
+        pollTimer = setTimeout(poll, 1000);
+      }
+    }
+  };
+
+  pollTimer = setTimeout(poll, 1000);
+}
+
+async function postJobAction(action) {
+  if (!activeJobId) return;
+  const jobId = activeJobId;
+  const generation = pollGeneration;
+  const actionToken = ++actionGeneration;
+  actionInFlightFor = generation;
+  const buttons = [$("#logincomplete"), $("#canceljob")];
+  buttons.forEach(button => { button.disabled = true; });
+  try {
+    const r = await fetch("/admin/integrate/" + jobId + "/" + action,
+      {method: "POST", headers: headers()});
+    if (generation !== pollGeneration || jobId !== activeJobId || actionToken !== actionGeneration) return;
+    const data = await r.json();
+    if (generation !== pollGeneration || jobId !== activeJobId || actionToken !== actionGeneration) return;
+    if (!r.ok) throw new Error(data.error?.message || r.statusText);
+    if (action === "login-complete") {
+      startPolling(jobId);
+      actionInFlightFor = null;
+      showJobStatus({status: "resuming"});
+    } else {
+      showJobStatus(data);
+      if (terminalStatuses.includes(data.status)) {
+        stopPolling();
+        loadModels();
+        loadRecipes();
+      }
+    }
+  } catch (e) {
+    if (generation === pollGeneration && jobId === activeJobId && actionToken === actionGeneration) {
+      $("#jobstatus").textContent = "lỗi: " + e;
+      resetLoginButtons();
+    }
+  } finally {
+    if (generation === pollGeneration && jobId === activeJobId && actionToken === actionGeneration) {
+      actionInFlightFor = null;
+    }
+  }
+}
+
+$("#logincomplete").onclick = () => postJobAction("login-complete");
+$("#canceljob").onclick = () => postJobAction("cancel");
+
+$("#integrate").onclick = async () => {
+  const operation = ++operationGeneration;
+  actionGeneration++;
+  actionInFlightFor = null;
+  resetLoginButtons();
+  $("#integrate").disabled = true;
+  stopPolling();
+  $("#loginactions").hidden = true;
+  $("#joblog").textContent = "";
+  try {
+    const r = await fetch("/admin/integrate", {method: "POST", headers: headers(),
+      body: JSON.stringify({url: $("#siteurl").value})});
+    if (operation !== operationGeneration) return;
+    const data = await r.json();
+    if (operation !== operationGeneration) return;
+    if (!r.ok) { $("#jobstatus").textContent = data.error?.message || r.statusText; return; }
+    $("#jobstatus").textContent = "đang chạy job " + data.job_id + "...";
+    resetLoginButtons();
+    startPolling(data.job_id);
+  } catch (e) {
+    if (operation === operationGeneration) $("#jobstatus").textContent = "lỗi: " + e;
+  } finally {
+    if (operation === operationGeneration) $("#integrate").disabled = false;
+  }
 };
 
 loadModels();
