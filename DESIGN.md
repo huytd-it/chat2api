@@ -223,7 +223,7 @@ Two role families: the neutral chassis stack (nine charcoal steps from `chassis`
 - **Fault** (`#ff6259`) with **Fault Soft**: errors, destructive actions, unhealthy recipes, lost connection.
 
 ### Instrument
-- **CRT** (`#0a0d0a`) / **CRT Text** (`#8be8a8`): the oscilloscope ground and phosphor trace — job logs, the app log, live-view wells. Always this pair, never a themed panel.
+- **CRT** (`#0a0d0a`) / **CRT Text** (`#8be8a8`): the oscilloscope ground and phosphor trace — job logs, the app log, the session trace. Always this pair, never a themed panel.
 - **CRT Deep** (`#07120b`): a step darker than CRT, for a well recessed *inside* a CRT surface (code blocks and the composer inside the trace).
 
 ### On-Surface Tints
@@ -263,7 +263,7 @@ Physical parts are two-stop gradients, not flat fills — this is what separates
 - **Body Small** (400, 13px): dense panel copy, list rows, toast.
 - **Label** (700, 12px, `.06em`): field labels and nav tabs (uppercase).
 - **Caption** (700, 11px, `.09em`, uppercase): table headers, state chips.
-- **Micro** (700, 10px, `.09em`, uppercase): tile captions, live-view and log labels.
+- **Micro** (700, 10px, `.09em`, uppercase): tile captions, log labels, test-bench section labels.
 - **Nano** (700 mono, 9px, `.06em`, uppercase): rail labels, the settings apply tag.
 - **Nano Compact** (700, 8px, uppercase): the vitals rail only, below 640px — the smallest step in the system. When the rail narrows from 52px to 36px its label *and* value both drop to this size, in their own faces. Nothing else may use 8px.
 - **Mono** (12px, 1.65): job log, app log, metric values, model IDs.
@@ -348,7 +348,6 @@ The rivet ring is derived, not fixed: `--radius-rivet: calc(var(--radius) - 4px)
 
 ### Instrument surfaces
 - **Job log / app log:** CRT ground with phosphor trace, mono 12px/1.65, scrolling, min-height 245px, with an empty-state message via `:empty:before`.
-- **Live view:** CRT-grounded well, phosphor-dim border, micro uppercase label, screenshot refreshed ~700ms.
 
 ### Toast
 - Fixed bottom-right, `panel` fill, phosphor-dim border, panel shadow, 13px, leading phosphor dot, auto-dismiss ~3.2s.

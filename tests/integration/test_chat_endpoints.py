@@ -141,7 +141,7 @@ async def test_headed_header_propagates_to_browser_recipe_stream(app_client):
             from chat2api.providers.base import ModelInfo
             return [ModelInfo(id="spy/m1", slug="spy")]
 
-        async def stream(self, messages, model_id, headed=None, watch_id=None):
+        async def stream(self, messages, model_id, headed=None):
             seen.append(headed)
             yield "ok"
 
@@ -157,6 +157,46 @@ async def test_headed_header_propagates_to_browser_recipe_stream(app_client):
     assert r2.status_code == 200
 
     assert seen == [False, True]
+
+
+async def test_target_account_header_is_validated_and_forwarded(app_client, tmp_path):
+    from chat2api import profiles, store
+    from chat2api.providers.browser_recipe import BrowserRecipe
+    from pathlib import Path
+
+    db = store.connect(tmp_path / "target.db")
+    db.migrate()
+    profile = profiles.ensure_profile("target", tmp_path / "profiles")
+    account = profiles.add_account(profile.id, "example.com", "main")
+    seen = []
+
+    class TargetSpy(BrowserRecipe):
+        def __init__(self):
+            super().__init__({
+                "slug": "target-spy", "url": "https://example.com/chat",
+                "models": [{"id": "m1"}],
+            }, Path("."), None)
+
+        async def stream(self, messages, model_id, headed=None,
+                         target_account_id=None):
+            seen.append(target_account_id)
+            yield "ok"
+
+    try:
+        app = app_client._transport.app
+        app.state.router.providers["target-spy"] = TargetSpy()
+        response = await app_client.post("/v1/chat/completions", headers={
+            "X-Chat2api-Account-Id": str(account["id"]),
+            "X-Chat2api-Session-Id": "targeted-chat",
+        }, json={
+            "model": "target-spy/m1", "messages": [{"role": "user", "content": "hi"}],
+        })
+        assert response.status_code == 200
+        assert seen == [account["id"]]
+        row = db.query("SELECT account_id, profile_id FROM session WHERE id = 'targeted-chat'")[0]
+        assert (row["account_id"], row["profile_id"]) == (account["id"], profile.id)
+    finally:
+        store.shutdown()
 
 
 async def test_headed_header_ignored_for_non_browser_recipe_providers(app_client):

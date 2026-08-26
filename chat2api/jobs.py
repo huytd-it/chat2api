@@ -188,7 +188,6 @@ async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, logi
                 job["url"], pool, cfg, job["log"].append,
                 storage_state=storage_state, analyze_key=analyze_key,
                 publish_lock=job["publish_lock"], headed=job.get("headed", False),
-                watch_id=job["id"] if job.get("headed") else None,
             )
         finally:
             try:

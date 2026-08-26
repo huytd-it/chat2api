@@ -41,9 +41,11 @@ class Config:
         self.browser_profile_mode = mode if mode in {"storage_state", "profile"} else "storage_state"
         self.profiles_dir = self.data_dir / "profiles"
         # Số profile (mỗi profile = 1 tiến trình Chromium) giữ mở cùng lúc.
-        self.pool_max_profiles = max(1, int(_env("POOL_MAX_PROFILES", "2")))
-        # Trần số tab trong một profile; vượt thì đóng tab ít dùng nhất.
-        self.profile_max_tabs = max(1, int(_env("PROFILE_MAX_TABS", "4")))
+        # Bàn test Sessions mở nhiều profile/domain/account song song, nên trần
+        # 2 là quá chật — profile đang chạy sẽ bị đóng ngay giữa request.
+        self.pool_max_profiles = max(1, int(_env("POOL_MAX_PROFILES", "6")))
+        # Trần số tab trong một profile; vượt thì đóng tab RẢNH ít dùng nhất.
+        self.profile_max_tabs = max(1, int(_env("PROFILE_MAX_TABS", "8")))
         self.recipe_timeout_ms = int(_env("RECIPE_TIMEOUT_MS", "120000"))
         self.integrate_max_rounds = int(_env("INTEGRATE_MAX_ROUNDS", "5"))
         # Site không yêu cầu đăng nhập vẫn được publish, nhưng chỉ cho dùng thử

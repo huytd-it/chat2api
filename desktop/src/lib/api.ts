@@ -130,11 +130,12 @@ export async function apiBase(): Promise<string> {
   return cachedBase;
 }
 
-function headers(key: string, headed = false, sessionId = ""): HeadersInit {
+function headers(key: string, headed = false, sessionId = "", accountId?: number): HeadersInit {
   const h: Record<string, string> = { "Content-Type": "application/json" };
   if (key) h["Authorization"] = "Bearer " + key;
   if (headed) h["X-Chat2api-Headed"] = "true";
   if (sessionId) h["X-Chat2api-Session-Id"] = sessionId;
+  if (accountId != null) h["X-Chat2api-Account-Id"] = String(accountId);
   return h;
 }
 
@@ -231,9 +232,6 @@ export interface SessionDetail extends SessionSummary {
  * `headed` asks the server to run the underlying browser recipe with a
  * visible Chromium window instead of headless (recipe providers only — the
  * server ignores it for non-browser providers like Gemini/OpenAI passthrough).
- * When the server grants a live view, `onWatchId` fires with the id to poll
- * via `fetchScreenshot` — this works whether or not a native window actually
- * shows up on the user's machine.
  * Throws when the server reports an error before or MID-stream (SSE error
  * payload) so callers can render the real message instead of a dead pipe. */
 export async function streamChat(
@@ -243,14 +241,14 @@ export async function streamChat(
   onDelta: (text: string) => void,
   signal?: AbortSignal,
   headed = false,
-  onWatchId?: (watchId: string) => void,
   sessionId = "",
   onSessionId?: (sessionId: string) => void,
+  accountId?: number,
 ): Promise<void> {
   const base = await apiBase();
   const r = await fetch(base + "/v1/chat/completions", {
     method: "POST",
-    headers: headers(key, headed, sessionId),
+    headers: headers(key, headed, sessionId, accountId),
     signal,
     body: JSON.stringify({
       model,
@@ -262,8 +260,6 @@ export async function streamChat(
     const data = await r.json().catch(() => ({}));
     throw new Error(data?.error?.message || r.statusText);
   }
-  const watchId = r.headers.get("X-Chat2api-Watch-Id");
-  if (watchId && onWatchId) onWatchId(watchId);
   const resolvedSessionId = r.headers.get("X-Chat2api-Session-Id");
   if (resolvedSessionId && onSessionId) onSessionId(resolvedSessionId);
   const reader = r.body.getReader();
@@ -290,17 +286,62 @@ export async function streamChat(
   }
 }
 
-/** Fetches one live-view frame (JPEG) for a watch id from streamChat's
- * onWatchId or an Integrate job id (job ids double as their own watch id
- * when the "hiện browser" checkbox was on). Returns null if there's no
- * active browser page for that id right now (e.g. the request finished). */
-export async function fetchScreenshot(key: string, watchId: string): Promise<Blob | null> {
+/** Một ô trong ma trận profile × domain × account của bàn test.
+ * `models` là các model public id chạy được account này (rỗng ⇒ chưa có recipe
+ * nào phục vụ domain đó, chọn cũng không gửi được). */
+export interface TestTarget {
+  account_id: number;
+  label: string;
+  host: string;
+  domain: string;
+  status: string;
+  profile_id: number;
+  profile_name: string;
+  profile_headless: boolean;
+  profile_open: boolean;
+  profile_tabs: number;
+  profile_max_tabs: number;
+  recipes: string[];
+  models: string[];
+  ready: boolean;
+}
+
+export interface TestTargetList {
+  targets: TestTarget[];
+  /** Trần số profile Chromium mở cùng lúc (POOL_MAX_PROFILES). */
+  max_profiles: number;
+  /** Trần số tab trong MỘT profile (PROFILE_MAX_TABS). */
+  max_tabs: number;
+  profile_mode: "storage_state" | "profile";
+  open_profiles: string[];
+  persisted: boolean;
+}
+
+/** Ma trận target đã ghép sẵn account ↔ recipe ở server, nên desktop không
+ * phải tự đoán domain nào khớp model nào. */
+export async function fetchTestTargets(key: string): Promise<TestTargetList> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/watch/" + encodeURIComponent(watchId) + "/screenshot", {
+  const r = await fetch(base + "/admin/test-targets", { headers: headers(key) });
+  return asJson(r);
+}
+
+/** Mở đúng tab headed mà request chat có target sẽ dùng lại. Bỏ trống `model`
+ * để server tự chọn recipe đầu tiên phục vụ domain của account. */
+export async function openTestTarget(
+  key: string,
+  model: string,
+  accountId: number,
+): Promise<{
+  ok: true; profile: string; account: string; domain: string;
+  url: string; model: string; recipe: string;
+}> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/test-targets/open", {
+    method: "POST",
     headers: headers(key),
+    body: JSON.stringify({ model, account_id: accountId }),
   });
-  if (!r.ok) return null;
-  return r.blob();
+  return asJson(r);
 }
 
 export async function fetchRecipes(key: string): Promise<RecipeInfo[]> {
@@ -663,17 +704,18 @@ export async function deleteProfile(
 
 /** Mở cửa sổ profile trên máy chạy server để đăng nhập tay. `headless: true`
  * trong kết quả nghĩa là profile đã chạy nền từ trước nên không có cửa sổ nào
- * hiện ra — xem qua live view bằng `watch_id`. */
+ * hiện ra — phải đóng profile rồi mở lại mới thấy. */
 export async function openProfile(
   key: string,
   ident: string | number,
   url = "",
-): Promise<{ profile: string; watch_id: string; headless: boolean }> {
+  tabKey = "",
+): Promise<{ profile: string; headless: boolean }> {
   const base = await apiBase();
   const r = await fetch(base + "/admin/profiles/" + encodeURIComponent(String(ident)) + "/open", {
     method: "POST",
     headers: headers(key),
-    body: JSON.stringify({ url }),
+    body: JSON.stringify({ url, tab_key: tabKey }),
   });
   return asJson(r);
 }

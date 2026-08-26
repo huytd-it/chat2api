@@ -15,7 +15,6 @@
     type AccountInfo,
   } from "../api";
   import AccountDialog from "./AccountDialog.svelte";
-  import LiveView from "./LiveView.svelte";
 
   let expanded = $state<Record<string, boolean>>({});
   let busySlug = $state<string | null>(null);
@@ -268,7 +267,6 @@
         Đang mở lại <strong>{reopenDomain}/{reopenName}</strong>. Đăng nhập xong thì bấm Lưu —
         state cũ bị ghi đè, nhãn giữ nguyên.
       </p>
-      <LiveView watchId={reopenSession} />
       <div class="recipe-actions">
         <button class="button" disabled={reopenBusy} onclick={saveReopen}>Lưu</button>
         <button class="button secondary" onclick={cancelReopen}>Hủy</button>

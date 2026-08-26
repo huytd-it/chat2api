@@ -69,7 +69,7 @@ async def test_unhealthy_recipe_routes_to_fallback(app_client, monkeypatch):
             from chat2api.providers.base import ModelInfo
             return [ModelInfo(id="broken/m1", slug="broken")]
 
-        async def stream(self, messages, model_id, headed=None, watch_id=None):
+        async def stream(self, messages, model_id, headed=None):
             raise TimeoutError("recipe 'broken' timeout")
             yield ""
 
@@ -115,7 +115,7 @@ async def test_unhealthy_recipe_routes_to_real_fallback_run(app_client, monkeypa
             from chat2api.providers.base import ModelInfo
             return [ModelInfo(id="broken2/m1", slug="broken2")]
 
-        async def stream(self, messages, model_id, headed=None, watch_id=None):
+        async def stream(self, messages, model_id, headed=None):
             raise TimeoutError("recipe 'broken2' timeout")
             yield ""
 

@@ -73,6 +73,8 @@ def begin(
     authorization: str = "",
     user_agent: str = "",
     api_key_id: int | None = None,
+    account_id: int | None = None,
+    profile_id: int | None = None,
 ) -> Recording:
     """Mở recording và chèn phần history chưa có cùng request_log ``running``."""
     now = store.now_ms()
@@ -105,9 +107,9 @@ def begin(
         if row is None:
             kind = "chat" if explicit else "api"
             conn.execute(
-                "INSERT INTO session(id, title, kind, model_public_id, recipe_id, params, "
-                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (session_id, _title(messages), kind, model, recipe_id,
+                "INSERT INTO session(id, title, kind, model_public_id, recipe_id, account_id, "
+                "profile_id, params, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (session_id, _title(messages), kind, model, recipe_id, account_id, profile_id,
                  json.dumps({"client": fingerprint}, separators=(",", ":")), now, now),
             )
             existing: list[sqlite3.Row] = []
@@ -117,7 +119,9 @@ def begin(
             ).fetchall()
             conn.execute(
                 "UPDATE session SET model_public_id = ?, recipe_id = COALESCE(?, recipe_id), "
-                "updated_at = ? WHERE id = ?", (model, recipe_id, now, session_id)
+                "account_id = COALESCE(?, account_id), profile_id = COALESCE(?, profile_id), "
+                "updated_at = ? WHERE id = ?",
+                (model, recipe_id, account_id, profile_id, now, session_id)
             )
 
         # Desktop gửi toàn bộ history mỗi lượt. Chỉ nối suffix khi history là

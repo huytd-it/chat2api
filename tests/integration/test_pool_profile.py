@@ -195,6 +195,75 @@ async def test_profile_evicted_past_max_profiles_and_lock_released(pool, db, tmp
     assert db.query("SELECT lock_pid FROM profile WHERE name = 'main'")[0]["lock_pid"] is None
 
 
+async def test_busy_profile_is_not_evicted_even_past_max_profiles(pool, db, tmp_path):
+    """Mở nhiều profile cùng lúc không được phép cắt request đang chạy.
+
+    Trần max_profiles là để dọn thứ bỏ quên, không phải để giết phiên đang
+    stream — bàn test Sessions mở song song nhiều profile nên hay chạm trần.
+    """
+    first = make_profile(db, tmp_path, "main")
+    second = make_profile(db, tmp_path, "work")
+    third = make_profile(db, tmp_path, "spare")
+
+    ctx1 = await pool.context_for_profile(first)
+    ctx2 = await pool.context_for_profile(second)
+    async with pool.hold("main"):
+        ctx3 = await pool.context_for_profile(third)
+        # 'main' đang bận nên nạn nhân là 'work' (rảnh, ít dùng nhất kế tiếp).
+        assert not ctx1.closed and ctx2.closed and not ctx3.closed
+        assert pool.profile_count == 2
+
+
+async def test_all_profiles_busy_exceeds_the_cap_instead_of_closing_one(pool, db, tmp_path):
+    first = make_profile(db, tmp_path, "main")
+    second = make_profile(db, tmp_path, "work")
+    third = make_profile(db, tmp_path, "spare")
+
+    ctx1 = await pool.context_for_profile(first)
+    ctx2 = await pool.context_for_profile(second)
+    async with pool.hold("main"), pool.hold("work"):
+        await pool.context_for_profile(third)
+        assert not ctx1.closed and not ctx2.closed
+        # Vượt trần là lựa chọn tường minh: thà tốn RAM còn hơn mất kết quả.
+        assert pool.profile_count == 3
+
+
+async def test_hold_is_released_after_the_request_finishes(pool, db, tmp_path):
+    first = make_profile(db, tmp_path, "main")
+    second = make_profile(db, tmp_path, "work")
+    third = make_profile(db, tmp_path, "spare")
+
+    ctx1 = await pool.context_for_profile(first)
+    async with pool.hold("main"):
+        pass
+    await pool.context_for_profile(second)
+    await pool.context_for_profile(third)
+    assert ctx1.closed and pool.profile_count == 2
+
+
+async def test_busy_tab_is_kept_and_an_idle_one_is_closed(pool, db, tmp_path):
+    profile = make_profile(db, tmp_path, max_tabs=2)
+    a = await pool.page_for(profile, "a")
+    b = await pool.page_for(profile, "b")
+    async with pool.hold(profile.name, f"{profile.name}::a"):
+        await pool.page_for(profile, "c")
+
+    assert not a.is_closed() and b.is_closed()
+    assert pool.tab_count("main") == 2
+
+
+async def test_all_tabs_busy_keeps_them_all_open(pool, db, tmp_path):
+    profile = make_profile(db, tmp_path, max_tabs=2)
+    a = await pool.page_for(profile, "a")
+    b = await pool.page_for(profile, "b")
+    async with pool.hold(profile.name, f"{profile.name}::a"), \
+            pool.hold(profile.name, f"{profile.name}::b"):
+        await pool.page_for(profile, "c")
+
+    assert not a.is_closed() and not b.is_closed()
+    assert pool.tab_count("main") == 3
+
+
 async def test_drop_profile_closes_and_releases(pool, db, tmp_path):
     profile = make_profile(db, tmp_path)
     ctx = await pool.context_for_profile(profile)

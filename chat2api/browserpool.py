@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 
@@ -47,8 +48,15 @@ class BrowserPool:
         # context (vừa là browser vừa là context), giữ nhiều tab bên trong.
         self._profiles: OrderedDict[str, object] = OrderedDict()
         self._profile_ids: dict[str, int] = {}
+        self._profile_headless: dict[str, bool] = {}
         self._pages: OrderedDict[str, object] = OrderedDict()
         self._profile_lock = asyncio.Lock()
+        # Đếm việc đang chạy trên từng profile / từng tab. Trần max_profiles và
+        # max_tabs chỉ được phép đóng thứ ĐANG RẢNH: mở nhiều
+        # profile/domain/account một lúc mà cứ đóng cái cũ nhất thì request nào
+        # chạy lâu cũng bị cắt giữa chừng.
+        self._busy_profiles: dict[str, int] = {}
+        self._busy_tabs: dict[str, int] = {}
         # Browser headed (cửa sổ hiện ra) dùng khi test recipe trong lúc
         # Integrate, để xem trực quan trang web bên cạnh app — chỉ khởi
         # động khi có context nào đó yêu cầu headed=True.
@@ -150,8 +158,14 @@ class BrowserPool:
                 return ctx
             self._profiles.pop(profile.name, None)
             while len(self._profiles) >= self.max_profiles:
-                name, old = self._profiles.popitem(last=False)
-                await self._close_profile(name, old)
+                name = self._idle_profile()
+                if name is None:
+                    logger.warning(
+                        "BrowserPool: %s profile đang bận, mở thêm '%s' vượt "
+                        "max_profiles=%s thay vì cắt request đang chạy",
+                        len(self._profiles), profile.name, self.max_profiles)
+                    break
+                await self._close_profile(name, self._profiles.pop(name))
                 logger.info("BrowserPool: đóng profile '%s' (max_profiles=%s)",
                             name, self.max_profiles)
 
@@ -163,10 +177,38 @@ class BrowserPool:
                 await asyncio.to_thread(profiles_mod.release_lock, profile.id)
                 raise
             self._profiles[profile.name] = ctx
+            self._profile_headless[profile.name] = bool(profile.headless)
             self._profile_ids[profile.name] = profile.id
             await self._seed_profile(profile, ctx)
             await asyncio.to_thread(profiles_mod.touch, profile.id)
             return ctx
+
+    def _idle_profile(self) -> str | None:
+        """Profile ít dùng nhất mà không có request nào đang chạy (LRU trước)."""
+        return next((name for name in self._profiles if not self._busy_profiles.get(name)), None)
+
+    @contextlib.asynccontextmanager
+    async def hold(self, profile_name: str, tab_key: str = ""):
+        """Ghim profile/tab trong lúc một request dùng nó.
+
+        Không phải khoá loại trừ (đã có `_lock_for` trong recipe lo việc đó) —
+        chỉ là cái phao để vòng evict biết cái nào còn đang chạy.
+        """
+        self._busy_profiles[profile_name] = self._busy_profiles.get(profile_name, 0) + 1
+        if tab_key:
+            self._busy_tabs[tab_key] = self._busy_tabs.get(tab_key, 0) + 1
+        try:
+            yield
+        finally:
+            if self._busy_profiles.get(profile_name, 0) <= 1:
+                self._busy_profiles.pop(profile_name, None)
+            else:
+                self._busy_profiles[profile_name] -= 1
+            if tab_key:
+                if self._busy_tabs.get(tab_key, 0) <= 1:
+                    self._busy_tabs.pop(tab_key, None)
+                else:
+                    self._busy_tabs[tab_key] -= 1
 
     async def _launch_profile(self, profile):
         kwargs = {
@@ -248,21 +290,28 @@ class BrowserPool:
         if page is None:
             page = await ctx.new_page()
         self._pages[key] = page
-        await self._evict_tabs(profile)
+        await self._evict_tabs(profile, keep=key)
         return page
 
-    async def _evict_tabs(self, profile) -> None:
+    async def _evict_tabs(self, profile, keep: str = "") -> None:
+        """Đóng bớt tab RẢNH khi vượt trần; `keep` là tab vừa mở cho người gọi."""
         prefix = f"{profile.name}::"
         keys = [k for k in self._pages if k.startswith(prefix)]
         while len(keys) > profile.max_tabs:
-            oldest = keys.pop(0)
-            page = self._pages.pop(oldest, None)
+            victim = next((k for k in keys
+                           if k != keep and not self._busy_tabs.get(k)), None)
+            if victim is None:
+                logger.warning("BrowserPool: %s tab của '%s' đều đang bận, giữ nguyên "
+                               "(max_tabs=%s)", len(keys), profile.name, profile.max_tabs)
+                break
+            keys.remove(victim)
+            page = self._pages.pop(victim, None)
             if page is not None and not page.is_closed():
                 try:
                     await page.close()
                 except Exception:
                     pass
-            logger.info("BrowserPool: đóng tab '%s' (max_tabs=%s)", oldest, profile.max_tabs)
+            logger.info("BrowserPool: đóng tab '%s' (max_tabs=%s)", victim, profile.max_tabs)
 
     @staticmethod
     def _profile_alive(ctx) -> bool:
@@ -281,11 +330,14 @@ class BrowserPool:
 
         for key in [k for k in self._pages if k.startswith(f"{name}::")]:
             self._pages.pop(key, None)
+            self._busy_tabs.pop(key, None)
+        self._busy_profiles.pop(name, None)
         try:
             await ctx.close()
         except Exception:
             pass
         profile_id = self._profile_ids.pop(name, None)
+        self._profile_headless.pop(name, None)
         if profile_id is not None:
             await asyncio.to_thread(profiles_mod.release_lock, profile_id)
 
@@ -311,6 +363,12 @@ class BrowserPool:
         if ctx is None or not self._profile_alive(ctx):
             return None
         return ctx
+
+    def profile_headless(self, profile_name: str) -> bool | None:
+        """Launch mode of an open persistent context, if tracked."""
+        if self.open_context(profile_name) is None:
+            return None
+        return self._profile_headless.get(profile_name)
 
     @property
     def open_profiles(self) -> list[str]:

@@ -33,7 +33,7 @@ async def db(tmp_path):
 
 async def test_job_row_follows_status_transitions(db, monkeypatch, tmp_path):
     async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None,
-                             publish_lock=None, headed=False, watch_id=None):
+                             publish_lock=None, headed=False):
         log("đang phân tích trang")
         return {"status": "ok", "slug": "example", "model_id": "example/web"}
 
@@ -54,7 +54,7 @@ async def test_job_row_follows_status_transitions(db, monkeypatch, tmp_path):
 
 async def test_job_log_lines_persist_in_order(db, monkeypatch, tmp_path):
     async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None,
-                             publish_lock=None, headed=False, watch_id=None):
+                             publish_lock=None, headed=False):
         log("mở trang")
         log("tìm thấy ô nhập")
         return {"status": "ok", "slug": "example"}
@@ -75,7 +75,7 @@ async def test_job_log_lines_persist_in_order(db, monkeypatch, tmp_path):
 
 async def test_headed_and_login_attempts_recorded(db, monkeypatch, tmp_path):
     async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None,
-                             publish_lock=None, headed=False, watch_id=None):
+                             publish_lock=None, headed=False):
         return {"status": "login_required", "slug": "example"}
 
     monkeypatch.setattr(jobs, "integrate", fake_integrate)
@@ -93,7 +93,7 @@ async def test_headed_and_login_attempts_recorded(db, monkeypatch, tmp_path):
 
 async def test_cancel_recorded(db, monkeypatch, tmp_path):
     async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None,
-                             publish_lock=None, headed=False, watch_id=None):
+                             publish_lock=None, headed=False):
         return {"status": "login_required", "slug": "example"}
 
     monkeypatch.setattr(jobs, "integrate", fake_integrate)
@@ -115,7 +115,7 @@ async def test_jobs_run_unchanged_without_store(monkeypatch, tmp_path):
     assert store.default() is None
 
     async def fake_integrate(url, pool, cfg, log, storage_state=None, analyze_key=None,
-                             publish_lock=None, headed=False, watch_id=None):
+                             publish_lock=None, headed=False):
         log("một dòng")
         return {"status": "ok", "slug": "example"}
 

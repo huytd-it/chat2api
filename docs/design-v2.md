@@ -36,7 +36,7 @@ Không có gì để dựng trang Sessions lên cả — chưa hề có chỗ ch
 <data_dir>/                    # CHAT2API_DATA_DIR, mặc định ./data
 ├── chat2api.db                # SQLite (WAL: + .db-wal, .db-shm)
 ├── profiles/<profile-name>/   # user-data-dir của Chromium
-└── blobs/<yyyy>/<mm>/         # ảnh đính kèm, screenshot live-view
+└── blobs/<yyyy>/<mm>/         # ảnh đính kèm
 ```
 
 `recipes/` **giữ nguyên vai trò**: YAML vẫn là thứ người dùng đọc/sửa/commit được. DB là bản mirror có thêm lịch sử, health, và số đếm. Xem §4 để biết bên nào thắng khi lệch.
@@ -162,7 +162,7 @@ profile "main"  ──► 1 tiến trình Chromium (persistent context)
 - `contexts: dict[profile_name, PersistentContext]` — LRU theo `POOL_MAX_PROFILES`.
 - `lease(profile, recipe_slug) -> Page` — một tab dài hạn cho mỗi `(profile, recipe)`, cùng một khoá thì xếp hàng qua `asyncio.Lock` (giữ hành vi hiện tại: hai request cùng recipe không chen vào cùng ô input).
 - **Recipe khác nhau trong cùng profile chạy song song** — mỗi tab một lock riêng. Đây là phần "chia tab dùng nhiều web chat một lúc".
-- `profile.max_tabs` chặn trên; vượt thì đóng tab LRU (không đóng browser).
+- `profile.max_tabs` chặn trên; vượt thì đóng tab LRU **đang rảnh** (không đóng browser, không đóng tab vừa mở). `pool.hold(profile, tab_key)` ghim tab/profile trong lúc một request chạy — bàn test Sessions mở song song nhiều profile nên chạm trần là chuyện thường, và trần không được phép cắt phiên đang stream. Mọi ứng viên đều bận thì pool tạm vượt trần và ghi cảnh báo.
 - Khớp `--disable-*-backgrounding` ở trên: nếu thiếu, tab nền bị throttle và vòng poll `stable_text` trong `browser_recipe.stream()` sẽ chậm/timeout.
 
 **Khoá tiến trình.** Một `user_data_dir` chỉ được một tiến trình Chromium mở. `profile.lock_pid`/`lock_at` phát hiện server cũ còn treo và báo lỗi rõ ràng, thay vì để Chromium fail với thông báo khó hiểu. Khi start: nếu `lock_pid` còn sống và khác pid hiện tại → từ chối; nếu chết → thu hồi khoá.
@@ -407,7 +407,7 @@ Mỗi pha đứng độc lập, chạy được, và có test riêng.
 
 Pha 4 là chỗ nguy hiểm nhất: nó thay cách mọi recipe lấy trình duyệt. Cách giảm rủi ro — cờ `BROWSER_PROFILE_MODE = storage_state | profile` mặc định `storage_state`, đường mới chạy song song cho tới khi bạn tự tin lật cờ.
 
-**Đã làm xong.** `profiles.py` giữ phần trạng thái (hàng DB, thư mục, khoá pid, seed); `BrowserPool` mọc thêm `context_for_profile()` / `page_for()` sống *cạnh* `context_for()` cũ chứ không thay nó. Đường profile tự tắt trong ba trường hợp: engine `cloak` (`launch_context_async` không nhận `user_data_dir`), request headed (live view cần cửa sổ hiện lên), và mọi lỗi profile (khoá pid, kho chưa mở) — cả ba đều rơi về `storage_state` kèm một dòng stderr, không bao giờ để request chat chết vì một tính năng opt-in.
+**Đã làm xong.** `profiles.py` giữ phần trạng thái (hàng DB, thư mục, khoá pid, seed); `BrowserPool` mọc thêm `context_for_profile()` / `page_for()` sống *cạnh* `context_for()` cũ chứ không thay nó. Đường profile tự tắt trong ba trường hợp: engine `cloak` (`launch_context_async` không nhận `user_data_dir`), request headed (cần cửa sổ Chromium hiện lên), và mọi lỗi profile (khoá pid, kho chưa mở) — cả ba đều rơi về `storage_state` kèm một dòng stderr, không bao giờ để request chat chết vì một tính năng opt-in.
 
 **Pha 5 đã làm xong.** Nav còn 5 tab; `/recipes` và `/accounts` biến mất, ba panel
 `IntegratePanel` · `SitesPanel` · `ProfilesPanel` xếp dọc trong `/integrations`.

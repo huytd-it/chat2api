@@ -63,6 +63,16 @@ class ProfileUpdateRequest(ProfileCreateRequest):
 
 class ProfileOpenRequest(BaseModel):
     url: str = ""
+    # Khóa tab tùy chọn cho màn test hàng loạt. Bỏ trống giữ nguyên tab mở tay
+    # truyền thống; mỗi khóa khác nhau tạo một tab riêng trong cùng profile.
+    tab_key: str = ""
+
+
+class TestTargetOpenRequest(BaseModel):
+    # Bỏ trống ⇒ server tự chọn recipe đầu tiên phục vụ domain của account. Mở
+    # nhiều domain một lượt thì client không có sẵn model cho từng cái.
+    model: str = ""
+    account_id: int
 
 
 class ProfileAccountRequest(BaseModel):

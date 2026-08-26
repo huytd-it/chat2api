@@ -8,7 +8,6 @@ from urllib.parse import urlparse
 
 import yaml
 
-from .. import live_view
 from ..providers.browser_recipe import BrowserRecipe, validate_recipe
 from . import dom, llm
 
@@ -103,19 +102,17 @@ def _atomic_write(path: Path, data: bytes) -> None:
 
 async def integrate(url: str, pool, cfg, log, storage_state: Path | None = None,
                     analyze_key: str | None = None, publish_lock=None,
-                    headed: bool = False, watch_id: str | None = None) -> dict:
+                    headed: bool = False) -> dict:
     from ..config import Config  # noqa: F401  (type hint)
 
     slug = _domain_slug(url)
     analyze_key = analyze_key or f"{slug}__analyze"
     ctx = await pool.context_for(analyze_key, storage_state, headed=headed)
     page = await ctx.new_page()
-    if watch_id:
-        await live_view.register(watch_id, page)
 
     fix_ctx = ""
     try:
-        log(f"Mở {url} ..." + (" (xem trực tiếp trong live view)" if watch_id else ""))
+        log(f"Mở {url} ...")
         await page.goto(url, wait_until="domcontentloaded", timeout=45000)
         if await _looks_like_login(page):
             log("Site yêu cầu đăng nhập.")
@@ -123,10 +120,6 @@ async def integrate(url: str, pool, cfg, log, storage_state: Path | None = None,
                     "hint": f"python -m chat2api login {slug}"}
 
         for rnd in range(1, cfg.integrate_max_rounds + 1):
-            if watch_id:
-                # Round trước có thể đã chuyển "ống kính" sang page của trial run —
-                # giành lại để live view hiện đúng page phân tích DOM lúc này.
-                await live_view.register(watch_id, page)
             snap = await dom.snapshot(page)
             user = (f"URL: {url}\n\nDOM SNAPSHOT:\n{snap}\n\n{fix_ctx}"
                     if fix_ctx else f"URL: {url}\n\nDOM SNAPSHOT:\n{snap}")
@@ -159,8 +152,7 @@ async def integrate(url: str, pool, cfg, log, storage_state: Path | None = None,
             try:
                 log(f"Lần {rnd}: thử round-trip ...")
                 parts = []
-                async for d in runner.stream(trial, trial_recipe["models"][0]["id"],
-                                             watch_id=watch_id):
+                async for d in runner.stream(trial, trial_recipe["models"][0]["id"]):
                     parts.append(d)
                 reply = "".join(parts).strip()
                 if reply and reply.lower() != "reply with exactly: ok":
@@ -197,6 +189,4 @@ async def integrate(url: str, pool, cfg, log, storage_state: Path | None = None,
         return {"status": "failed", "slug": slug,
                 "hint": "Hết vòng thử. Xem log, chỉnh recipes/<slug>/recipe.yaml tay."}
     finally:
-        if watch_id:
-            await live_view.unregister(watch_id, page)
         await page.close()

@@ -42,6 +42,27 @@ async def test_non_stream_creates_session_messages_and_request_log(session_clien
     assert db.query("SELECT COUNT(*) AS n FROM request_log")[0]["n"] == 1
 
 
+async def test_target_metadata_is_stored_on_session(session_client):
+    _, db = session_client
+    now = store.now_ms()
+    conn = db.connection()
+    with conn:
+        profile_id = conn.execute(
+            "INSERT INTO profile(name, user_data_dir, created_at) VALUES ('target', '', ?)",
+            (now,)).lastrowid
+        domain_id = conn.execute(
+            "INSERT INTO domain(host, created_at) VALUES ('example.com', ?)", (now,)).lastrowid
+        account_id = conn.execute(
+            "INSERT INTO account(profile_id, domain_id, label, created_at) "
+            "VALUES (?, ?, 'main', ?)", (profile_id, domain_id, now)).lastrowid
+    recording = sessions.begin(
+        "target-session", "fake/m1", "fake", [{"role": "user", "content": "test"}],
+        False, account_id=account_id, profile_id=profile_id)
+    row = db.query(
+        "SELECT account_id, profile_id FROM session WHERE id = 'target-session'")[0]
+    assert (row["account_id"], row["profile_id"]) == (account_id, profile_id)
+
+
 async def test_explicit_header_continues_same_session_without_duplicate_history(session_client):
     client, _ = session_client
     first = await _chat(client, "Lượt một", "desktop-session-1")

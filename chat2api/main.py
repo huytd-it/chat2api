@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from . import accounts, apikeys, applog, auth, errors, live_view, profiles, sessions, store  # noqa: F401  (import auth để đăng ký dependency)
+from . import accounts, apikeys, applog, auth, errors, profiles, sessions, store  # noqa: F401  (import auth để đăng ký dependency)
 from .config import Config
 from .errors import OpenAIError
 from .providers.browser_recipe import TrialLimitExceeded
@@ -177,6 +177,20 @@ def create_app(cfg: Config) -> FastAPI:
         cid = "chatcmpl-" + uuid.uuid4().hex[:29]
         from .providers.browser_recipe import BrowserRecipe as BR
 
+        target_account_id = None
+        target_profile_id = None
+        raw_target = request.headers.get("x-chat2api-account-id", "").strip()
+        if raw_target:
+            if not isinstance(provider, BR):
+                raise OpenAIError(400, "target_unsupported",
+                                  "Chỉ browser recipe hỗ trợ chọn profile/account")
+            try:
+                target_account_id = int(raw_target)
+                target, _ = provider.resolve_target(target_account_id)
+                target_profile_id = int(target["profile_id"])
+            except (TypeError, ValueError) as error:
+                raise OpenAIError(400, "invalid_target", str(error))
+
         # Ghi một transaction trước provider và một transaction khi kết thúc;
         # tuyệt đối không ghi từng SSE delta. Header này cho desktop nối nhiều
         # lượt vào cùng session; client API không gửi vẫn được gom theo model +
@@ -187,22 +201,18 @@ def create_app(cfg: Config) -> FastAPI:
             msgs, body.stream, request.headers.get("authorization", ""),
             request.headers.get("user-agent", ""),
             getattr(request.state, "api_key_id", None),
+            target_account_id, target_profile_id,
         )
         response.headers["X-Chat2api-Session-Id"] = recording.session_id
 
-        # Chỉ dùng cho playground/desktop test thủ công: bật browser hiện lên
-        # (không headless) để xem trực tiếp recipe chạy, thay vì đợi kết quả mù.
-        # Dù cửa sổ Chromium có thực sự hiện ra hay không (tùy máy), watch_id
-        # luôn cho phép xem live view qua /admin/watch/{id}/screenshot.
+        # Chỉ dùng cho desktop test thủ công: chạy recipe trong cửa sổ Chromium
+        # hiện ra thay vì headless, để nhìn thẳng vào trang thật.
         headed = request.headers.get("x-chat2api-headed", "").strip().lower() == "true"
-        watch_id = uuid.uuid4().hex[:12] if (headed and isinstance(provider, BR)) else None
-        if watch_id:
-            response.headers["X-Chat2api-Watch-Id"] = watch_id
 
         def fallback_ok(reason: str) -> bool:
             from .agents import llm
 
-            return (isinstance(provider, BR) and cfg_.enable_fallback
+            return (isinstance(provider, BR) and target_account_id is None and cfg_.enable_fallback
                     and llm.configured(cfg_))
 
         async def agent_stream():
@@ -221,8 +231,9 @@ def create_app(cfg: Config) -> FastAPI:
                     yield d
                 return
             try:
-                stream_kwargs = ({"headed": headed, "watch_id": watch_id}
-                                 if isinstance(provider, BR) else {})
+                stream_kwargs = {"headed": headed} if isinstance(provider, BR) else {}
+                if target_account_id is not None:
+                    stream_kwargs["target_account_id"] = target_account_id
                 async for d in provider.stream(msgs, local, **stream_kwargs):
                     sent["n"] += 1
                     yield d
@@ -303,8 +314,6 @@ def create_app(cfg: Config) -> FastAPI:
                     yield "data: [DONE]\n\n"
 
             sse_headers = {"X-Chat2api-Session-Id": recording.session_id}
-            if watch_id:
-                sse_headers["X-Chat2api-Watch-Id"] = watch_id
             return StreamingResponse(gen(), media_type="text/event-stream", headers=sse_headers)
 
         parts: list[str] = []
@@ -358,12 +367,117 @@ def register_admin(app: FastAPI, admin) -> None:
     from .schemas import (AccountLoginRequest, AddAccountRequest, ApiKeyCreateRequest,
                           IntegrateRequest, ProfileAccountRequest, ProfileCreateRequest,
                           ProfileOpenRequest, ProfileUpdateRequest, SaveAccountRequest,
-                          SessionForkRequest, SessionUpdateRequest, SettingsRequest)
+                          SessionForkRequest, SessionUpdateRequest, SettingsRequest,
+                          TestTargetOpenRequest)
 
     # Tab do người dùng mở tay trong một profile. Đặt tên như một slug recipe để
     # dùng chung cơ chế một-tab-một-slug của pool, nhưng không recipe nào tên
     # được như vậy (slug thật chỉ gồm [a-z0-9-]).
     MANUAL_SLUG = "__manual__"
+
+    def _browser_recipes_by_domain(rt) -> dict[str, list]:
+        """domain đã chuẩn hoá → các browser recipe phục vụ nó (theo thứ tự slug)."""
+        from .providers.browser_recipe import BrowserRecipe
+
+        out: dict[str, list] = {}
+        for slug, provider in sorted(rt.providers.items()):
+            if isinstance(provider, BrowserRecipe):
+                out.setdefault(provider.domain, []).append(provider)
+        return out
+
+    def _account_rows() -> list[dict]:
+        db = store.default()
+        if db is None:
+            return []
+        return [dict(row) for row in db.query(
+            "SELECT a.id, a.label, a.status, a.disabled, d.host, "
+            "p.id AS profile_id, p.name AS profile_name, p.headless, p.max_tabs "
+            "FROM account a JOIN profile p ON p.id = a.profile_id "
+            "JOIN domain d ON d.id = a.domain_id "
+            "WHERE a.disabled = 0 ORDER BY p.name, d.host, a.label")]
+
+    @admin.get("/test-targets")
+    async def test_target_list(request: Request):
+        """Toàn bộ ma trận profile × domain × account có thể đem ra test.
+
+        Khác `/admin/profiles` (chỉ kể account) và `/admin/recipes` (chỉ kể
+        model): ở đây hai bên đã được ghép sẵn, nên desktop không phải tự đoán
+        domain nào khớp recipe nào — chỗ mà 'www.' hay recipe trùng domain vẫn
+        làm lệch danh sách.
+        """
+        cfg = request.app.state.cfg
+        pool_ = request.app.state.pool
+        by_domain = _browser_recipes_by_domain(request.app.state.router)
+        open_now = set(pool_.open_profiles)
+        targets = []
+        for row in _account_rows():
+            host = str(row["host"] or "").lower()
+            domain = host[4:] if host.startswith("www.") else host
+            providers_ = by_domain.get(domain, [])
+            models_ = [m.id for provider in providers_ for m in provider.models()]
+            targets.append({
+                "account_id": row["id"], "label": row["label"] or "main",
+                "host": host, "domain": domain,
+                "status": row["status"] or "",
+                "profile_id": row["profile_id"], "profile_name": row["profile_name"],
+                "profile_headless": bool(row["headless"]),
+                "profile_open": row["profile_name"] in open_now,
+                "profile_tabs": pool_.tab_count(row["profile_name"]),
+                "profile_max_tabs": int(row["max_tabs"] or cfg.profile_max_tabs),
+                "recipes": [provider.slug for provider in providers_],
+                "models": models_,
+                # Không có recipe nào phục vụ domain này ⇒ chọn cũng không chạy
+                # được; desktop hiện nó mờ kèm lý do thay vì giấu đi.
+                "ready": bool(models_),
+            })
+        return {"targets": targets, "max_profiles": cfg.pool_max_profiles,
+                "max_tabs": cfg.profile_max_tabs,
+                "profile_mode": cfg.browser_profile_mode,
+                "open_profiles": sorted(open_now),
+                "persisted": store.default() is not None}
+
+    def _provider_for_target(request: Request, model: str, account_id: int):
+        """Browser recipe chạy một account: theo `model` nếu có, không thì tự suy."""
+        from .providers.browser_recipe import BrowserRecipe
+
+        rt = request.app.state.router
+        if model:
+            try:
+                provider, _ = rt.resolve(model)
+            except ModelNotFound:
+                raise OpenAIError(404, "model_not_found", f"Model '{model}' không tồn tại")
+            if not isinstance(provider, BrowserRecipe):
+                raise OpenAIError(400, "target_unsupported",
+                                  "Model này không chạy bằng browser recipe")
+            return provider
+        row = next((r for r in _account_rows() if r["id"] == account_id), None)
+        if row is None:
+            raise OpenAIError(400, "invalid_target",
+                              f"Account {account_id} không tồn tại hoặc đã tắt")
+        host = str(row["host"] or "").lower()
+        domain = host[4:] if host.startswith("www.") else host
+        providers_ = _browser_recipes_by_domain(rt).get(domain, [])
+        if not providers_:
+            raise OpenAIError(400, "target_unsupported",
+                              f"Chưa có recipe nào phục vụ {host}")
+        return providers_[0]
+
+    @admin.post("/test-targets/open")
+    async def test_target_open(body: TestTargetOpenRequest, request: Request):
+        """Open the exact headed tab used by a targeted desktop chat request."""
+        provider = _provider_for_target(request, body.model.strip(), body.account_id)
+        try:
+            target, page = await provider.open_target(body.account_id)
+        except ValueError as error:
+            raise OpenAIError(400, "invalid_target", str(error))
+        applog.log(f"test-target: mở {target['profile_name']}/{target['host']}"
+                   f"/{target['label']} qua {provider.slug}")
+        return {"ok": True, "profile": target["profile_name"],
+                "account": target["label"], "domain": target["host"],
+                "url": page.url,
+                "model": f"{provider.slug}/{provider.models()[0].id.split('/', 1)[1]}"
+                         if provider.models() else "",
+                "recipe": provider.slug}
     # Nơi cất tạm state khi người dùng mở browser mà chưa biết domain (§6.1 bậc
     # 4). Không phải domain hợp lệ nên không lọt vào danh sách domain.
     PENDING_DIRNAME = "_pending"
@@ -528,8 +642,10 @@ def register_admin(app: FastAPI, admin) -> None:
         # Profile đang chạy nền (headless) thì giữ nguyên tiến trình đó — mở lại
         # headed sẽ đụng khoá user_data_dir. Live view vẫn xem được tab.
         reused = pool_.open_context(profile.name) is not None
+        tab_key = re.sub(r"[^a-zA-Z0-9_-]", "", body.tab_key.strip())[:80]
+        manual_slug = f"{MANUAL_SLUG}-{tab_key}" if tab_key else MANUAL_SLUG
         try:
-            page = await pool_.page_for(replace(profile, headless=False), MANUAL_SLUG)
+            page = await pool_.page_for(replace(profile, headless=False), manual_slug)
         except profiles.ProfileLocked as error:
             raise OpenAIError(409, "profile_locked", str(error))
         except Exception as error:
@@ -542,10 +658,10 @@ def register_admin(app: FastAPI, admin) -> None:
                 await page.goto(target, wait_until="domcontentloaded", timeout=30000)
             except Exception as error:
                 applog.log(f"profile: '{profile.name}' không tới được {target}: {error}", "warn")
-        watch_id = f"profile-{profile.id}"
-        await live_view.register(watch_id, page)
         applog.log(f"profile: mở cửa sổ '{profile.name}'")
-        return {"ok": True, "profile": profile.name, "watch_id": watch_id,
+        # `headless: true` ⇒ profile đã chạy nền từ trước nên không có cửa sổ nào
+        # hiện ra; client phải bảo người dùng đóng profile rồi mở lại.
+        return {"ok": True, "profile": profile.name,
                 "headless": reused and bool(row["headless"])}
 
     @admin.post("/profiles/{ident}/detect")
@@ -647,17 +763,6 @@ def register_admin(app: FastAPI, admin) -> None:
         # gần nhất. `before` là id để phân trang lùi. Rỗng khi chưa mở được kho.
         entries = await asyncio.to_thread(applog.history, level, source, q, before, limit)
         return {"entries": entries, "persisted": store.default() is not None}
-
-    @admin.get("/watch/{watch_id}/screenshot")
-    async def watch_screenshot(watch_id: str):
-        # Live view: chụp ảnh page Playwright đang chạy (headless hay headed đều
-        # được), để client poll thay vì phụ thuộc cửa sổ Chromium có hiện ra hay
-        # không trên máy người dùng.
-        data = await live_view.screenshot(watch_id)
-        if data is None:
-            raise OpenAIError(404, "not_found", "Không có browser nào đang chạy cho watch_id này")
-        return Response(content=data, media_type="image/jpeg",
-                        headers={"Cache-Control": "no-store"})
 
     @admin.get("/recipes")
     async def recipes(request: Request):

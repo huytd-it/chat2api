@@ -13,7 +13,6 @@
     type ProfileInfo,
   } from "../api";
   import AccountDialog from "./AccountDialog.svelte";
-  import LiveView from "./LiveView.svelte";
 
   let creating = $state(false);
   let newName = $state("");
@@ -26,7 +25,6 @@
   let editHeadless = $state(true);
   let editNotes = $state("");
 
-  let watchId = $state<string | null>(null);
   let watchProfile = $state("");
   let suggestions = $state<Record<number, string[]>>({});
   let dialogProfile = $state<string | null>(null);
@@ -97,11 +95,10 @@
     busyId = p.id;
     try {
       const res = await openProfile($apiKey, p.id);
-      watchId = res.watch_id;
       watchProfile = p.name;
-      if (res.headless) {
-        showToast(`${p.name} đang chạy nền — xem qua live view bên dưới.`);
-      }
+      showToast(res.headless
+        ? `${p.name} đang chạy nền nên không có cửa sổ mới — bấm Đóng rồi Mở lại.`
+        : `Đã mở cửa sổ ${p.name}. Đăng nhập rồi bấm “Dò domain”.`);
       await refreshIntegrations();
     } catch (e) {
       showToast((e as Error).message);
@@ -127,7 +124,7 @@
     busyId = p.id;
     try {
       await closeProfile($apiKey, p.name);
-      if (watchProfile === p.name) watchId = null;
+      if (watchProfile === p.name) watchProfile = "";
       await refreshIntegrations();
     } catch (e) {
       showToast((e as Error).message);
@@ -285,11 +282,10 @@
       </div>
     {/each}
 
-    {#if watchId}
+    {#if watchProfile}
       <div class="account-flow">
-        <p>Cửa sổ profile <strong>{watchProfile}</strong> đang mở — đăng nhập rồi bấm “Dò domain”.</p>
-        <LiveView {watchId} />
-        <button class="button secondary small" onclick={() => (watchId = null)}>Đóng khung xem</button>
+        <p>Cửa sổ profile <strong>{watchProfile}</strong> đang mở trên máy chạy server — đăng nhập rồi bấm “Dò domain”.</p>
+        <button class="button secondary small" onclick={() => (watchProfile = "")}>Ẩn nhắc này</button>
       </div>
     {/if}
   </div>

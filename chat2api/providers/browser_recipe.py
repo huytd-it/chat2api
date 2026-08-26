@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import re
 import sys
@@ -6,7 +7,7 @@ import time
 from pathlib import Path
 from typing import AsyncIterator
 
-from .. import accounts, live_view, store
+from .. import accounts, store
 from ..prompt import flatten_messages
 from .base import ModelInfo, Provider
 
@@ -277,6 +278,48 @@ class BrowserRecipe(Provider):
                 return storage_state
         return None
 
+    def resolve_target(self, account_id: int):
+        """Resolve a desktop test target and reject cross-domain accounts."""
+        from .. import profiles as profiles_mod
+
+        db = store.default()
+        if db is None:
+            raise ValueError("Kho dữ liệu chưa mở")
+        rows = db.query(
+            "SELECT a.id, a.label, a.profile_id, p.name AS profile_name, d.host "
+            "FROM account a JOIN profile p ON p.id = a.profile_id "
+            "JOIN domain d ON d.id = a.domain_id "
+            "WHERE a.id = ? AND a.disabled = 0", (account_id,))
+        if not rows:
+            raise ValueError(f"Account {account_id} không tồn tại hoặc đã tắt")
+        row = rows[0]
+        account_domain = str(row["host"] or "").lower()
+        if account_domain.startswith("www."):
+            account_domain = account_domain[4:]
+        if account_domain != self.domain:
+            raise ValueError(
+                f"Account {account_id} thuộc {row['host']}, không dùng được cho {self.domain}")
+        profile = profiles_mod.get_profile(row["profile_name"])
+        if profile is None:
+            raise ValueError(f"Profile '{row['profile_name']}' không tồn tại")
+        return row, profile
+
+    async def open_target(self, account_id: int):
+        """Open the exact persistent-profile tab later used by ``stream``."""
+        from dataclasses import replace
+
+        row, profile = self.resolve_target(account_id)
+        tab_key = f"{self.slug}::account-{account_id}"
+        # Ghim ngay từ đầu: mở nhiều target một lượt thì lần mở sau không được
+        # phép đóng profile/tab mà lần mở trước vừa dựng xong.
+        async with self.pool.hold(profile.name, tab_key):
+            if self.pool.profile_headless(profile.name) is True:
+                await self.pool.drop_profile(profile.name)
+            page = await self.pool.page_for(replace(profile, headless=False), tab_key)
+            await page.goto(self._new_chat_url or self.url, wait_until="domcontentloaded",
+                            timeout=min(int(self.ds.get("timeout_ms", 120000)), 60000))
+        return row, page
+
     async def _release_ctx(self, ctx_key: str) -> None:
         """Dựng lại context sạch cho request sau (chỉ khi keep_context=false)."""
         self._pages.pop(ctx_key, None)
@@ -391,20 +434,32 @@ class BrowserRecipe(Provider):
         await _sleep_ms(self._ready_delay_ms)
 
     async def stream(self, messages: list[dict], model_id: str,
-                     headed: bool | None = None, watch_id: str | None = None) -> AsyncIterator[str]:
+                     headed: bool | None = None,
+                     target_account_id: int | None = None) -> AsyncIterator[str]:
         prompt = flatten_messages(messages)
         self.last_response_html = None
-        account_name, storage_state = await self._rotator.next()
-        ctx_key = self.slug if len(self._accounts) <= 1 else f"{self.slug}::{account_name}"
+        target_profile = None
+        if target_account_id is not None:
+            target, target_profile = self.resolve_target(target_account_id)
+            account_name, storage_state = target["label"], None
+            ctx_key = f"{self.slug}::account-{target_account_id}"
+        else:
+            account_name, storage_state = await self._rotator.next()
+            ctx_key = self.slug if len(self._accounts) <= 1 else f"{self.slug}::{account_name}"
         effective_headed = self._headed if headed is None else headed
         timeout_ms = int(self.ds.get("timeout_ms", 120000))
         quiet_ms = int(self.ds.get("quiet_ms", 3000))
         # Page dùng chung cho mỗi ctx_key nên hai request cùng account phải nối
         # đuôi nhau, không chen ngang vào cùng một ô input.
-        async with self._lock_for(ctx_key):
-            page = await self._acquire_page(ctx_key, storage_state, effective_headed)
-            if watch_id:
-                await live_view.register(watch_id, page)
+        async with self._lock_for(ctx_key), contextlib.AsyncExitStack() as stack:
+            if target_profile is not None:
+                await stack.enter_async_context(self.pool.hold(target_profile.name, ctx_key))
+                if effective_headed:
+                    _, page = await self.open_target(target_account_id)
+                else:
+                    page = await self.pool.page_for(target_profile, ctx_key)
+            else:
+                page = await self._acquire_page(ctx_key, storage_state, effective_headed)
             deadline = time.monotonic() + timeout_ms / 1000
             try:
                 await page.goto(self._new_chat_url or self.url, wait_until="domcontentloaded",
@@ -454,7 +509,5 @@ class BrowserRecipe(Provider):
                 # trả lời xong, chỉ đóng khi người dùng tắt tay hoặc gọi
                 # close_browser(). keep_context=false là lựa chọn tường minh
                 # trong recipe nên vẫn được tôn trọng.
-                if watch_id:
-                    await live_view.unregister(watch_id, page)
                 if not self._keep_context:
                     await self._release_ctx(ctx_key)

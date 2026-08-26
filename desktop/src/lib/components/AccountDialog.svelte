@@ -12,7 +12,6 @@
     openProfile,
     startDomainLogin,
   } from "../api";
-  import LiveView from "./LiveView.svelte";
 
   interface Props {
     /** Domain điền sẵn khi mở từ một recipe. */
@@ -42,7 +41,6 @@
   // ghi nhận quan hệ), không qua profile thì lưu storage_state thành file.
   let sessionId = $state<string | null>(null);
   let profileId = $state<number | null>(null);
-  let watchId = $state<string | null>(null);
 
   const usingProfile = $derived(profileName !== "");
   const opened = $derived(sessionId !== null || profileId !== null);
@@ -61,14 +59,12 @@
         }
         const res = await openProfile($apiKey, found.id, target ? `https://${target}` : "");
         profileId = found.id;
-        watchId = res.watch_id;
         statusText = res.headless
-          ? "Profile đang chạy nền nên không có cửa sổ mới — thao tác qua live view bên dưới."
+          ? "Profile đang chạy nền nên không có cửa sổ mới — đóng profile rồi mở lại."
           : `Cửa sổ profile ${res.profile} đã mở. Đăng nhập xong thì bấm Dò domain.`;
       } else {
         const res = await startDomainLogin($apiKey, target);
         sessionId = res.session_id;
-        watchId = res.session_id;
         statusText = target
           ? `Browser đã mở cho ${target}. Đăng nhập xong thì đặt nhãn rồi Lưu.`
           : "Browser mở trang trắng: tự vào site và đăng nhập, rồi bấm Lưu — server đọc cookie để suy ra domain.";
@@ -120,7 +116,6 @@
         host = res.domain;
         suggested = res.suggested ?? [];
         sessionId = null;
-        watchId = null;
         statusText = `Đã lưu ${res.domain}/${name}.`;
       }
       done = true;
@@ -256,9 +251,6 @@
         </div>
       {/if}
 
-      {#if watchId}
-        <LiveView {watchId} />
-      {/if}
     </div>
   </div>
 </div>

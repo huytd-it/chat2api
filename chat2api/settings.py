@@ -45,12 +45,14 @@ FIELDS: list[dict] = [
      "help": "storage_state: mỗi recipe một context, chỉ cookie + localStorage. "
              "profile: một Chromium profile giữ đăng nhập mọi domain, mỗi recipe một tab "
              "chạy song song. Không áp dụng cho engine cloak."},
-    {"key": "POOL_MAX_PROFILES", "type": "int", "default": "2", "group": "Browser",
+    {"key": "POOL_MAX_PROFILES", "type": "int", "default": "6", "group": "Browser",
      "apply": "restart", "label": "Số profile mở cùng lúc",
-     "help": "Mỗi profile là một tiến trình Chromium. Chỉ dùng ở chế độ profile."},
-    {"key": "PROFILE_MAX_TABS", "type": "int", "default": "4", "group": "Browser",
+     "help": "Mỗi profile là một tiến trình Chromium. Chỉ dùng ở chế độ profile. "
+             "Đây là trần cho số profile chọn được cùng lúc ở bàn test Sessions."},
+    {"key": "PROFILE_MAX_TABS", "type": "int", "default": "8", "group": "Browser",
      "apply": "restart", "label": "Số tab tối đa trong một profile",
-     "help": "Vượt thì tab ít dùng nhất bị đóng, browser vẫn mở."},
+     "help": "Vượt thì tab RẢNH ít dùng nhất bị đóng, browser vẫn mở. Đây là trần "
+             "cho số domain/account của cùng một profile chạy song song."},
     {"key": "RECIPE_TIMEOUT_MS", "type": "int", "default": "120000", "group": "Server",
      "apply": "restart", "label": "Hạn chờ recipe trả lời (ms)"},
     {"key": "ANON_TRIAL_LIMIT", "type": "int", "default": "20", "group": "Server",

@@ -2,7 +2,6 @@
   import { apiKey, showToast } from "../stores";
   import { startIntegration, fetchJob, jobAction, type JobStatus } from "../api";
   import { refreshIntegrations, refreshModels } from "../sync";
-  import LiveView from "./LiveView.svelte";
 
   let siteUrl = $state("");
   let headedMode = $state(false);
@@ -14,7 +13,6 @@
   let jobLogEl = $state<HTMLElement | null>(null);
   // Watch id doubles as the job id — the server registers the analyzer's
   // page under the job id itself whenever "hiện browser" was checked.
-  let watchId = $state<string | null>(null);
 
   const terminalStatuses = ["ok", "failed", "cancelled", "login_timeout"];
 
@@ -81,7 +79,6 @@
         terminal = terminalStatuses.includes(j.status);
         if (terminal) {
           stopPolling();
-          watchId = null;
           refreshModels();
           refreshIntegrations();
         }
@@ -118,7 +115,6 @@
         showJobStatus(data);
         if (terminalStatuses.includes(data.status)) {
           stopPolling();
-          watchId = null;
           refreshModels();
           refreshIntegrations();
         }
@@ -154,7 +150,6 @@
     resetLoginButtons();
     integrateDisabled = true;
     stopPolling();
-    watchId = null;
     loginActionsVisible = false;
     jobLog = "";
     try {
@@ -162,11 +157,6 @@
       if (operation !== operationGeneration) return;
       jobStatusText = "đang chạy job " + data.job_id + "...";
       resetLoginButtons();
-      // Luôn theo dõi live view, kể cả khi không bật "hiện browser": bước
-      // đăng nhập thủ công (nếu site yêu cầu) luôn mở cửa sổ Chromium thật,
-      // và cửa sổ đó có thể không hiện ra tùy máy — live view là cách xem
-      // đáng tin cậy duy nhất trong trường hợp đó.
-      watchId = data.job_id;
       startPolling(data.job_id);
     } catch (e) {
       if (operation === operationGeneration) jobStatusText = "lỗi: " + e;
@@ -209,10 +199,6 @@
           Hủy
         </button>
       </span>
-    {/if}
-
-    {#if watchId}
-      <LiveView {watchId} />
     {/if}
 
     <div class="job-log-head">

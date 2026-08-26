@@ -56,13 +56,13 @@ Rồi bấm **Phân tích** ở trang **Integrations** của desktop app, hoặc
     python -m chat2api integrate https://chat.example.com
 
 Tick ô **"Hiện browser khi test (không headless)"** dưới ô URL để xem
-Chromium thao tác trực tiếp trên trang web song song với app. Cửa sổ
-Chromium có thể không hiện ra tùy máy/session (remote desktop, sandbox...),
-nên khi tick ô này app còn hiện thêm một **live view** — ảnh chụp trực tiếp
-trang đang chạy, tự refresh khoảng 700ms/lần qua
-`GET /admin/watch/{id}/screenshot` — hoạt động cả khi cửa sổ không hiện ra.
-Live view cũng dùng được khi chat ở trang Sessions, không chỉ lúc
-Integrate.
+Chromium thao tác trực tiếp trên trang web song song với app. Đây là cửa sổ
+Chromium thật trên máy chạy server; nếu nó không hiện ra (remote desktop,
+sandbox...) thì đọc nhật ký job thay vì trông vào cửa sổ.
+
+> Bản trước có "live view" — ảnh màn hình tự refresh 700ms/lần. Đã bỏ: mỗi
+> lần chụp làm cửa sổ Chromium chớp một cái, nhìn nhiều tab cùng lúc thì
+> nháy liên tục. `GET /admin/watch/{id}/screenshot` cũng không còn.
 
 Site cần đăng nhập: chạy `python -m chat2api login <slug>`, đăng nhập tay,
 chạy lại integrate.
@@ -110,9 +110,13 @@ Mặc định mỗi recipe chạy trong một browser context riêng, khôi ph�
 
 ```
 BROWSER_PROFILE_MODE=profile   # storage_state (mặc định) | profile
-POOL_MAX_PROFILES=2            # số tiến trình Chromium giữ mở
-PROFILE_MAX_TABS=4             # tab tối đa trong một profile
+POOL_MAX_PROFILES=6            # số tiến trình Chromium giữ mở
+PROFILE_MAX_TABS=8             # tab tối đa trong một profile
 ```
+
+Hai trần này chỉ dọn profile/tab **đang rảnh**: request đang chạy không bao giờ
+bị đóng giữa chừng, kể cả khi bàn test Sessions mở nhiều profile hơn trần (lúc
+đó pool tạm vượt trần và ghi cảnh báo vào log).
 
 Một profile = một thư mục `data/profiles/<tên>/` giữ cookie + localStorage +
 IndexedDB + service worker của **mọi** domain cùng lúc, nên:
