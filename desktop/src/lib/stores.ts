@@ -1,4 +1,5 @@
 import { writable } from "svelte/store";
+import { toast } from "svelte-sonner";
 
 const STORAGE_KEY = "c2a_key";
 
@@ -21,13 +22,8 @@ export const apiKey = createApiKeyStore();
  * Chromium (không headless) thay vì chạy ẩn ở nền. */
 export const headedBrowser = writable(false);
 
-export const toastMessage = writable<string | null>(null);
-let toastTimer: ReturnType<typeof setTimeout> | undefined;
-
 export function showToast(message: string) {
-  toastMessage.set(message);
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toastMessage.set(null), 3200);
+  toast(message);
 }
 
 /** Lines emitted by the Rust sidecar (stdout/stderr of the Python server). */

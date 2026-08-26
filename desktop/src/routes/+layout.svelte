@@ -4,9 +4,11 @@
   import "../session-inspector.css";
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import TopBar from "$lib/components/TopBar.svelte";
-  import InstrumentRail from "$lib/components/InstrumentRail.svelte";
-  import Toast from "$lib/components/Toast.svelte";
+  import { ModeWatcher } from "mode-watcher";
+  import { Toaster } from "$lib/components/ui/sonner/index.js";
+  import * as Sidebar from "$lib/components/ui/sidebar/index.js";
+  import AppSidebar from "$lib/components/AppSidebar.svelte";
+  import AppHeader from "$lib/components/AppHeader.svelte";
   import { serverStatus, serverLog } from "$lib/stores";
   import { fetchHealth } from "$lib/api";
   import { refreshModels, refreshRecipes, refreshAccounts, refreshOverview } from "$lib/sync";
@@ -58,34 +60,33 @@
   // direction contract is injected via {@html} to survive as a real DOM
   // comment node the production build can be grepped for.
   const directionContract = `<!--
-THESIS: chat2api desktop stops reading as a chatbot demo and becomes a bench
-instrument: every panel is something you probe, calibrate, or read, never
-just scroll past.
-OWN-WORLD: charcoal-graphite chassis, brushed-steel bezels, engraved
-off-white panel labels, one phosphor-green live-signal accent, amber for
-in-progress, calibration-red faults; Big Shoulders Display for the
-nameplate and headlines, Archivo for body, Cascadia Code for every readout.
-STORY: an operator selects a channel, sends a probe, watches the reply draw
-as a live trace, reads server vitals off a permanent rail, and wires new
-sites in at a calibration bench.
-FIRST VIEWPORT: nameplate topbar with rocker-switch nav; a slim vitals rail
-down the left edge; center chat renders as an oscilloscope face -- graticule
-ground, phosphor-trace replies; right sidebar is a meter bank of
-nixie-style counters and toggles.
-FORM: The Instrument Bench, assigned index 6 of 7 grounded directions,
-raised by Nixie Counter Bank (digit counters), Depth Gauge Descent (vitals
-rail), the Saville catalog sleeve (negative space), and the festival
-lineup poster (headline scale); seed key 861da6bc.
-FINISH: unreviewed and undocumented is unfinished; this build ends with the
-finish review, the verdict, DESIGN.md, and every shipping raster carrying
-its provenance.
+THESIS: chat2api desktop reads as a focused developer tool, not a themed
+instrument panel: dense enough to work in, quiet enough to trust, honest
+about state (connecting, healthy, degraded) at every layer.
+OWN-WORLD: neutral zinc surfaces, one cobalt-blue accent for interactive
+intent, green/amber/red reserved strictly for healthy/running/error
+semantics; shadcn-svelte + Bits UI primitives on Tailwind v4 tokens, system
+sans for UI text, monospace only for ids, models, timestamps and logs.
+STORY: an operator opens the app to a collapsible sidebar and a slim header
+with live connection status; Sessions is the dense workbench (session list,
+conversation, composer, inspector); Integrations, Logs and Settings stay
+narrow and legible.
+FINISH: DESIGN.md documents the token system and component inventory this
+build ships with; light, dark and system themes are first-class, not an
+afterthought.
 -->`;
 </script>
 
+<ModeWatcher />
+<Toaster richColors closeButton />
 {@html directionContract}
-<InstrumentRail />
-<TopBar />
-<main>
-  {@render children()}
-</main>
-<Toast />
+
+<Sidebar.Provider>
+  <AppSidebar />
+  <Sidebar.Inset class="h-svh overflow-hidden">
+    <AppHeader />
+    <main class="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {@render children()}
+    </main>
+  </Sidebar.Inset>
+</Sidebar.Provider>

@@ -10,13 +10,32 @@
     refreshAccounts,
     refreshModels,
   } from "$lib/sync";
+  import PageShell from "$lib/components/PageShell.svelte";
+  import * as Card from "$lib/components/ui/card/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
+  import { Button } from "$lib/components/ui/button/index.js";
+  import { Badge } from "$lib/components/ui/badge/index.js";
+  import { Skeleton } from "$lib/components/ui/skeleton/index.js";
+  import ArrowClockwiseIcon from "phosphor-svelte/lib/ArrowClockwiseIcon";
+  import WarningIcon from "phosphor-svelte/lib/WarningIcon";
+  import CheckCircleIcon from "phosphor-svelte/lib/CheckCircleIcon";
+  import GlobeIcon from "phosphor-svelte/lib/GlobeIcon";
 
-  onMount(() => {
-    refreshOverview();
+  let refreshing = $state(false);
+  let loaded = $state(false);
+
+  onMount(async () => {
+    await refreshOverview();
+    loaded = true;
   });
 
   async function refreshAll() {
-    await Promise.all([refreshOverview(), refreshRecipes(), refreshAccounts(), refreshModels()]);
+    refreshing = true;
+    try {
+      await Promise.all([refreshOverview(), refreshRecipes(), refreshAccounts(), refreshModels()]);
+    } finally {
+      refreshing = false;
+    }
   }
 
   const unhealthy = $derived($overview?.unhealthy ?? []);
@@ -25,131 +44,158 @@
   const domainsWithoutAccounts = $derived(
     $accounts.filter((d) => d.recipes.length > 0 && d.accounts.length === 0),
   );
+
+  const stats = $derived([
+    { label: "Models sẵn sàng", value: $overview?.models },
+    { label: "Recipes", value: $overview?.recipes },
+    { label: "Accounts", value: $overview?.accounts },
+    { label: "Domains", value: $overview?.domains },
+    { label: "Browser context", value: $overview?.contexts },
+  ]);
+
+  const healthy = $derived(
+    $serverStatus.state !== "error" && !unhealthy.length && !domainsWithoutAccounts.length,
+  );
 </script>
 
-<section class="view page">
-  <div class="page-heading">
-    <h1>Tổng quan</h1>
-    <p>Trạng thái server, kênh đang phục vụ và những thứ cần chú ý.</p>
+<PageShell title="Overview" description="Trạng thái server, kênh đang phục vụ và những thứ cần chú ý.">
+  {#snippet actions()}
+    <Button variant="outline" size="sm" onclick={refreshAll} disabled={refreshing}>
+      <ArrowClockwiseIcon size={16} class={refreshing ? "animate-spin" : ""} />
+      Làm mới
+    </Button>
+  {/snippet}
+
+  <!-- Health banner -->
+  {#if !loaded}
+    <Skeleton class="h-16 w-full rounded-xl" />
+  {:else if $serverStatus.state === "error"}
+    <Alert.Root variant="destructive">
+      <WarningIcon size={16} />
+      <Alert.Title>Mất kết nối tới server</Alert.Title>
+      <Alert.Description>Kiểm tra sidecar còn chạy không, rồi bấm Làm mới.</Alert.Description>
+    </Alert.Root>
+  {:else if healthy}
+    <Alert.Root class="border-success/40 bg-success/10 text-success dark:bg-success/15">
+      <CheckCircleIcon size={16} />
+      <Alert.Title>Mọi thứ đang khoẻ</Alert.Title>
+      <Alert.Description class="text-success/90">
+        Không có vấn đề nào. Tất cả recipe đang phục vụ bình thường.
+      </Alert.Description>
+    </Alert.Root>
+  {:else}
+    <div class="grid gap-3">
+      {#if unhealthy.length}
+        <Alert.Root variant="destructive">
+          <WarningIcon size={16} />
+          <Alert.Title>Recipe cần kiểm tra</Alert.Title>
+          <Alert.Description>
+            Lỗi liên tiếp: {unhealthy.join(", ")}. Mở
+            <a class="font-medium underline underline-offset-2" href="/integrations">Integrations</a>
+            để reload hoặc sửa selector.
+          </Alert.Description>
+        </Alert.Root>
+      {/if}
+      {#each domainsWithoutAccounts as domain (domain.domain)}
+        <Alert.Root class="border-warning/40 bg-warning/10 text-warning dark:bg-warning/15">
+          <WarningIcon size={16} />
+          <Alert.Title>{domain.domain} chưa có account</Alert.Title>
+          <Alert.Description class="text-warning/90">
+            {domain.recipes.join(", ")} đang chạy ẩn danh và sẽ hết lượt dùng thử.
+          </Alert.Description>
+        </Alert.Root>
+      {/each}
+    </div>
+  {/if}
+
+  <!-- Metrics -->
+  <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+    {#each stats as stat (stat.label)}
+      <Card.Root class="gap-0 py-4">
+        <Card.Content class="px-4">
+          {#if !loaded}
+            <Skeleton class="h-8 w-12" />
+          {:else}
+            <div class="font-data text-2xl font-semibold tabular-nums text-foreground">
+              {stat.value ?? "—"}
+            </div>
+          {/if}
+          <div class="mt-1 text-xs text-muted-foreground">{stat.label}</div>
+        </Card.Content>
+      </Card.Root>
+    {/each}
   </div>
 
-  <div class="stat-grid">
-    <div class="stat">
-      <strong>{$overview?.models ?? "-"}</strong>
-      <span>Models sẵn sàng</span>
-    </div>
-    <div class="stat">
-      <strong>{$overview?.recipes ?? "-"}</strong>
-      <span>Recipes</span>
-    </div>
-    <div class="stat">
-      <strong>{$overview?.accounts ?? "-"}</strong>
-      <span>Accounts</span>
-    </div>
-    <div class="stat">
-      <strong>{$overview?.domains ?? "-"}</strong>
-      <span>Domains</span>
-    </div>
-    <div class="stat">
-      <strong>{$overview?.contexts ?? "-"}</strong>
-      <span>Browser context</span>
-    </div>
-    <div class="stat">
-      <strong class="mono-sm">{$overview?.engine ?? "-"}</strong>
-      <span>Engine</span>
-    </div>
-  </div>
-
-  <div class="dash-grid">
-    <article class="panel dash-card">
-      <div class="panel-head">
-        <div>
-          <h2>Cần chú ý</h2>
-          <p>Recipe hỏng và domain chưa có account.</p>
-        </div>
-        <button class="button secondary small" onclick={refreshAll}>Làm mới</button>
-      </div>
-      <div class="dash-body">
-        {#if $serverStatus.state === "error"}
-          <p class="alert fault">Mất kết nối tới server. Kiểm tra sidecar còn chạy không.</p>
-        {/if}
-        {#if unhealthy.length}
-          <p class="alert fault">
-            Recipe lỗi liên tiếp: {unhealthy.join(", ")}. Mở trang Recipes để reload hoặc sửa
-            selector.
-          </p>
-        {/if}
-        {#each domainsWithoutAccounts as domain (domain.domain)}
-          <p class="alert amber">
-            <strong>{domain.domain}</strong> chưa có account — {domain.recipes.join(", ")} đang chạy
-            ẩn danh và sẽ hết lượt dùng thử.
-          </p>
-        {/each}
-        {#if $serverStatus.state !== "error" && !unhealthy.length && !domainsWithoutAccounts.length}
-          <p class="alert ok">Không có vấn đề nào. Mọi recipe đang khoẻ.</p>
-        {/if}
-      </div>
-    </article>
-
-    <article class="panel dash-card">
-      <div class="panel-head">
-        <div>
-          <h2>Browser đang mở</h2>
-          <p>Cửa sổ được giữ nguyên tới khi bạn tự tắt.</p>
-        </div>
-      </div>
-      <div class="dash-body">
+  <div class="grid gap-4 lg:grid-cols-2">
+    <!-- Running browsers -->
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Browser đang mở</Card.Title>
+        <Card.Description>Cửa sổ được giữ nguyên tới khi bạn tự tắt.</Card.Description>
+      </Card.Header>
+      <Card.Content>
         {#if openBrowsers.length}
-          <ul class="plain-list">
+          <ul class="grid gap-2">
             {#each openBrowsers as slug (slug)}
-              <li><span class="dot on"></span>{slug}</li>
+              <li class="flex items-center gap-2 text-sm">
+                <span class="size-2 rounded-full bg-warning"></span>
+                <span class="font-data">{slug}</span>
+              </li>
             {/each}
           </ul>
-          <p class="hint">Tắt bằng nút “Tắt browser” ở trang Recipes.</p>
         {:else}
-          <p class="hint">Chưa có browser nào mở. Cửa sổ sẽ mở ở request đầu tiên.</p>
+          <div class="flex flex-col items-center gap-2 py-6 text-center">
+            <GlobeIcon size={28} class="text-muted-foreground/60" />
+            <p class="text-sm text-muted-foreground">
+              Chưa có browser nào mở. Cửa sổ sẽ mở ở request đầu tiên.
+            </p>
+          </div>
         {/if}
-      </div>
-    </article>
+      </Card.Content>
+    </Card.Root>
 
-    <article class="panel dash-card">
-      <div class="panel-head">
-        <div>
-          <h2>Lối tắt</h2>
-          <p>Những việc hay làm nhất.</p>
-        </div>
-      </div>
-      <div class="dash-body shortcut-row">
-        <a class="button secondary small" href="/sessions">Mở Sessions</a>
-        <a class="button secondary small" href="/integrations">Thêm web chat mới</a>
-        <a class="button secondary small" href="/integrations">Quản lý account</a>
-        <a class="button secondary small" href="/settings">Chỉnh delay</a>
-      </div>
-    </article>
+    <!-- Shortcuts -->
+    <Card.Root>
+      <Card.Header>
+        <Card.Title>Lối tắt</Card.Title>
+        <Card.Description>Những việc hay làm nhất.</Card.Description>
+      </Card.Header>
+      <Card.Content class="flex flex-wrap gap-2">
+        <Button variant="outline" size="sm" href="/sessions">Mở Sessions</Button>
+        <Button variant="outline" size="sm" href="/integrations">Thêm web chat mới</Button>
+        <Button variant="outline" size="sm" href="/integrations">Quản lý account</Button>
+        <Button variant="outline" size="sm" href="/settings">Chỉnh delay</Button>
+      </Card.Content>
+    </Card.Root>
   </div>
 
-  <article class="panel dash-card">
-    <div class="panel-head">
-      <div>
-        <h2>Kênh đang phục vụ</h2>
-        <p>{$recipes.length} recipe đã nạp.</p>
-      </div>
-      <a class="button secondary small" href="/integrations">Mở trang Integrations</a>
-    </div>
-    <div class="dash-body">
+  <!-- Channels -->
+  <Card.Root>
+    <Card.Header>
+      <Card.Title>Kênh đang phục vụ</Card.Title>
+      <Card.Description>{$recipes.length} recipe đã nạp.</Card.Description>
+      <Card.Action>
+        <Button variant="outline" size="sm" href="/integrations">Mở Integrations</Button>
+      </Card.Action>
+    </Card.Header>
+    <Card.Content>
       {#if $recipes.length}
-        <ul class="channel-list">
+        <ul class="grid gap-1">
           {#each $recipes as recipe (recipe.slug)}
-            <li>
-              <span class="dot" class:fault={recipe.unhealthy} class:on={!recipe.unhealthy}></span>
-              <strong>{recipe.slug}</strong>
-              <span class="hint">{recipe.models.join(", ")}</span>
+            <li class="flex items-center gap-3 rounded-md px-2 py-1.5 text-sm hover:bg-muted/50">
+              <span
+                class="size-2 shrink-0 rounded-full {recipe.unhealthy ? 'bg-destructive' : 'bg-success'}"
+              ></span>
+              <span class="font-medium text-foreground">{recipe.slug}</span>
+              <Badge variant="outline" class="font-data ml-auto">{recipe.models.join(", ")}</Badge>
             </li>
           {/each}
         </ul>
       {:else}
-        <p class="hint">Chưa có recipe nào. Bắt đầu ở trang Integrate.</p>
+        <p class="py-4 text-center text-sm text-muted-foreground">
+          Chưa có recipe nào. Bắt đầu ở trang Integrations.
+        </p>
       {/if}
-    </div>
-  </article>
-</section>
+    </Card.Content>
+  </Card.Root>
+</PageShell>

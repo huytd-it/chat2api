@@ -22,6 +22,7 @@
   } from "../api";
   import { renderMarkdown } from "../markdown";
   import MessageInspector from "./MessageInspector.svelte";
+  import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
 
   let sessions = $state<SessionSummary[]>([]);
   let active = $state<SessionDetail | null>(null);
@@ -56,6 +57,7 @@
   let rotationMode = $state<"broadcast" | "round_robin" | "fill_first">("broadcast");
   let maxRequestsPerAccount = $state(1);
   let markdownMode = $state<"rendered" | "raw">("rendered");
+  let deleteDialogOpen = $state(false);
 
   type BatchJob = {
     promptIndex: number;
@@ -546,8 +548,9 @@
   }
 
   async function removeActive() {
-    if (!active || !confirm(`Xóa vĩnh viễn “${active.title || "Session"}”?`)) return;
+    if (!active) return;
     await deleteSession($apiKey, active.id);
+    deleteDialogOpen = false;
     active = null;
     inspected = null;
     await loadList(false);
@@ -600,7 +603,7 @@
   class:inspector-open={Boolean(inspected)}
   class:bench-open={benchOpen}
 >
-  <aside class="session-bank panel" aria-label="Danh sách sessions">
+  <aside class="session-bank" aria-label="Danh sách sessions">
     <header class="session-bank-head">
       <div>
         <h1>Sessions</h1>
@@ -665,7 +668,7 @@
   <!-- section chứ không main: layout shell đã có một <main>, và quy tắc CSS
        toàn cục cho `main` (margin:auto + padding theo rail) từng rơi vào đây
        làm console bị căn giữa và thụt lề vô cớ. -->
-  <section class="session-console panel" aria-label="Bản ghi phiên">
+  <section class="session-console" aria-label="Bản ghi phiên">
     {#if loadingDetail}
       <div class="session-loading"><span class="spin-dot"></span>Đang đọc bản ghi…</div>
     {:else if !active}
@@ -679,7 +682,7 @@
         <div class="session-title-block">
           {#if editingTitle}
             <input class="title-input" bind:value={titleDraft} onkeydown={(e) => e.key === "Enter" && saveTitle()} />
-            <button class="button secondary small" onclick={saveTitle}>Lưu</button>
+            <button class="tool-button" onclick={saveTitle}>Lưu</button>
           {:else}
             <button class="editable-title" title="Đổi tên session" onclick={() => { titleDraft = active?.title ?? ""; editingTitle = true; }}>
               <span>{active.title || "Phiên chưa đặt tên"}</span>
@@ -720,7 +723,7 @@
               {/each}
             </div>
           </div>
-          <button class="tool-button danger-tool" title="Xóa session" onclick={removeActive}>
+          <button class="tool-button danger-tool" title="Xóa session" onclick={() => (deleteDialogOpen = true)}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M9 7V4h6v3M8 10v8M12 10v8M16 10v8M6 7l1 14h10l1-14" /></svg><span>Xóa</span>
           </button>
         </div>
@@ -840,10 +843,10 @@
         {/if}
 
         {#if sending}
-          <button class="button danger" onclick={() => abortCtrl?.abort()}>Dừng · {elapsed}s</button>
+          <button class="tool-button danger-tool" onclick={() => abortCtrl?.abort()}>Dừng · {elapsed}s</button>
         {:else}
           <button
-            class="button"
+            class="tool-button bg-primary text-primary-foreground hover:bg-primary/90"
             disabled={!prompt.trim() || (!selected.length && !$selectedModel)}
             onclick={send}
           >
@@ -878,7 +881,7 @@
   </section>
 
   {#if benchOpen}
-    <aside class="test-bench panel" aria-label="Bàn test">
+    <aside class="test-bench" aria-label="Bàn test">
       <header class="bench-head">
         <div>
           <h2>Bàn test</h2>
@@ -1065,3 +1068,20 @@
     <MessageInspector message={inspected} session={active} onclose={() => (inspected = null)} />
   {/if}
 </section>
+
+<AlertDialog.Root bind:open={deleteDialogOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Xóa session?</AlertDialog.Title>
+      <AlertDialog.Description>
+        “{active?.title || "Session"}” và toàn bộ message sẽ bị xóa vĩnh viễn. Thao tác này không thể hoàn tác.
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Hủy</AlertDialog.Cancel>
+      <AlertDialog.Action class="bg-destructive text-destructive-foreground hover:bg-destructive/90" onclick={removeActive}>
+        Xóa vĩnh viễn
+      </AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>

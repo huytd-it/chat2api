@@ -1,296 +1,62 @@
 <script lang="ts">
-  // Panel dưới cùng của trang Integrations (docs/design-v2.md §6): profile là
-  // hạ tầng, không phải việc hằng ngày, nên nó nằm dưới hai panel kia.
   import { apiKey, showToast } from "../stores";
   import { profiles, profilesLoading, profilesMeta, refreshIntegrations } from "../sync";
-  import {
-    closeProfile,
-    createProfile,
-    deleteProfile,
-    detectProfileDomains,
-    openProfile,
-    updateProfile,
-    type ProfileInfo,
-  } from "../api";
+  import { closeProfile, createProfile, deleteProfile, detectProfileDomains, openProfile, updateProfile, type ProfileInfo } from "../api";
   import AccountDialog from "./AccountDialog.svelte";
+  import { Button } from "$lib/components/ui/button";
+  import { Input } from "$lib/components/ui/input";
+  import { Switch } from "$lib/components/ui/switch";
+  import { Badge } from "$lib/components/ui/badge";
+  import * as Card from "$lib/components/ui/card";
+  import * as AlertDialog from "$lib/components/ui/alert-dialog";
+  import { Browser, CircleNotch, FolderOpen, MagnifyingGlass, PencilSimple, Plus, Star, Trash, UserCircle, WarningCircle, X } from "phosphor-svelte";
 
-  let creating = $state(false);
-  let newName = $state("");
-  let newMaxTabs = $state(4);
-  let newHeadless = $state(true);
-  let busyId = $state<number | null>(null);
+  let creating = $state(false); let newName = $state(""); let newMaxTabs = $state(4); let newHeadless = $state(true); let busyId = $state<number | null>(null);
+  let editingId = $state<number | null>(null); let editMaxTabs = $state(4); let editHeadless = $state(true); let editNotes = $state("");
+  let watchProfile = $state(""); let suggestions = $state<Record<number, string[]>>({}); let dialogProfile = $state<string | null>(null);
+  let deleteTarget = $state<ProfileInfo | null>(null); let purgeDialogOpen = $state(false); let panelError = $state("");
 
-  let editingId = $state<number | null>(null);
-  let editMaxTabs = $state(4);
-  let editHeadless = $state(true);
-  let editNotes = $state("");
-
-  let watchProfile = $state("");
-  let suggestions = $state<Record<number, string[]>>({});
-  let dialogProfile = $state<string | null>(null);
-
-  function statusOf(p: ProfileInfo): { label: string; cls: string } {
-    if (p.locked && !p.open) return { label: "bị khoá", cls: "fault" };
-    if (p.open) return { label: `đang chạy · ${p.tabs} tab`, cls: "on" };
-    return { label: "rảnh", cls: "" };
-  }
-
-  async function onCreate() {
-    const name = newName.trim().toLowerCase();
-    if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
-      showToast("Tên profile chỉ gồm chữ thường, số và dấu -");
-      return;
-    }
-    busyId = -1;
-    try {
-      await createProfile($apiKey, name, { max_tabs: newMaxTabs, headless: newHeadless });
-      showToast(`Đã tạo profile ${name}`);
-      newName = "";
-      creating = false;
-      await refreshIntegrations();
-    } catch (e) {
-      showToast((e as Error).message);
-    } finally {
-      busyId = null;
-    }
-  }
-
-  function startEdit(p: ProfileInfo) {
-    editingId = p.id;
-    editMaxTabs = p.max_tabs;
-    editHeadless = p.headless === 1;
-    editNotes = p.notes ?? "";
-  }
-
-  async function saveEdit(p: ProfileInfo) {
-    busyId = p.id;
-    try {
-      await updateProfile($apiKey, p.id, {
-        max_tabs: editMaxTabs,
-        headless: editHeadless,
-        notes: editNotes,
-      });
-      editingId = null;
-      await refreshIntegrations();
-    } catch (e) {
-      showToast((e as Error).message);
-    } finally {
-      busyId = null;
-    }
-  }
-
-  async function makeDefault(p: ProfileInfo) {
-    busyId = p.id;
-    try {
-      await updateProfile($apiKey, p.id, { is_default: true });
-      await refreshIntegrations();
-    } catch (e) {
-      showToast((e as Error).message);
-    } finally {
-      busyId = null;
-    }
-  }
-
-  async function onOpen(p: ProfileInfo) {
-    busyId = p.id;
-    try {
-      const res = await openProfile($apiKey, p.id);
-      watchProfile = p.name;
-      showToast(res.headless
-        ? `${p.name} đang chạy nền nên không có cửa sổ mới — bấm Đóng rồi Mở lại.`
-        : `Đã mở cửa sổ ${p.name}. Đăng nhập rồi bấm “Dò domain”.`);
-      await refreshIntegrations();
-    } catch (e) {
-      showToast((e as Error).message);
-    } finally {
-      busyId = null;
-    }
-  }
-
-  async function onDetect(p: ProfileInfo) {
-    busyId = p.id;
-    try {
-      const res = await detectProfileDomains($apiKey, p.id);
-      suggestions = { ...suggestions, [p.id]: res.suggested };
-      if (!res.suggested.length) showToast(`${p.name}: không có domain nào chưa khai báo.`);
-    } catch (e) {
-      showToast((e as Error).message);
-    } finally {
-      busyId = null;
-    }
-  }
-
-  async function onClose(p: ProfileInfo) {
-    busyId = p.id;
-    try {
-      await closeProfile($apiKey, p.name);
-      if (watchProfile === p.name) watchProfile = "";
-      await refreshIntegrations();
-    } catch (e) {
-      showToast((e as Error).message);
-    } finally {
-      busyId = null;
-    }
-  }
-
-  async function onDelete(p: ProfileInfo) {
-    // Thư mục Chromium giữ toàn bộ đăng nhập của profile — hỏi riêng, vì xoá
-    // hàng DB thì khôi phục được, xoá thư mục thì không.
-    if (!confirm(`Xóa profile ${p.name}?`)) return;
-    const purge = confirm(`Xóa luôn thư mục ${p.user_data_dir}? Mọi đăng nhập trong đó mất hẳn.`);
-    busyId = p.id;
-    try {
-      await deleteProfile($apiKey, p.id, purge);
-      showToast(`Đã xóa profile ${p.name}`);
-      await refreshIntegrations();
-    } catch (e) {
-      showToast((e as Error).message);
-    } finally {
-      busyId = null;
-    }
-  }
+  function statusOf(p: ProfileInfo): { label: string; cls: string } { if (p.locked && !p.open) return { label: "Bị khoá", cls: "bg-destructive" }; if (p.open) return { label: `Đang chạy · ${p.tabs} tab`, cls: "bg-success" }; return { label: "Rảnh", cls: "bg-muted-foreground" }; }
+  function fail(e: unknown) { panelError = (e as Error).message; showToast(panelError); }
+  async function onCreate() { const name = newName.trim().toLowerCase(); if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) { panelError = "Tên profile chỉ gồm chữ thường, số và dấu -"; showToast(panelError); return; } busyId = -1; panelError = ""; try { await createProfile($apiKey, name, { max_tabs: newMaxTabs, headless: newHeadless }); showToast(`Đã tạo profile ${name}`); newName = ""; creating = false; await refreshIntegrations(); } catch (e) { fail(e); } finally { busyId = null; } }
+  function startEdit(p: ProfileInfo) { editingId = p.id; editMaxTabs = p.max_tabs; editHeadless = p.headless === 1; editNotes = p.notes ?? ""; }
+  async function saveEdit(p: ProfileInfo) { busyId = p.id; panelError = ""; try { await updateProfile($apiKey, p.id, { max_tabs: editMaxTabs, headless: editHeadless, notes: editNotes }); editingId = null; await refreshIntegrations(); } catch (e) { fail(e); } finally { busyId = null; } }
+  async function makeDefault(p: ProfileInfo) { busyId = p.id; panelError = ""; try { await updateProfile($apiKey, p.id, { is_default: true }); await refreshIntegrations(); } catch (e) { fail(e); } finally { busyId = null; } }
+  async function onOpen(p: ProfileInfo) { busyId = p.id; panelError = ""; try { const res = await openProfile($apiKey, p.id); watchProfile = p.name; showToast(res.headless ? `${p.name} đang chạy nền nên không có cửa sổ mới — bấm Đóng rồi Mở lại.` : `Đã mở cửa sổ ${p.name}. Đăng nhập rồi bấm “Dò domain”.`); await refreshIntegrations(); } catch (e) { fail(e); } finally { busyId = null; } }
+  async function onDetect(p: ProfileInfo) { busyId = p.id; panelError = ""; try { const res = await detectProfileDomains($apiKey, p.id); suggestions = { ...suggestions, [p.id]: res.suggested }; if (!res.suggested.length) showToast(`${p.name}: không có domain nào chưa khai báo.`); } catch (e) { fail(e); } finally { busyId = null; } }
+  async function onClose(p: ProfileInfo) { busyId = p.id; panelError = ""; try { await closeProfile($apiKey, p.name); if (watchProfile === p.name) watchProfile = ""; await refreshIntegrations(); } catch (e) { fail(e); } finally { busyId = null; } }
+  function requestDelete(p: ProfileInfo) { deleteTarget = p; purgeDialogOpen = false; }
+  function continueDelete() { if (!deleteTarget) return; purgeDialogOpen = true; }
+  async function confirmDelete(purge: boolean) { const p = deleteTarget; if (!p) return; deleteTarget = null; purgeDialogOpen = false; busyId = p.id; panelError = ""; try { await deleteProfile($apiKey, p.id, purge); showToast(`Đã xóa profile ${p.name}`); await refreshIntegrations(); } catch (e) { fail(e); } finally { busyId = null; } }
 </script>
 
-<section class="panel dash-card">
-  <div class="panel-head">
-    <div>
-      <h2>Profile trình duyệt</h2>
-      <p>
-        Một profile = một thư mục Chromium giữ đăng nhập của mọi domain cùng lúc, mỗi recipe
-        một tab.
-      </p>
+<Card.Root class="overflow-hidden" aria-labelledby="profiles-title">
+  <Card.Header class="flex-row items-center justify-between gap-4 border-b"><div class="flex items-start gap-3"><div class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><FolderOpen size={19} /></div><div><Card.Title id="profiles-title">Browser profiles</Card.Title><Card.Description>Hạ tầng Chromium dùng chung đăng nhập cho nhiều domain.</Card.Description></div></div><Button variant={creating ? "ghost" : "outline"} size="sm" onclick={() => (creating = !creating)}>{#if creating}<X /> Hủy{:else}<Plus /> Profile mới{/if}</Button></Card.Header>
+  <Card.Content class="grid gap-4 p-4 sm:p-6">
+    {#if panelError}<div class="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive" role="alert"><WarningCircle class="mt-0.5 shrink-0" />{panelError}</div>{/if}
+    {#if $profilesMeta && !$profilesMeta.persisted}<div class="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning"><WarningCircle class="mt-0.5 shrink-0" />Kho SQLite chưa mở nên chưa quản lý được profile. Xem log khởi động để biết vì sao.</div>
+    {:else if $profilesMeta}<div class="rounded-lg border bg-muted/20 p-3 text-xs leading-5 text-muted-foreground"><p>Chế độ <strong class="font-data text-foreground">{$profilesMeta.mode}</strong> · tối đa <strong class="font-data text-foreground">{$profilesMeta.max_profiles}</strong> profile · <span class="break-all font-data">{$profilesMeta.profiles_dir}</span></p>{#if $profilesMeta.mode === "storage_state"}<p class="mt-1">Router vẫn chạy bằng storage_state. Đặt <code class="font-data text-foreground">BROWSER_PROFILE_MODE=profile</code> để recipe chạy trong profile.</p>{/if}</div>{/if}
+
+    {#if creating}<form class="grid gap-3 rounded-lg border bg-muted/20 p-4 sm:grid-cols-[minmax(0,1fr)_8rem_auto_auto] sm:items-end" onsubmit={(e) => { e.preventDefault(); onCreate(); }}><div class="grid gap-1.5"><label for="profile-name" class="text-sm font-medium">Tên profile</label><Input id="profile-name" class="font-data" placeholder="main" bind:value={newName} /></div><div class="grid gap-1.5"><label for="profile-tabs" class="text-sm font-medium">Tab tối đa</label><Input id="profile-tabs" type="number" min="1" max="32" bind:value={newMaxTabs} /></div><label class="flex h-9 items-center gap-2 text-sm"><Switch bind:checked={newHeadless} aria-label="Chạy profile ẩn" /> Chạy ẩn</label><Button type="submit" disabled={busyId === -1}>{#if busyId === -1}<CircleNotch class="animate-spin" />{:else}<Plus />{/if} Tạo</Button></form>{/if}
+
+    {#if $profilesLoading && !$profiles.length}<div class="flex min-h-32 flex-col items-center justify-center gap-2 text-muted-foreground" role="status" aria-live="polite"><CircleNotch class="animate-spin" size={24} /><p class="text-sm">Đang tải profiles…</p></div>
+    {:else if !$profiles.length && $profilesMeta?.persisted}<div class="flex min-h-32 flex-col items-center justify-center text-center"><UserCircle class="mb-2 text-muted-foreground" size={28} /><p class="font-medium">Chưa có profile</p><p class="mt-1 text-sm text-muted-foreground">Tạo profile để gom đăng nhập nhiều domain.</p></div>{/if}
+
+    <div class="grid gap-3">
+      {#each $profiles as p (p.id)}{@const status = statusOf(p)}
+        <article class="rounded-lg border bg-card p-4">
+          <div class="flex flex-col gap-3 lg:flex-row lg:items-start"><div class="flex min-w-0 flex-1 items-start gap-3"><span class={`mt-1.5 size-2.5 shrink-0 rounded-full ${status.cls}`}></span><div class="min-w-0"><div class="flex flex-wrap items-center gap-2"><h3 class="font-data font-semibold">{p.name}</h3>{#if p.is_default}<Badge variant="secondary"><Star weight="fill" /> Mặc định</Badge>{/if}</div><p class="mt-1 text-xs text-muted-foreground">{p.domains} domain · {p.max_tabs} tab tối đa · {status.label}</p></div></div>
+            <div class="flex flex-wrap gap-1.5"><Button variant="outline" size="sm" disabled={busyId === p.id} onclick={() => onOpen(p)}><Browser /> Mở</Button><Button variant="outline" size="sm" disabled={busyId === p.id || !p.open} onclick={() => onDetect(p)}><MagnifyingGlass /> Dò domain</Button><Button variant="outline" size="sm" disabled={busyId === p.id} onclick={() => (dialogProfile = p.name)}><Plus /> Account</Button><Button variant="ghost" size="icon-sm" aria-label={`Sửa profile ${p.name}`} disabled={busyId === p.id} onclick={() => (editingId === p.id ? (editingId = null) : startEdit(p))}><PencilSimple /></Button>{#if p.open}<Button variant="ghost" size="icon-sm" aria-label={`Đóng profile ${p.name}`} disabled={busyId === p.id} onclick={() => onClose(p)}><X /></Button>{/if}<Button variant="destructive" size="icon-sm" aria-label={`Xóa profile ${p.name}`} disabled={busyId === p.id} onclick={() => requestDelete(p)}><Trash /></Button></div></div>
+          {#if p.accounts.length}<div class="mt-3 flex flex-wrap gap-1.5">{#each p.accounts as account (account.id)}<Badge variant="outline" class="font-data">{account.host} / {account.label}</Badge>{/each}</div>{/if}
+          {#if suggestions[p.id]?.length}<div class="mt-3 flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning"><WarningCircle class="mt-0.5 shrink-0" />Còn đăng nhập chưa khai báo: {suggestions[p.id].join(", ")} — bấm “Account” để thêm.</div>{/if}
+          {#if editingId === p.id}<form class="mt-4 grid gap-3 border-t pt-4 sm:grid-cols-[8rem_minmax(0,1fr)_auto] sm:items-end" onsubmit={(e) => { e.preventDefault(); saveEdit(p); }}><div class="grid gap-1.5"><label for="edit-tabs-{p.id}" class="text-sm font-medium">Tab tối đa</label><Input id="edit-tabs-{p.id}" type="number" min="1" max="32" bind:value={editMaxTabs} /></div><div class="grid gap-1.5"><label for="edit-notes-{p.id}" class="text-sm font-medium">Ghi chú</label><Input id="edit-notes-{p.id}" bind:value={editNotes} /></div><div class="flex flex-wrap items-center gap-2"><label class="flex h-8 items-center gap-2 text-sm"><Switch bind:checked={editHeadless} aria-label={`Chạy ẩn profile ${p.name}`} /> Chạy ẩn</label><Button type="submit" size="sm" disabled={busyId === p.id}>Lưu</Button>{#if !p.is_default}<Button type="button" variant="outline" size="sm" disabled={busyId === p.id} onclick={() => makeDefault(p)}><Star /> Mặc định</Button>{/if}</div></form>{/if}
+        </article>
+      {/each}
     </div>
-    <button class="button secondary small" onclick={() => (creating = !creating)}>
-      {creating ? "Hủy" : "+ Profile mới"}
-    </button>
-  </div>
+    {#if watchProfile}<div class="flex flex-col gap-3 rounded-lg border border-warning/20 bg-warning/5 p-4 sm:flex-row sm:items-center"><Browser class="shrink-0 text-warning" /><p class="min-w-0 flex-1 text-sm">Cửa sổ profile <strong>{watchProfile}</strong> đang mở — đăng nhập rồi bấm “Dò domain”.</p><Button variant="ghost" size="sm" onclick={() => (watchProfile = "")}>Ẩn nhắc này</Button></div>{/if}
+  </Card.Content>
+</Card.Root>
 
-  <div class="dash-body">
-    {#if $profilesMeta && !$profilesMeta.persisted}
-      <p class="alert amber">
-        Kho SQLite chưa mở nên chưa quản lý được profile. Xem log khởi động để biết vì sao.
-      </p>
-    {:else if $profilesMeta}
-      <p class="hint">
-        Chế độ: <strong>{$profilesMeta.mode}</strong> · tối đa {$profilesMeta.max_profiles} profile
-        mở cùng lúc · thư mục <span class="mono-sm">{$profilesMeta.profiles_dir}</span>
-      </p>
-      {#if $profilesMeta.mode === "storage_state"}
-        <p class="hint">
-          Router vẫn chạy bằng storage_state. Profile ở đây dùng được để đăng nhập tay và gom
-          nhiều domain; đặt <span class="mono-sm">BROWSER_PROFILE_MODE=profile</span> nếu muốn
-          recipe chạy trong profile.
-        </p>
-      {/if}
-    {/if}
-
-    {#if creating}
-      <div class="profile-form">
-        <div class="field">
-          <label for="profile-name">Tên</label>
-          <input id="profile-name" type="text" placeholder="main" bind:value={newName} />
-        </div>
-        <div class="field">
-          <label for="profile-tabs">Số tab tối đa</label>
-          <input id="profile-tabs" type="number" min="1" max="32" bind:value={newMaxTabs} />
-        </div>
-        <label class="headed-toggle">
-          <input type="checkbox" bind:checked={newHeadless} />
-          Chạy ẩn (headless)
-        </label>
-        <button class="button" disabled={busyId === -1} onclick={onCreate}>Tạo</button>
-      </div>
-    {/if}
-
-    {#if $profilesLoading && !$profiles.length}
-      <p class="hint">Đang nạp profiles…</p>
-    {:else if !$profiles.length && $profilesMeta?.persisted}
-      <p class="hint">Chưa có profile nào. Tạo một cái để gom đăng nhập nhiều domain.</p>
-    {/if}
-
-    {#each $profiles as p (p.id)}
-      {@const status = statusOf(p)}
-      <div class="profile-row">
-        <div class="profile-line">
-          <span class="dot {status.cls}"></span>
-          <span class="site-slug">{p.name}</span>
-          {#if p.is_default}<span class="login-badge">mặc định</span>{/if}
-          <span class="hint">{p.domains} domain · {p.max_tabs} tab tối đa · {status.label}</span>
-          <span class="recipe-actions">
-            <button class="button secondary small" disabled={busyId === p.id} onclick={() => onOpen(p)}>
-              Mở
-            </button>
-            <button class="button secondary small" disabled={busyId === p.id || !p.open}
-                    onclick={() => onDetect(p)}>
-              Dò domain
-            </button>
-            <button class="button secondary small" disabled={busyId === p.id}
-                    onclick={() => (dialogProfile = p.name)}>
-              + Account
-            </button>
-            <button class="button secondary small" disabled={busyId === p.id}
-                    onclick={() => (editingId === p.id ? (editingId = null) : startEdit(p))}>
-              Sửa
-            </button>
-            {#if p.open}
-              <button class="button secondary small" disabled={busyId === p.id} onclick={() => onClose(p)}>
-                Đóng
-              </button>
-            {/if}
-            <button class="button danger small" disabled={busyId === p.id} onclick={() => onDelete(p)}>
-              Xóa
-            </button>
-          </span>
-        </div>
-
-        {#if p.accounts.length}
-          <div class="saved-accounts">
-            {#each p.accounts as account (account.id)}
-              <span class="saved-account">{account.host} / {account.label}</span>
-            {/each}
-          </div>
-        {/if}
-
-        {#if suggestions[p.id]?.length}
-          <p class="alert amber">
-            Còn đăng nhập chưa khai báo: {suggestions[p.id].join(", ")} — bấm “+ Account” để thêm.
-          </p>
-        {/if}
-
-        {#if editingId === p.id}
-          <div class="profile-form">
-            <div class="field">
-              <label for="edit-tabs-{p.id}">Số tab tối đa</label>
-              <input id="edit-tabs-{p.id}" type="number" min="1" max="32" bind:value={editMaxTabs} />
-            </div>
-            <div class="field">
-              <label for="edit-notes-{p.id}">Ghi chú</label>
-              <input id="edit-notes-{p.id}" type="text" bind:value={editNotes} />
-            </div>
-            <label class="headed-toggle">
-              <input type="checkbox" bind:checked={editHeadless} />
-              Chạy ẩn (headless)
-            </label>
-            <button class="button" disabled={busyId === p.id} onclick={() => saveEdit(p)}>Lưu</button>
-            {#if !p.is_default}
-              <button class="button secondary" disabled={busyId === p.id} onclick={() => makeDefault(p)}>
-                Đặt làm mặc định
-              </button>
-            {/if}
-          </div>
-        {/if}
-      </div>
-    {/each}
-
-    {#if watchProfile}
-      <div class="account-flow">
-        <p>Cửa sổ profile <strong>{watchProfile}</strong> đang mở trên máy chạy server — đăng nhập rồi bấm “Dò domain”.</p>
-        <button class="button secondary small" onclick={() => (watchProfile = "")}>Ẩn nhắc này</button>
-      </div>
-    {/if}
-  </div>
-</section>
-
-{#if dialogProfile !== null}
-  <AccountDialog profile={dialogProfile} onclose={() => (dialogProfile = null)} />
-{/if}
+{#if dialogProfile !== null}<AccountDialog profile={dialogProfile} onclose={() => (dialogProfile = null)} />{/if}
+<AlertDialog.Root open={deleteTarget !== null && !purgeDialogOpen} onOpenChange={(open) => { if (!open && !purgeDialogOpen) deleteTarget = null; }}><AlertDialog.Content><AlertDialog.Header><AlertDialog.Title>Xóa profile {deleteTarget?.name}?</AlertDialog.Title><AlertDialog.Description>Profile sẽ bị gỡ khỏi danh sách. Bước tiếp theo cho phép chọn có xóa vĩnh viễn thư mục Chromium hay không.</AlertDialog.Description></AlertDialog.Header><AlertDialog.Footer><AlertDialog.Cancel>Hủy</AlertDialog.Cancel><AlertDialog.Action variant="destructive" onclick={continueDelete}>Tiếp tục</AlertDialog.Action></AlertDialog.Footer></AlertDialog.Content></AlertDialog.Root>
+<AlertDialog.Root bind:open={purgeDialogOpen} onOpenChange={(open) => { purgeDialogOpen = open; if (!open) deleteTarget = null; }}><AlertDialog.Content><AlertDialog.Header><AlertDialog.Title>Xử lý dữ liệu đăng nhập?</AlertDialog.Title><AlertDialog.Description>Thư mục <code class="break-all font-data">{deleteTarget?.user_data_dir}</code> giữ toàn bộ đăng nhập. Giữ thư mục để có thể dùng lại, hoặc xóa vĩnh viễn dữ liệu này.</AlertDialog.Description></AlertDialog.Header><AlertDialog.Footer class="sm:flex-wrap"><AlertDialog.Cancel>Quay lại</AlertDialog.Cancel><Button variant="outline" onclick={() => confirmDelete(false)}>Giữ thư mục</Button><AlertDialog.Action variant="destructive" onclick={() => confirmDelete(true)}>Xóa cả thư mục</AlertDialog.Action></AlertDialog.Footer></AlertDialog.Content></AlertDialog.Root>

@@ -45,7 +45,7 @@
   }
 </script>
 
-<aside class="message-inspector panel" aria-label="Trình xem message">
+<aside class="message-inspector" aria-label="Trình xem message">
   <header class="inspector-head">
     <div>
       <h2>Trình xem tín hiệu</h2>
@@ -96,7 +96,7 @@
       <span>Tổng <strong>{message.duration_ms == null ? "—" : `${message.duration_ms} ms`}</strong></span>
       {#if message.request?.fallback_used}<span class="amber-fact">Fallback</span>{/if}
     </div>
-    <button class="button secondary small" disabled={tab === "html" && !message.content_html} onclick={copyCurrent}>
+    <button class="tool-button" disabled={tab === "html" && !message.content_html} onclick={copyCurrent}>
       {copied ? "Đã chép" : "Sao chép"}
     </button>
   </footer>

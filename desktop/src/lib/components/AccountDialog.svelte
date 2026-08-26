@@ -1,7 +1,7 @@
 <script lang="ts">
-  // Một dialog duy nhất cho mọi cách thêm account (docs/design-v2.md §6.1):
-  // mở từ hàng recipe (domain điền sẵn, khoá lại), hay mở độc lập từ panel
-  // Profile (domain gõ tay, chọn từ dropdown, hoặc để trống cho server tự dò).
+  // Một dialog duy nhất cho mọi cách thêm account: mở từ hàng recipe (domain
+  // điền sẵn, khoá lại), hay mở độc lập từ panel Profile (domain gõ tay, chọn
+  // từ dropdown, hoặc để trống cho server tự dò).
   import { apiKey, showToast } from "../stores";
   import { domains, profiles, refreshIntegrations } from "../sync";
   import {
@@ -12,6 +12,13 @@
     openProfile,
     startDomainLogin,
   } from "../api";
+  import * as Dialog from "$lib/components/ui/dialog/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
+  import { Button } from "$lib/components/ui/button/index.js";
+  import { Input } from "$lib/components/ui/input/index.js";
+  import { Label } from "$lib/components/ui/label/index.js";
+  import CheckCircleIcon from "phosphor-svelte/lib/CheckCircleIcon";
+  import WarningIcon from "phosphor-svelte/lib/WarningIcon";
 
   interface Props {
     /** Domain điền sẵn khi mở từ một recipe. */
@@ -36,6 +43,7 @@
   let statusText = $state("");
   let suggested = $state<string[]>([]);
   let done = $state(false);
+  let open = $state(true);
 
   // Hai đường lưu khác nhau: qua profile thì chính profile giữ đăng nhập (chỉ
   // ghi nhận quan hệ), không qua profile thì lưu storage_state thành file.
@@ -157,27 +165,23 @@
     onclose?.();
   }
 
-  function onKey(event: KeyboardEvent) {
-    if (event.key === "Escape") close();
+  function onOpenChange(next: boolean) {
+    open = next;
+    if (!next) close();
   }
 </script>
 
-<svelte:window on:keydown={onKey} />
+<Dialog.Root bind:open {onOpenChange}>
+  <Dialog.Content class="sm:max-w-lg">
+    <Dialog.Header>
+      <Dialog.Title>Thêm account</Dialog.Title>
+      <Dialog.Description>Đăng nhập một lần, mọi recipe cùng domain dùng lại được.</Dialog.Description>
+    </Dialog.Header>
 
-<div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && close()}>
-  <div class="panel modal" role="dialog" aria-modal="true" aria-label="Thêm account">
-    <div class="panel-head">
-      <div>
-        <h2>Thêm account</h2>
-        <p>Đăng nhập một lần, mọi recipe cùng domain dùng lại được.</p>
-      </div>
-      <button class="button secondary small" onclick={close}>Đóng</button>
-    </div>
-
-    <div class="dash-body">
-      <div class="field">
-        <label for="acct-domain">Domain</label>
-        <input
+    <div class="grid gap-4">
+      <div class="grid gap-2">
+        <Label for="acct-domain">Domain</Label>
+        <Input
           id="acct-domain"
           type="text"
           list="known-domains"
@@ -190,67 +194,79 @@
             <option value={d.host}></option>
           {/each}
         </datalist>
-        <p class="field-help">
+        <p class="text-xs text-muted-foreground">
           {#if lockDomain}
             Domain của recipe, không đổi được ở đây.
           {:else}
-            Dán URL hay gõ tay đều được. Để trống thì browser mở trang trắng và domain
-            được suy ra từ cookie lúc lưu.
+            Dán URL hay gõ tay đều được. Để trống thì browser mở trang trắng và domain được suy ra
+            từ cookie lúc lưu.
           {/if}
         </p>
       </div>
 
-      <div class="field">
-        <label for="acct-profile">Profile</label>
-        <select id="acct-profile" bind:value={profileName} disabled={opened}>
+      <div class="grid gap-2">
+        <Label for="acct-profile">Profile</Label>
+        <select
+          id="acct-profile"
+          class="h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50 dark:bg-input/30"
+          bind:value={profileName}
+          disabled={opened}
+        >
           <option value="">Không dùng profile (lưu storage_state)</option>
           {#each $profiles as p (p.id)}
             <option value={p.name}>{p.name} · {p.domains} domain</option>
           {/each}
         </select>
-        <p class="field-help">
-          Chọn profile thì cửa sổ mở bằng đúng profile đó và chính nó giữ đăng nhập — một
-          profile dùng chung cho nhiều domain.
+        <p class="text-xs text-muted-foreground">
+          Chọn profile thì cửa sổ mở bằng đúng profile đó và chính nó giữ đăng nhập — một profile
+          dùng chung cho nhiều domain.
         </p>
       </div>
 
-      <div class="field">
-        <label for="acct-label">Nhãn</label>
-        <input id="acct-label" type="text" placeholder="work" bind:value={label} />
-      </div>
-
-      <div class="modal-actions">
-        {#if !opened}
-          <button class="button" disabled={busy} onclick={openBrowser}>Mở browser</button>
-        {:else}
-          {#if profileId !== null}
-            <button class="button secondary" disabled={busy} onclick={detect}>Dò domain</button>
-          {/if}
-          <button class="button" disabled={busy} onclick={save}>Lưu</button>
-        {/if}
-        <button class="button secondary" onclick={close}>{done ? "Xong" : "Hủy"}</button>
+      <div class="grid gap-2">
+        <Label for="acct-label">Nhãn</Label>
+        <Input id="acct-label" type="text" placeholder="work" bind:value={label} />
       </div>
 
       {#if statusText}
-        <p class="alert {done ? 'ok' : 'amber'}">{statusText}</p>
+        <Alert.Root
+          class={done
+            ? "border-success/40 bg-success/10 text-success"
+            : "border-warning/40 bg-warning/10 text-warning"}
+        >
+          {#if done}<CheckCircleIcon size={16} />{:else}<WarningIcon size={16} />{/if}
+          <Alert.Description class={done ? "text-success/90" : "text-warning/90"}>
+            {statusText}
+          </Alert.Description>
+        </Alert.Root>
       {/if}
 
       {#if suggested.length}
-        <div>
-          <p class="hint">Profile/phiên này còn đăng nhập những domain chưa khai báo:</p>
-          <div class="saved-accounts">
+        <div class="grid gap-2">
+          <p class="text-xs text-muted-foreground">
+            Profile/phiên này còn đăng nhập những domain chưa khai báo:
+          </p>
+          <div class="flex flex-wrap gap-2">
             {#each suggested as candidate (candidate)}
-              <span class="saved-account">
+              <Button variant="outline" size="sm" disabled={busy} onclick={() => useSuggestion(candidate)}>
                 {candidate}
-                <button class="button secondary small" disabled={busy} onclick={() => useSuggestion(candidate)}>
-                  Thêm luôn
-                </button>
-              </span>
+              </Button>
             {/each}
           </div>
         </div>
       {/if}
-
     </div>
-  </div>
-</div>
+
+    <Dialog.Footer>
+      {#if !opened}
+        <Button disabled={busy} onclick={openBrowser}>Mở browser</Button>
+      {:else}
+        {#if profileId !== null}
+          <Button variant="outline" disabled={busy} onclick={detect}>Dò domain</Button>
+        {/if}
+        <Button disabled={busy} onclick={save}>Lưu</Button>
+      {/if}
+      <Button variant="ghost" onclick={close}>{done ? "Xong" : "Hủy"}</Button>
+    </Dialog.Footer>
+  </Dialog.Content>
+</Dialog.Root>
