@@ -301,6 +301,17 @@ class BrowserPool:
     def profile_count(self) -> int:
         return len(self._profiles)
 
+    def open_context(self, profile_name: str):
+        """Persistent context đang mở của một profile, None nếu chưa mở.
+
+        Đường đọc-only cho admin (quét cookie); không tự mở browser vì người
+        gọi có thể chỉ muốn biết trạng thái hiện tại.
+        """
+        ctx = self._profiles.get(profile_name)
+        if ctx is None or not self._profile_alive(ctx):
+            return None
+        return ctx
+
     @property
     def open_profiles(self) -> list[str]:
         return list(self._profiles)

@@ -583,6 +583,55 @@ td:nth-child(2) { color: var(--soft); font: 12px var(--font-mono); }
 }
 .apply-tag.restart { background: var(--amber-soft); color: var(--amber); }
 
+/* Trang Integrations gộp (pha 5, §6): hàng recipe mở rộng được, panel profile,
+   và dialog thêm account dùng chung cho cả hai chỗ. */
+.site-list { display: grid; }
+.site-empty { margin: 0; padding: 34px 20px; color: var(--faint); text-align: center; font-size: 13px; }
+.site-row { border-top: 1px solid var(--line); }
+.site-row:first-child { border-top: 0; }
+.site-row.open { background: rgba(255, 255, 255, 0.014); }
+.site-summary {
+  width: 100%; padding: 13px 20px; display: flex; align-items: center; gap: 12px;
+  border: 0; background: transparent; color: var(--text); font: inherit;
+  text-align: left; cursor: pointer;
+}
+.site-summary:hover { background: var(--muted); }
+.site-summary.static { cursor: default; }
+.site-summary.static:hover { background: transparent; }
+.site-caret { width: 12px; color: var(--phosphor); font-size: 11px; }
+.site-slug { font: 700 14px var(--font-display); letter-spacing: 0.03em; text-transform: uppercase; }
+.site-domain { color: var(--soft); font-weight: 400; }
+.site-summary .recipe-actions { margin-left: auto; }
+.site-summary > .hint:last-of-type { margin-left: auto; }
+.site-detail { padding: 4px 20px 18px 44px; display: grid; gap: 12px; }
+.site-detail .recipe-actions { justify-content: flex-start; }
+.detail-line { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.detail-label {
+  min-width: 74px; color: var(--faint);
+  font: 700 10px var(--font-body); text-transform: uppercase; letter-spacing: 0.09em;
+}
+
+.profile-row { padding: 12px 0; border-top: 1px solid var(--line); display: grid; gap: 9px; }
+.profile-row:first-of-type { border-top: 0; }
+.profile-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.profile-line .recipe-actions { margin-left: auto; flex-wrap: wrap; }
+.profile-form {
+  padding: 13px 15px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--muted); display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px;
+}
+.profile-form .field { margin-top: 0; min-width: 150px; }
+.profile-form .headed-toggle { margin-top: 0; }
+
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 40; padding: 24px;
+  display: grid; place-items: start center; overflow-y: auto;
+  background: rgba(6, 8, 9, 0.72);
+}
+.modal { width: min(560px, 100%); margin: auto 0; }
+.modal .dash-body { gap: 14px; }
+.modal-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.modal select, .modal input[type="text"] { width: 100%; }
+
 @media (max-width: 900px) {
   .topbar-inner { grid-template-columns: 1fr auto; padding-left: calc(var(--rail-w) + 16px); }
   .top-actions { display: none; }
@@ -620,6 +669,11 @@ td:nth-child(2) { color: var(--soft); font: 12px var(--font-mono); }
   .table-wrap tr { padding: 14px 16px; }
   .table-wrap td { padding: 4px 0; }
   .recipe-actions { justify-content: flex-start; margin-top: 8px; }
+  .site-summary { flex-wrap: wrap; gap: 8px; }
+  .site-summary .recipe-actions, .site-summary > .hint:last-of-type { margin-left: 0; }
+  .site-detail { padding-left: 20px; }
+  .profile-line .recipe-actions { margin-left: 0; }
+  .modal-backdrop { padding: 12px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

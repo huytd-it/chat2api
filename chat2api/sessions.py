@@ -39,7 +39,16 @@ def normalize_session_id(value: str | None) -> str | None:
     return value if _SESSION_ID.fullmatch(value) else None
 
 
-def _client_fingerprint(authorization: str, user_agent: str) -> str:
+def _client_fingerprint(authorization: str, user_agent: str,
+                        api_key_id: int | None = None) -> str:
+    """Danh tính client để gom các lượt gọi API rời rạc vào cùng một session.
+
+    Có hàng `api_key` thì dùng thẳng id của nó — ổn định, đọc được, và không đổi
+    khi client nâng cấp User-Agent. Không có (key bootstrap từ CHAT2API_KEYS)
+    thì rơi về hash key+UA; hash không thể khôi phục token thô.
+    """
+    if api_key_id is not None:
+        return f"key{api_key_id}"
     raw = f"{authorization}\0{user_agent}".encode("utf-8", "replace")
     return hashlib.sha256(raw).hexdigest()[:20]
 
@@ -63,6 +72,7 @@ def begin(
     stream: bool,
     authorization: str = "",
     user_agent: str = "",
+    api_key_id: int | None = None,
 ) -> Recording:
     """Mở recording và chèn phần history chưa có cùng request_log ``running``."""
     now = store.now_ms()
@@ -72,7 +82,7 @@ def begin(
 
     conn = db.connection()
     explicit = normalize_session_id(requested_id)
-    fingerprint = _client_fingerprint(authorization, user_agent)
+    fingerprint = _client_fingerprint(authorization, user_agent, api_key_id)
     with conn:
         recipe_id = _recipe_id(conn, recipe_slug)
         session_id = explicit
@@ -80,9 +90,9 @@ def begin(
         if session_id:
             row = conn.execute("SELECT * FROM session WHERE id = ?", (session_id,)).fetchone()
         else:
-            # API client không truyền header vẫn hiện trong Sessions. Vì api_key
-            # có id chỉ từ pha 6, tạm nhóm theo hash key+user-agent và model trong
-            # cửa sổ 30 phút; hash không thể khôi phục token thô.
+            # API client không truyền header vẫn hiện trong Sessions: nhóm theo
+            # danh tính client (xem _client_fingerprint) và model trong cửa sổ
+            # 30 phút.
             cutoff = now - _API_WINDOW_MS
             rows = conn.execute(
                 "SELECT * FROM session WHERE kind = 'api' AND model_public_id = ? "
@@ -132,9 +142,11 @@ def begin(
 
         prompt_chars = sum(len(content) for _, content in incoming)
         cursor = conn.execute(
-            "INSERT INTO request_log(session_id, recipe_id, model_public_id, stream, status, "
-            "started_at, prompt_chars, client) VALUES (?, ?, ?, ?, 'running', ?, ?, ?)",
-            (session_id, recipe_id, model, int(stream), now, prompt_chars, user_agent[:200]),
+            "INSERT INTO request_log(session_id, recipe_id, api_key_id, model_public_id, "
+            "stream, status, started_at, prompt_chars, client) "
+            "VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)",
+            (session_id, recipe_id, api_key_id, model, int(stream), now, prompt_chars,
+             user_agent[:200]),
         )
         _refresh_session(conn, session_id, now)
         return Recording(session_id, int(cursor.lastrowid), now, seq)

@@ -68,6 +68,8 @@ def make_request(path: str, api_keys: list[str]):
     r.app = app
     r.url = type("U", (), {"path": path})()
     r.headers = {}
+    # Starlette.Request có `.state`; require_key ghi api_key_id vào đó.
+    r.state = type("St", (), {})()
     return r
 
 

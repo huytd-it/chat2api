@@ -126,3 +126,51 @@ def migrate_legacy(recipes_dir: Path) -> list[str]:
             shutil.copy2(source, target)
             moved.append(f"{domain}/{name}")
     return moved
+
+
+# ------------------------------------------------ tự dò domain từ cookie (§6.1)
+
+# Cookie phiên hầu như luôn mang một trong các mảnh này trong tên. Lọc theo tên
+# thay vì theo cờ HttpOnly/Secure vì cả hai cờ đó cũng có trên cookie đo đạc
+# (analytics), và chúng thì không nói gì về việc đã đăng nhập hay chưa.
+SESSION_COOKIE_HINTS = ("session", "sess", "auth", "token", "sid", "login",
+                        "jwt", "account", "user", "csrf")
+
+
+def _cookie_host(cookie) -> str:
+    host = str((cookie or {}).get("domain") or "").strip().lower().lstrip(".")
+    return host[4:] if host.startswith("www.") else host
+
+
+def _looks_like_session(cookie) -> bool:
+    name = str((cookie or {}).get("name") or "").lower()
+    return any(hint in name for hint in SESSION_COOKIE_HINTS)
+
+
+def session_hosts(cookies) -> list[str]:
+    """Host có cookie trông như cookie phiên, nhiều cookie nhất đứng trước.
+
+    Đây là câu trả lời cho "người dùng vừa đăng nhập vào đâu" khi họ mở browser
+    với domain để trống: không hỏi, chỉ đọc dấu vết còn lại trong context.
+    """
+    counts: dict[str, int] = {}
+    for cookie in cookies or []:
+        host = _cookie_host(cookie)
+        if valid_domain(host) and _looks_like_session(cookie):
+            counts[host] = counts.get(host, 0) + 1
+    return [host for host, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
+def infer_domain(cookies, url: str = "") -> str:
+    """Domain của phiên đăng nhập vừa xong. '' khi không đoán được.
+
+    URL của tab là tín hiệu mạnh nhất — người dùng kết thúc ở đúng site họ vừa
+    đăng nhập — nhưng chỉ tin nó khi site đó thật sự có cookie, nếu không một
+    tab lạc sang trang khác sẽ tạo ra domain rác.
+    """
+    hosts = {_cookie_host(c) for c in cookies or []}
+    current = domain_of(url)
+    if valid_domain(current) and current in hosts:
+        return current
+    ranked = session_hosts(cookies)
+    return ranked[0] if ranked else ""

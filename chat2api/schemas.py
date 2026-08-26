@@ -33,12 +33,51 @@ class AccountLoginRequest(BaseModel):
 
 
 class SaveAccountRequest(BaseModel):
-    domain: str
+    """Lưu phiên đăng nhập vừa mở.
+
+    `domain` để trống là hợp lệ: server đọc cookie của context rồi tự suy ra
+    domain (§6.1, bậc 4 của "tự dò domain").
+    """
+
+    domain: str = ""
     name: str
+
+
+class ProfileCreateRequest(BaseModel):
+    name: str
+    engine: str | None = None
+    headless: bool | None = None
+    max_tabs: int | None = None
+    proxy: str | None = None
+    user_agent: str | None = None
+    locale: str | None = None
+    timezone: str | None = None
+    viewport: str | None = None
+    notes: str | None = None
+
+
+class ProfileUpdateRequest(ProfileCreateRequest):
+    name: str | None = None
+    is_default: bool | None = None
+
+
+class ProfileOpenRequest(BaseModel):
+    url: str = ""
+
+
+class ProfileAccountRequest(BaseModel):
+    domain: str
+    label: str = ""
 
 
 class SettingsRequest(BaseModel):
     values: dict[str, str]
+
+
+class ApiKeyCreateRequest(BaseModel):
+    label: str
+    # "chat" = gọi /v1/*, "admin" = gọi /admin/*. Bỏ trống ⇒ cả hai.
+    scopes: str | None = None
 
 class SessionUpdateRequest(BaseModel):
     title: str | None = None

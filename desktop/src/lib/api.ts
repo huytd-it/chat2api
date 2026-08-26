@@ -24,6 +24,9 @@ export interface RecipeInfo {
   accounts?: number;
   account_names?: string[];
   trial?: TrialStatus | null;
+  /** Chỉ có ở BrowserRecipe — trang Integrations dùng để gộp account vào hàng. */
+  domain?: string;
+  url?: string;
 }
 
 export interface LogEntry {
@@ -62,6 +65,30 @@ export interface SettingField {
   help?: string;
   choices?: string[];
   is_set?: boolean;
+  /** Giá trị đang dùng đến từ đâu: biến môi trường/.env, bảng `setting`, hay default. */
+  source?: "env" | "db" | "default";
+  /** true ⇒ .env đang ghim khoá này, lưu từ UI sẽ không đổi được giá trị đang chạy. */
+  env_locked?: boolean;
+}
+
+/** Một hàng trong bảng `api_key`. Key thô chỉ tồn tại trong response lúc tạo. */
+export interface ApiKeyInfo {
+  id: number;
+  label: string;
+  key_prefix: string;
+  scopes: string[];
+  created_at: number;
+  last_used_at: number | null;
+  revoked_at: number | null;
+}
+
+export interface ApiKeyList {
+  keys: ApiKeyInfo[];
+  /** false khi kho SQLite chưa mở — lúc đó không tạo được key nào. */
+  persisted: boolean;
+  /** Số key đến từ CHAT2API_KEYS: không liệt kê được, chỉ đếm. */
+  bootstrap_keys: number;
+  enforced: boolean;
 }
 
 export interface Overview {
@@ -419,12 +446,15 @@ export async function startDomainLogin(
   return asJson(r);
 }
 
+/** Lưu phiên đăng nhập. `domain` rỗng là hợp lệ: server đọc cookie của
+ * context rồi tự suy ra domain. `suggested` là những domain khác cùng phiên
+ * còn đăng nhập mà chưa có account nào. */
 export async function completeDomainLogin(
   key: string,
   sessionId: string,
   domain: string,
   name: string,
-): Promise<{ ok: true; domain: string; name: string }> {
+): Promise<{ ok: true; domain: string; name: string; suggested: string[] }> {
   const base = await apiBase();
   const r = await fetch(
     base + "/admin/accounts/login/" + encodeURIComponent(sessionId) + "/complete",
@@ -457,7 +487,7 @@ export async function deleteDomainAccount(key: string, domain: string, name: str
 
 export async function fetchSettings(
   key: string,
-): Promise<{ fields: SettingField[]; env_path: string }> {
+): Promise<{ fields: SettingField[]; env_path: string; persisted: boolean }> {
   const base = await apiBase();
   const r = await fetch(base + "/admin/settings", { headers: headers(key) });
   return asJson(r);
@@ -466,7 +496,7 @@ export async function fetchSettings(
 export async function saveSettings(
   key: string,
   values: Record<string, string>,
-): Promise<{ saved: string[]; needs_restart: string[] }> {
+): Promise<{ saved: string[]; needs_restart: string[]; shadowed: string[] }> {
   const base = await apiBase();
   const r = await fetch(base + "/admin/settings", {
     method: "PUT",
@@ -474,6 +504,42 @@ export async function saveSettings(
     body: JSON.stringify({ values }),
   });
   return asJson(r);
+}
+
+export async function fetchApiKeys(key: string): Promise<ApiKeyList> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/api-keys", { headers: headers(key) });
+  return asJson(r);
+}
+
+/** Tạo key mới. `key` trong kết quả là key thô — server không lưu nó, chỉ lưu
+ * sha256, nên đây là lần duy nhất đọc được. */
+export async function createApiKey(
+  key: string,
+  label: string,
+  scopes?: string,
+): Promise<ApiKeyInfo & { key: string }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/api-keys", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify({ label, scopes: scopes ?? null }),
+  });
+  return asJson(r);
+}
+
+/** `purge` xoá hẳn hàng; mặc định chỉ thu hồi để request_log còn truy ngược được. */
+export async function deleteApiKey(
+  key: string,
+  id: number,
+  purge = false,
+): Promise<void> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/api-keys/" + id + "?purge=" + purge, {
+    method: "DELETE",
+    headers: headers(key),
+  });
+  await asJson(r);
 }
 
 export async function fetchOverview(key: string): Promise<Overview> {
@@ -492,6 +558,14 @@ export async function fetchLogs(key: string, after = 0): Promise<LogEntry[]> {
   return data.entries as LogEntry[];
 }
 
+export interface ProfileAccount {
+  id: number;
+  label: string;
+  host: string;
+  status: string;
+  disabled: number;
+}
+
 export interface ProfileInfo {
   id: number;
   name: string;
@@ -504,7 +578,9 @@ export interface ProfileInfo {
   locked: boolean;
   open: boolean;
   tabs: number;
+  notes: string;
   last_used_at: number | null;
+  accounts: ProfileAccount[];
 }
 
 export interface ProfileList {
@@ -512,12 +588,130 @@ export interface ProfileList {
   mode: "storage_state" | "profile";
   profiles_dir: string;
   max_profiles: number;
+  /** false khi kho SQLite chưa mở — profile là hàng DB nên lúc đó không có gì. */
+  persisted: boolean;
+}
+
+/** Các cột người dùng sửa được từ UI (tên profile là thư mục Chromium, không đổi). */
+export interface ProfileValues {
+  engine?: string;
+  headless?: boolean;
+  max_tabs?: number;
+  proxy?: string;
+  user_agent?: string;
+  locale?: string;
+  timezone?: string;
+  viewport?: string;
+  notes?: string;
+  is_default?: boolean;
+}
+
+export interface DomainInfo {
+  host: string;
+  accounts: number;
+  recipes: string[];
 }
 
 export async function fetchProfiles(key: string): Promise<ProfileList> {
   const base = await apiBase();
   const r = await fetch(base + "/admin/profiles", { headers: headers(key) });
   return asJson(r);
+}
+
+export async function createProfile(
+  key: string,
+  name: string,
+  values: ProfileValues = {},
+): Promise<ProfileInfo> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/profiles", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify({ name, ...values }),
+  });
+  return asJson(r);
+}
+
+export async function updateProfile(
+  key: string,
+  ident: string | number,
+  values: ProfileValues,
+): Promise<ProfileInfo> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/profiles/" + encodeURIComponent(String(ident)), {
+    method: "PATCH",
+    headers: headers(key),
+    body: JSON.stringify(values),
+  });
+  return asJson(r);
+}
+
+/** Xoá profile. Server từ chối (409) khi còn recipe dựa vào nó. `purge` xoá
+ * luôn thư mục Chromium — mọi đăng nhập trong profile mất theo. */
+export async function deleteProfile(
+  key: string,
+  ident: string | number,
+  purge = false,
+): Promise<void> {
+  const base = await apiBase();
+  const r = await fetch(
+    base + "/admin/profiles/" + encodeURIComponent(String(ident)) + "?purge=" + purge,
+    { method: "DELETE", headers: headers(key) },
+  );
+  await asJson(r);
+}
+
+/** Mở cửa sổ profile trên máy chạy server để đăng nhập tay. `headless: true`
+ * trong kết quả nghĩa là profile đã chạy nền từ trước nên không có cửa sổ nào
+ * hiện ra — xem qua live view bằng `watch_id`. */
+export async function openProfile(
+  key: string,
+  ident: string | number,
+  url = "",
+): Promise<{ profile: string; watch_id: string; headless: boolean }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/profiles/" + encodeURIComponent(String(ident)) + "/open", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify({ url }),
+  });
+  return asJson(r);
+}
+
+/** Quét cookie của profile đang mở: domain nào còn đăng nhập mà chưa khai báo. */
+export async function detectProfileDomains(
+  key: string,
+  ident: string | number,
+): Promise<{ profile: string; known: string[]; suggested: string[] }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/profiles/" + encodeURIComponent(String(ident)) + "/detect", {
+    method: "POST",
+    headers: headers(key),
+  });
+  return asJson(r);
+}
+
+/** Ghi nhận "profile này đã đăng nhập domain kia" (tạo domain nếu chưa có). */
+export async function addProfileAccount(
+  key: string,
+  ident: string | number,
+  domain: string,
+  label: string,
+): Promise<{ ok: true; account: ProfileAccount }> {
+  const base = await apiBase();
+  const r = await fetch(
+    base + "/admin/profiles/" + encodeURIComponent(String(ident)) + "/accounts",
+    { method: "POST", headers: headers(key), body: JSON.stringify({ domain, label }) },
+  );
+  return asJson(r);
+}
+
+/** Mọi domain đã biết (DB + đĩa + recipe) — gợi ý cho ô Domain của dialog. */
+export async function fetchDomains(key: string): Promise<DomainInfo[]> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/domains", { headers: headers(key) });
+  const data = await asJson(r);
+  return data.domains as DomainInfo[];
 }
 
 export async function closeProfile(key: string, name: string): Promise<void> {

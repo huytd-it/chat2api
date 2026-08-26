@@ -1,11 +1,28 @@
-"""Đọc/ghi cấu hình runtime trong .env cho trang Settings.
+"""Cấu hình runtime cho trang Settings — bảng `setting` là kho chính.
+
+Thứ tự ưu tiên khi đọc một khoá (docs/design-v2.md §2, pha 6):
+
+1. **môi trường thật / `.env`** — dành cho bootstrap và CI. Đặt ở đây là chốt
+   cứng: một lần bấm Lưu trên UI không được ghi đè lặng lẽ giá trị mà người
+   vận hành đã ghim từ bên ngoài.
+2. **bảng `setting`** — thứ trang Settings ghi vào.
+3. **`default` khai báo ở FIELDS**.
+
+Bước nối hai thế giới là `preload()`: `Config.__init__` gọi nó ngay sau
+`load_dotenv`, đổ hàng DB vào `os.environ` cho những khoá `.env` bỏ trống. Nhờ
+vậy mọi chỗ đang đọc `os.environ` (Config, provider, recipe) thấy giá trị lưu
+trong DB mà không phải biết DB tồn tại.
 
 Chỉ các khoá khai báo ở FIELDS mới được sửa qua API — .env có thể chứa thứ khác
-mà app không nên đụng tới. Ghi lại giữ nguyên comment và thứ tự dòng cũ.
+mà app không nên đụng tới. Khi kho SQLite chưa mở, `save()` rơi về ghi thẳng
+`.env` (giữ nguyên comment và thứ tự dòng cũ) để app không có DB vẫn cấu hình được.
 """
 
 import os
+import sqlite3
 from pathlib import Path
+
+from . import store
 
 # apply: "reload"  -> có hiệu lực ngay sau khi reload recipe (đọc env lúc dựng recipe)
 #        "restart" -> Config đọc một lần lúc khởi động, phải chạy lại server
@@ -56,14 +73,90 @@ FIELDS: list[dict] = [
 
 BY_KEY = {f["key"]: f for f in FIELDS}
 TRUE = {"1", "true", "yes", "on"}
+SECRET_KEYS = {f["key"] for f in FIELDS if f["type"] == "secret"}
+
+# Khoá đã có sẵn trong môi trường thật / `.env` lúc Config() chạy. Chúng thắng
+# bảng `setting` — xem docstring đầu file.
+_env_keys: set[str] = set()
+# Khoá do chính module này bơm vào os.environ (preload/save). Phải nhớ để lần
+# dựng Config kế tiếp trong cùng tiến trình không nhầm chúng là do `.env` đặt —
+# nếu nhầm, mọi khoá lưu ở DB sẽ tự khoá chính nó sau một vòng khởi động.
+_injected: set[str] = set()
+
+
+def capture_env() -> set[str]:
+    """Chụp danh sách khoá do môi trường/`.env` đặt. Gọi từ `Config.__init__`."""
+    global _env_keys
+    _env_keys = {f["key"] for f in FIELDS
+                 if os.environ.get(f["key"], "") != "" and f["key"] not in _injected}
+    return _env_keys
+
+
+def env_locked(key: str) -> bool:
+    """True khi `.env` đang ghim khoá này — ghi vào DB sẽ không có tác dụng."""
+    return key in _env_keys
+
+
+def shadowed(keys) -> list[str]:
+    """Trong các khoá vừa lưu, khoá nào bị `.env` che mất."""
+    return sorted(key for key in keys if key in _env_keys)
+
+
+def stored() -> dict[str, str]:
+    """Bảng `setting` dưới dạng dict. Rỗng khi kho chưa mở hoặc đọc lỗi."""
+    db = store.default()
+    if db is None:
+        return {}
+    try:
+        return {row["key"]: row["value"] for row in db.query("SELECT key, value FROM setting")}
+    except Exception:
+        return {}
+
+
+def preload(db_path) -> int:
+    """Đổ bảng `setting` vào os.environ cho những khoá `.env` không đặt.
+
+    Mở **read-only**: hàm này chạy trong `Config.__init__`, tức là lúc import
+    `chat2api.main` — import không được phép tạo file trong thư mục dữ liệu của
+    người dùng (cùng lý do với `store.connect` nằm ở lifespan).
+    """
+    path = Path(db_path)
+    if not path.is_file():
+        return 0
+    try:
+        conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=2.0)
+    except sqlite3.Error:
+        return 0
+    try:
+        rows = conn.execute("SELECT key, value FROM setting").fetchall()
+    except sqlite3.Error:
+        return 0  # DB chưa migrate: chưa có bảng `setting` nào để đọc
+    finally:
+        conn.close()
+    count = 0
+    for key, value in rows:
+        if key in BY_KEY and key not in _env_keys:
+            os.environ[key] = value
+            _injected.add(key)
+            count += 1
+    return count
 
 
 def describe() -> list[dict]:
     """Giá trị hiện tại kèm metadata để UI dựng form. Secret không bao giờ trả ra."""
+    rows = stored()
     out = []
     for field in FIELDS:
-        raw = os.environ.get(field["key"], field["default"])
+        key = field["key"]
+        if key in _env_keys:
+            raw, source = os.environ[key], "env"
+        elif key in rows:
+            raw, source = rows[key], "db"
+        else:
+            raw, source = os.environ.get(key, field["default"]), "default"
         entry = {k: v for k, v in field.items()}
+        entry["source"] = source
+        entry["env_locked"] = source == "env"
         if field["type"] == "secret":
             entry["value"] = ""
             entry["is_set"] = bool(raw)
@@ -126,18 +219,45 @@ def _render(lines: list[str], values: dict[str, str]) -> list[str]:
     return out
 
 
-def save(env_path: Path, values: dict[str, str]) -> list[str]:
-    """Ghi .env (giữ comment/thứ tự cũ) và cập nhật os.environ.
-
-    Trả về các khoá cần khởi động lại server mới có hiệu lực.
-    """
+def _save_env(env_path: Path, values: dict[str, str]) -> None:
+    """Ghi .env giữ nguyên comment và thứ tự dòng cũ."""
     env_path = Path(env_path)
     old = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text("\n".join(_render(old, values)) + "\n", encoding="utf-8")
+
+
+def _save_db(db, values: dict[str, str]) -> None:
+    conn = db.connection()
+    now = store.now_ms()
+    with conn:
+        for key, value in values.items():
+            conn.execute(
+                "INSERT INTO setting(key, value, is_secret, updated_at) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
+                " is_secret = excluded.is_secret, updated_at = excluded.updated_at",
+                (key, value, int(key in SECRET_KEYS), now))
+
+
+def save(env_path: Path, values: dict[str, str]) -> list[str]:
+    """Lưu vào bảng `setting` (hoặc .env khi kho chưa mở) và cập nhật os.environ.
+
+    Blocking (SQLite + file) nên phải gọi qua `asyncio.to_thread` trong handler
+    async. Trả về các khoá cần khởi động lại server mới có hiệu lực.
+
+    Khoá bị `.env` ghim vẫn được ghi xuống DB nhưng không đổi giá trị đang chạy —
+    hỏi `shadowed()` để nói thẳng chuyện đó, thay vì để người dùng tưởng đã xong.
+    """
+    db = store.default()
+    if db is None:
+        _save_env(Path(env_path), values)
+    else:
+        _save_db(db, values)
     needs_restart = []
     for key, value in values.items():
-        os.environ[key] = value
+        if key not in _env_keys:
+            os.environ[key] = value
+            _injected.add(key)
         if BY_KEY[key]["apply"] == "restart":
             needs_restart.append(key)
     return needs_restart

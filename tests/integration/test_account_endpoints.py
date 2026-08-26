@@ -6,10 +6,18 @@ from chat2api.main import create_app
 
 
 class FakeLoginManager:
-    def __init__(self):
+    def __init__(self, cookies=None, url=""):
         self.starts: dict[str, tuple] = {}
         self.completed: list[str] = []
         self.cancelled: list[str] = []
+        # Dấu vết mà một phiên đăng nhập thật để lại — đường tự dò domain đọc nó.
+        self.cookies = cookies or []
+        self.url = url
+
+    async def snapshot(self, session_id: str) -> dict:
+        if session_id not in self.starts:
+            return {}
+        return {"cookies": list(self.cookies), "url": self.url}
 
     async def has(self, session_id: str) -> bool:
         return session_id in self.starts
@@ -46,13 +54,13 @@ def _write_recipe(tmp_path, slug="sitea", login=None):
     return d
 
 
-async def _client(tmp_path, login=None):
+async def _client(tmp_path, login=None, cookies=None, url=""):
     cfg = Config()
     cfg.agent_llm_base_url = ""
     cfg.recipes_dir = tmp_path / "recipes"
     d = _write_recipe(tmp_path, login=login)
     app = create_app(cfg)
-    fake = FakeLoginManager()
+    fake = FakeLoginManager(cookies, url)
     app.state.login_manager = fake
     transport = ASGITransport(app=app)
     client = AsyncClient(transport=transport, base_url="http://t")
@@ -214,3 +222,94 @@ async def test_reopen_unknown_account_404(tmp_path):
         r = await client.post("/admin/recipes/sitea/accounts/nope/reopen")
         assert r.status_code == 404
         assert r.json()["error"]["code"] == "not_found"
+
+
+# ------------------------------------ tự dò domain khi để trống (§6.1, pha 5)
+
+
+async def test_login_without_domain_opens_blank_page_in_pending_dir(tmp_path):
+    """Bậc 4: chưa biết đi đâu thì mở trang trắng, không tạo domain rác."""
+    client, app, fake, d = await _client(tmp_path)
+    async with client:
+        r = await client.post("/admin/accounts/login", json={"domain": "", "url": ""})
+        assert r.status_code == 200
+        assert r.json()["domain"] == ""
+        _, url, login_dir, storage_state = fake.starts[r.json()["session_id"]]
+        assert url == "about:blank"
+        assert login_dir == tmp_path / "recipes" / ".accounts" / "_pending"
+        assert storage_state is None
+
+
+async def test_save_without_domain_infers_it_from_cookies(tmp_path):
+    client, app, fake, d = await _client(
+        tmp_path,
+        cookies=[{"domain": ".site.example", "name": "session-token"},
+                 {"domain": ".accounts.google.com", "name": "__Secure-auth"},
+                 {"domain": ".metrics.example", "name": "_ga"}],
+        url="https://site.example/chat")
+    async with client:
+        session_id = (await client.post(
+            "/admin/accounts/login", json={"domain": ""})).json()["session_id"]
+        r = await client.post(f"/admin/accounts/login/{session_id}/complete",
+                              json={"domain": "", "name": "acct-1"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["domain"] == "site.example" and body["name"] == "acct-1"
+        # Cookie Google trong cùng phiên là gợi ý, không phải account tự tạo.
+        assert body["suggested"] == ["accounts.google.com"]
+
+        listing = (await client.get("/admin/accounts")).json()
+        entry = next(e for e in listing if e["domain"] == "site.example")
+        assert [a["name"] for a in entry["accounts"]] == ["acct-1"]
+
+    # State chuyển từ thư mục tạm về đúng kho của domain, không để lại rác.
+    store = tmp_path / "recipes" / ".accounts"
+    assert (store / "site.example" / "acct-1.json").exists()
+    assert not (store / "_pending").exists()
+
+
+async def test_save_without_domain_falls_back_to_cookies_when_url_is_blank(tmp_path):
+    client, app, fake, d = await _client(
+        tmp_path, cookies=[{"domain": "site.example", "name": "sid"}], url="about:blank")
+    async with client:
+        session_id = (await client.post(
+            "/admin/accounts/login", json={"domain": ""})).json()["session_id"]
+        r = await client.post(f"/admin/accounts/login/{session_id}/complete",
+                              json={"domain": "", "name": "acct-1"})
+        assert r.json()["domain"] == "site.example"
+
+
+async def test_save_without_domain_and_without_session_cookies_is_rejected(tmp_path):
+    client, app, fake, d = await _client(
+        tmp_path, cookies=[{"domain": ".metrics.example", "name": "_ga"}], url="about:blank")
+    async with client:
+        session_id = (await client.post(
+            "/admin/accounts/login", json={"domain": ""})).json()["session_id"]
+        r = await client.post(f"/admin/accounts/login/{session_id}/complete",
+                              json={"domain": "", "name": "acct-1"})
+        assert r.status_code == 400
+        assert r.json()["error"]["code"] == "domain_not_detected"
+        # Phiên vẫn còn để người dùng đăng nhập tiếp rồi lưu lại.
+        assert session_id in fake.starts
+
+
+async def test_explicit_domain_still_wins_over_cookies(tmp_path):
+    client, app, fake, d = await _client(
+        tmp_path, cookies=[{"domain": ".other.example", "name": "session"}],
+        url="https://other.example/")
+    async with client:
+        session_id = (await client.post(
+            "/admin/accounts/login", json={"domain": "site.example"})).json()["session_id"]
+        r = await client.post(f"/admin/accounts/login/{session_id}/complete",
+                              json={"domain": "site.example", "name": "acct-1"})
+        assert r.json()["domain"] == "site.example"
+    assert (tmp_path / "recipes" / ".accounts" / "site.example" / "acct-1.json").exists()
+
+
+async def test_recipes_listing_exposes_domain_for_grouping(tmp_path):
+    client, app, fake, d = await _client(tmp_path)
+    async with client:
+        entry = next(e for e in (await client.get("/admin/recipes")).json()
+                     if e["slug"] == "sitea")
+        assert entry["domain"] == "site.example"
+        assert entry["url"] == "https://site.example/chat"

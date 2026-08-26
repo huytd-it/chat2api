@@ -7,11 +7,8 @@
   const links = [
     { href: "/", label: "Tổng quan" },
     { href: "/sessions", label: "Sessions" },
-    // Recipes và Accounts còn đứng riêng cho tới pha 5 (gộp vào Integrations);
-    // bỏ khỏi nav sớm sẽ khiến hai trang đó không tới được.
-    { href: "/recipes", label: "Recipes" },
-    { href: "/accounts", label: "Accounts" },
-    { href: "/integrations", label: "Integrate" },
+    // Recipes + Accounts + Integrate đã gộp về /integrations (pha 5, §6).
+    { href: "/integrations", label: "Integrations" },
     { href: "/logs", label: "Logs" },
     { href: "/settings", label: "Settings" },
   ];

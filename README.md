@@ -12,6 +12,24 @@ Biến web chat AI bất kỳ thành API OpenAI-compatible. Thay việc copy/pas
 
     python -m chat2api serve --port 8100
 
+## Desktop app (Windows)
+
+Desktop app cần thêm Node.js, Rust + MSVC C++ build tools và WebView2. Script
+dưới đây kiểm tra từng thứ, chỉ cài cái nào còn thiếu, rồi chạy `npm run tauri
+dev` — chạy lại bao nhiêu lần cũng được:
+
+    powershell -ExecutionPolicy Bypass -File .\desktop\scripts\setup-and-run.ps1
+
+- `-NoRun`: chỉ cài đặt, không mở app.
+- `-Port <số>`: ghim cổng backend (mặc định: hỏi, bỏ trống = tự chọn cổng rảnh).
+  Windows giữ riêng vài dải cổng TCP mà bind vào là hỏng im lặng — **8100 và
+  8200 nằm trong dải đó trên nhiều máy** — nên cổng nằm trong dải bị loại sẽ bị
+  từ chối và script quay về tự chọn. Xem dải của máy bạn bằng
+  `netsh interface ipv4 show excludedportrange protocol=tcp`.
+
+Vài bước cài máy-rộng (MSVC Build Tools, WebView2, Python) đi qua winget và có
+thể cần PowerShell chạy Administrator.
+
 ## Dùng như API chuẩn OpenAI
 
     POST /v1/chat/completions  {model, messages, stream}
@@ -33,11 +51,11 @@ Model id: `<provider>/<model>`, ví dụ `gemini/gemini-flash`, `qwen/qwen-max`.
     AGENT_LLM_API_KEY=sk-...
     AGENT_LLM_MODEL=gpt-4o
 
-Rồi bấm **Integrate** trong desktop app, hoặc:
+Rồi bấm **Phân tích** ở trang **Integrations** của desktop app, hoặc:
 
     python -m chat2api integrate https://chat.example.com
 
-Tick ô **"Hiện browser khi test (không headless)"** cạnh nút Bắt đầu để xem
+Tick ô **"Hiện browser khi test (không headless)"** dưới ô URL để xem
 Chromium thao tác trực tiếp trên trang web song song với app. Cửa sổ
 Chromium có thể không hiện ra tùy máy/session (remote desktop, sandbox...),
 nên khi tick ô này app còn hiện thêm một **live view** — ảnh chụp trực tiếp
@@ -53,8 +71,9 @@ Site KHÔNG bắt buộc đăng nhập (chat được ngay ở chế độ ẩn 
 publish, nhưng chỉ cho dùng thử `ANON_TRIAL_LIMIT` lượt (mặc định 20) —
 hết lượt thì `/v1/chat/completions` trả lỗi `trial_limit_exceeded` (403) cho
 tới khi có tài khoản đăng nhập. Thêm tài khoản bất cứ lúc nào ở trang
-**Accounts** (hoặc `python -m chat2api login <slug> --account <tên>`); Chrome
-sẽ mở để đăng nhập, sau đó model dùng account đó thay vì giới hạn ẩn danh.
+**Integrations** — mở hàng của recipe rồi bấm **+ Thêm account** (hoặc
+`python -m chat2api login <slug> --account <tên>`); Chrome sẽ mở để đăng nhập,
+sau đó model dùng account đó thay vì giới hạn ẩn danh.
 
 ## Account dùng chung theo domain
 
@@ -67,8 +86,11 @@ tạo sau, và cả lúc Integrate đang thử recipe mới.
   tên**, để recipe ghim được file state riêng nếu cần.
 - Account kiểu cũ (`recipes/<slug>/auth/*.json`) được **chép** vào kho chung
   một lần lúc khởi động; file gốc giữ nguyên.
-- Quản lý ở trang **Accounts**: thêm, đăng nhập lại khi hết hạn, xóa, và xem
-  domain nào đang được recipe nào dùng.
+- Quản lý ở trang **Integrations**: account nằm ngay trong hàng recipe (gom
+  theo domain của recipe) — thêm, đăng nhập lại khi hết hạn, xóa.
+- Không biết domain? Để trống ô Domain trong dialog: browser mở trang trắng,
+  bạn tự vào site và đăng nhập, server đọc cookie phiên để suy ra domain và tạo
+  mới nếu chưa có. Domain khác còn đăng nhập trong cùng phiên được gợi ý luôn.
 
 ## Các trang trong app
 
@@ -76,11 +98,41 @@ tạo sau, và cả lúc Integrate đang thử recipe mới.
 |---|---|
 | `/` Tổng quan | Trạng thái server, cảnh báo recipe hỏng / domain chưa có account |
 | `/sessions` | Chat + xem lại mọi hội thoại: pretty / markdown / HTML gốc / JSON, tìm toàn văn, fork, xuất file |
-| `/recipes` | Reload, xóa, tắt browser, xem trạng thái unhealthy |
-| `/accounts` | Account dùng chung theo domain |
-| `/integrations` | Tích hợp web chat mới bằng agent |
+| `/integrations` | Ba panel: thêm site bằng agent · site đã tích hợp (recipe + account) · profile trình duyệt |
 | `/logs` | Log hoạt động server + output tiến trình nền |
 | `/settings` | Sửa delay/timeout/engine... ghi thẳng vào `.env` |
+
+## Profile trình duyệt (tuỳ chọn)
+
+Mặc định mỗi recipe chạy trong một browser context riêng, khôi phục từ
+`storage_state` (chỉ cookie + localStorage). Đặt `BROWSER_PROFILE_MODE=profile`
+để chuyển sang Chromium profile thật:
+
+```
+BROWSER_PROFILE_MODE=profile   # storage_state (mặc định) | profile
+POOL_MAX_PROFILES=2            # số tiến trình Chromium giữ mở
+PROFILE_MAX_TABS=4             # tab tối đa trong một profile
+```
+
+Một profile = một thư mục `data/profiles/<tên>/` giữ cookie + localStorage +
+IndexedDB + service worker của **mọi** domain cùng lúc, nên:
+
+- Một lần đăng nhập Google dùng được cho nhiều site trong cùng profile.
+- Nhiều recipe chạy **song song**, mỗi recipe một tab, chung một tiến trình.
+- Recipe tự chọn profile theo thứ tự: `recipe.profile_id` đã ghim → profile của
+  account trên domain của recipe → profile mặc định.
+- Account cũ (`recipes/.accounts/*.json`) được đổ vào profile ở lần mở đầu tiên
+  rồi thôi; file JSON giữ nguyên làm bản sao lưu.
+
+Một `user_data_dir` chỉ được một tiến trình Chromium mở, nên profile có khoá
+pid. Khi bị tiến trình khác giữ — hoặc bất kỳ lỗi nào khác — request **vẫn chạy**
+bằng đường `storage_state` cũ. Chế độ profile không áp dụng cho engine `cloak`
+và cho request bật "hiện browser".
+
+Panel **Profile trình duyệt** ở trang `/integrations` quản lý phần này: tạo,
+sửa số tab / headless, đặt mặc định, mở cửa sổ để đăng nhập tay, **dò** xem
+profile còn đăng nhập domain nào chưa khai báo, đóng, xóa. Tương đương
+`GET/POST/PATCH/DELETE /admin/profiles` và `POST /admin/profiles/{id}/detect`.
 
 ## Lưu hội thoại
 
@@ -136,9 +188,26 @@ Không khai báo `timing` thì lấy mặc định từ env `RECIPE_READY_DELAY_
 
 CHAT2API_KEYS · RECIPES_DIR · CHAT2API_DATA_DIR (mặc định `./data`) · AGENT_LLM_* ·
 ENABLE_AGENT_FALLBACK · POOL_MAX_CONTEXTS · BROWSER_ENGINE=playwright|cloak ·
+BROWSER_PROFILE_MODE=storage_state|profile · POOL_MAX_PROFILES · PROFILE_MAX_TABS ·
 RECIPE_TIMEOUT_MS · INTEGRATE_MAX_ROUNDS ·
 ANON_TRIAL_LIMIT (0 = không giới hạn dùng thử ẩn danh) ·
 RECIPE_READY_DELAY_MS · RECIPE_INPUT_DELAY_MS · RECIPE_READY_TIMEOUT_MS
+
+Các khoá trên giờ lưu trong bảng `setting` của kho SQLite và sửa được từ trang
+Settings. Đặt trong môi trường thật hay `.env` vẫn **thắng** hàng trong kho —
+đó là đường bootstrap cho CI và cho container; trang Settings hiện rõ khoá nào
+đang bị `.env` ghim.
+
+## API key
+
+Trang Settings tạo và thu hồi được từng key một (nhãn + scope `chat` cho
+`/v1/*`, `admin` cho `/admin/*`). Kho chỉ giữ sha256 của key, nên key thô chỉ
+đọc được đúng một lần lúc tạo — chép ngay, mất là phải tạo cái khác.
+`request_log` ghi lại key nào đã gọi request nào.
+
+`CHAT2API_KEYS` (CSV) vẫn dùng được song song làm key bootstrap cho CI và cho
+lần chạy đầu khi chưa có kho; key kiểu này không có hàng trong DB nên không
+liệt kê và không thu hồi từ UI được. Không đặt key ở cả hai nơi ⇒ server mở.
 
 ## Kho dữ liệu
 

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { apiKey, showToast } from "../stores";
   import { startIntegration, fetchJob, jobAction, type JobStatus } from "../api";
-  import { refreshModels, refreshRecipes } from "../sync";
+  import { refreshIntegrations, refreshModels } from "../sync";
   import LiveView from "./LiveView.svelte";
 
   let siteUrl = $state("");
@@ -83,7 +83,7 @@
           stopPolling();
           watchId = null;
           refreshModels();
-          refreshRecipes();
+          refreshIntegrations();
         }
       } catch (e: any) {
         if (generation === pollGeneration && jobId === activeJobId && e?.name !== "AbortError") {
@@ -120,7 +120,7 @@
           stopPolling();
           watchId = null;
           refreshModels();
-          refreshRecipes();
+          refreshIntegrations();
         }
       }
     } catch (e) {
@@ -176,73 +176,55 @@
   }
 </script>
 
-<section class="view integrations">
-  <header class="page-heading">
-    <h1>Biến một web chat thành API.</h1>
-    <p>Analyzer nhận diện giao diện, tạo recipe và đăng ký model mới vào router hiện tại.</p>
-  </header>
-  <div class="integration-grid">
-    <section class="panel integration-card">
-      <h2>Tích hợp website mới</h2>
-      <p>Nhập URL đầy đủ của web chat cần kết nối.</p>
-      <div class="url-row">
-        <input
-          type="url"
-          inputmode="url"
-          placeholder="https://chat.example.com"
-          aria-label="URL web chat"
-          bind:value={siteUrl}
-        />
-        <button class="button" disabled={integrateDisabled} onclick={startIntegrationJob}>Bắt đầu</button>
-      </div>
-      <label class="headed-toggle">
-        <input type="checkbox" bind:checked={headedMode} />
-        Hiện browser khi test (không headless)
-      </label>
-      <LiveView {watchId} />
-      <div class="status-box" role="status" aria-live="polite">{#if jobStatusText}{jobStatusText}{/if}</div>
-      {#if loginActionsVisible}
-        <span class="login-actions">
-          <button class="button" disabled={loginButtonsDisabled} onclick={() => postJobAction("login-complete")}>
-            Đã đăng nhập
-          </button>
-          <button class="button secondary" disabled={loginButtonsDisabled} onclick={() => postJobAction("cancel")}>
-            Hủy
-          </button>
-        </span>
-      {/if}
-      <div class="job-log-head">
-        <span class="job-log-label">Nhật ký job</span>
-        <button
-          class="button secondary small"
-          disabled={!jobLog}
-          onclick={() => navigator.clipboard.writeText(jobLog).catch(() => {})}
-        >
-          Copy
-        </button>
-      </div>
-      <pre class="job-log" bind:this={jobLogEl} aria-label="Job log">{#if jobLog}{jobLog}{/if}</pre>
-    </section>
-    <aside class="panel integration-card">
-      <h2>Luồng analyzer</h2>
-      <p>Nếu website yêu cầu tài khoản, Chrome sẽ mở để bạn đăng nhập thủ công.</p>
-      <div class="steps">
-        <div class="step">
-          <span class="step-index">1</span>
-          <div><strong>Phân tích website</strong><p>Xác định input, nút gửi và vùng phản hồi.</p></div>
-        </div>
-        <div class="step">
-          <span class="step-index">2</span>
-          <div><strong>Xác thực khi cần</strong><p>Session được lưu riêng cho từng integration.</p></div>
-        </div>
-        <div class="step">
-          <span class="step-index">3</span>
-          <div><strong>Xuất bản recipe</strong><p>Model mới xuất hiện ngay trong Sessions.</p></div>
-        </div>
-      </div>
-    </aside>
+<section class="panel dash-card">
+  <div class="panel-head">
+    <div>
+      <h2>Thêm site</h2>
+      <p>Analyzer nhận diện giao diện, tạo recipe và đăng ký model mới vào router đang chạy.</p>
+    </div>
   </div>
-  <p class="hint">
-    Recipe tạo xong xuất hiện ở <a href="/recipes">trang Recipes</a>.
-  </p>
+  <div class="dash-body">
+    <div class="url-row">
+      <input
+        type="url"
+        inputmode="url"
+        placeholder="https://chat.example.com"
+        aria-label="URL web chat"
+        bind:value={siteUrl}
+      />
+      <button class="button" disabled={integrateDisabled} onclick={startIntegrationJob}>Phân tích</button>
+    </div>
+    <label class="headed-toggle">
+      <input type="checkbox" bind:checked={headedMode} />
+      Hiện browser khi test (không headless)
+    </label>
+
+    <div class="status-box" role="status" aria-live="polite">{#if jobStatusText}{jobStatusText}{/if}</div>
+    {#if loginActionsVisible}
+      <span class="login-actions">
+        <button class="button" disabled={loginButtonsDisabled} onclick={() => postJobAction("login-complete")}>
+          Đã đăng nhập
+        </button>
+        <button class="button secondary" disabled={loginButtonsDisabled} onclick={() => postJobAction("cancel")}>
+          Hủy
+        </button>
+      </span>
+    {/if}
+
+    {#if watchId}
+      <LiveView {watchId} />
+    {/if}
+
+    <div class="job-log-head">
+      <span class="job-log-label">Nhật ký job</span>
+      <button
+        class="button secondary small"
+        disabled={!jobLog}
+        onclick={() => navigator.clipboard.writeText(jobLog).catch(() => {})}
+      >
+        Copy
+      </button>
+    </div>
+    <pre class="job-log" bind:this={jobLogEl} aria-label="Job log">{#if jobLog}{jobLog}{/if}</pre>
+  </div>
 </section>

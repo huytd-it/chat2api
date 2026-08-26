@@ -2,12 +2,17 @@ import { get, writable } from "svelte/store";
 import { apiKey, showToast } from "./stores";
 import {
   fetchAccounts,
+  fetchDomains,
   fetchModels,
   fetchOverview,
+  fetchProfiles,
   fetchRecipes,
   type DomainAccounts,
+  type DomainInfo,
   type ModelInfo,
   type Overview,
+  type ProfileInfo,
+  type ProfileList,
   type RecipeInfo,
 } from "./api";
 
@@ -78,4 +83,40 @@ export async function refreshOverview() {
   } catch {
     overview.set(null);
   }
+}
+
+// Profile Chromium: hàng DB, nên danh sách rỗng cũng có thể chỉ là "kho chưa
+// mở" — `profilesMeta.persisted` phân biệt hai trường hợp đó cho UI.
+export const profiles = writable<ProfileInfo[]>([]);
+export const profilesMeta = writable<Omit<ProfileList, "profiles"> | null>(null);
+export const profilesLoading = writable(false);
+
+export async function refreshProfiles() {
+  profilesLoading.set(true);
+  try {
+    const { profiles: list, ...meta } = await fetchProfiles(get(apiKey));
+    profiles.set(list);
+    profilesMeta.set(meta);
+  } catch {
+    profiles.set([]);
+    profilesMeta.set(null);
+  } finally {
+    profilesLoading.set(false);
+  }
+}
+
+/** Domain đã biết — chỉ dùng để gợi ý trong ô Domain, hỏng thì im lặng bỏ qua. */
+export const domains = writable<DomainInfo[]>([]);
+
+export async function refreshDomains() {
+  try {
+    domains.set(await fetchDomains(get(apiKey)));
+  } catch {
+    domains.set([]);
+  }
+}
+
+/** Mọi thứ trang Integrations hiển thị, nạp trong một lượt. */
+export async function refreshIntegrations() {
+  await Promise.all([refreshRecipes(), refreshAccounts(), refreshProfiles(), refreshDomains()]);
 }

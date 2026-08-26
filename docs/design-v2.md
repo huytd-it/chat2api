@@ -323,29 +323,36 @@ Sau khi lưu, server còn dò thêm: mọi domain khác trong profile mà có co
 
 ### 6.2 API mới
 
+`{ident}` nhận **cả id lẫn tên** profile — UI có id, còn log và người gõ tay có tên.
+
 ```
-GET    /admin/profiles                     danh sách + số domain + đang chạy
+GET    /admin/profiles                     danh sách + số domain + account + đang chạy
 POST   /admin/profiles                     {name, engine, headless, max_tabs, proxy, ...}
-PATCH  /admin/profiles/{id}
-DELETE /admin/profiles/{id}                từ chối khi còn account đang được recipe dùng
-POST   /admin/profiles/{id}/open           mở cửa sổ để thao tác tay
-POST   /admin/profiles/{id}/detect         quét cookie → domain đã đăng nhập chưa khai báo
+PATCH  /admin/profiles/{ident}             cột sửa được + is_default
+DELETE /admin/profiles/{ident}?purge=      từ chối khi còn recipe dùng; purge xoá cả thư mục
+POST   /admin/profiles/{ident}/open        mở cửa sổ để thao tác tay (trả watch_id)
+POST   /admin/profiles/{ident}/detect      quét cookie → domain đã đăng nhập chưa khai báo
+POST   /admin/profiles/{ident}/accounts    {domain, label} — nút "thêm luôn" sau khi dò
+POST   /admin/profiles/{name}/close        (có từ pha 4)
 
-GET    /admin/domains
-POST   /admin/accounts                     {domain?, profile_id?, label} → mở browser
-POST   /admin/accounts/{session_id}/save   dò domain khi trống, tạo account
-DELETE /admin/accounts/{id}
-POST   /admin/accounts/{id}/reopen         mở lại đúng profile để re-login
-
-GET    /admin/sessions?q=&recipe=&tag=&limit=
-GET    /admin/sessions/{id}                kèm message + artifact + tool_call
-PATCH  /admin/sessions/{id}                title, pinned, archived, tags
-DELETE /admin/sessions/{id}
-POST   /admin/sessions/{id}/fork           {up_to_seq}
-GET    /admin/sessions/{id}/export?format=md|html|json|jsonl
+GET    /admin/domains                      DB ∪ đĩa ∪ domain của recipe — gợi ý cho dialog
+POST   /admin/accounts/login               {domain?, url?, name?} → mở browser
+POST   /admin/accounts/login/{sid}/complete  domain rỗng ⇒ dò từ cookie; trả `suggested`
+POST   /admin/accounts/{domain}/{name}/reopen
+DELETE /admin/accounts/{domain}/{name}
 ```
 
-Bộ endpoint `/admin/recipes/{slug}/accounts*` hiện tại giữ nguyên đường dẫn nhưng chuyển sang DAO mới, để desktop chuyển dần từng phần.
+Bộ `/admin/sessions*` đã xong ở pha 3. Bộ `/admin/recipes/{slug}/accounts*` giữ nguyên đường dẫn.
+
+**Khác thiết kế ở hai chỗ, có chủ ý.** Account vẫn đánh địa chỉ bằng
+`(domain, name)` chứ không phải `id`: nguồn sự thật của một account **đang chạy**
+vẫn là file `recipes/.accounts/<domain>/<name>.json` (§9 quyết định 2 — `storage_state`
+là mặc định lâu dài), DB chỉ là bản mirror; đổi sang id sẽ phải đồng bộ hai chiều
+cho một thứ không cần. Còn `POST /admin/accounts` bản thiết kế gộp "tạo account"
+và "mở browser" làm một, nhưng hai đường lưu khác nhau thật sự nên tách:
+đường **storage_state** kết thúc bằng `/complete` (ghi file), đường **profile**
+kết thúc bằng `POST /admin/profiles/{ident}/accounts` (chỉ ghi quan hệ, vì chính
+profile giữ đăng nhập). Dialog trên UI vẫn là một.
 
 ---
 
@@ -400,12 +407,45 @@ Mỗi pha đứng độc lập, chạy được, và có test riêng.
 
 Pha 4 là chỗ nguy hiểm nhất: nó thay cách mọi recipe lấy trình duyệt. Cách giảm rủi ro — cờ `BROWSER_PROFILE_MODE = storage_state | profile` mặc định `storage_state`, đường mới chạy song song cho tới khi bạn tự tin lật cờ.
 
+**Đã làm xong.** `profiles.py` giữ phần trạng thái (hàng DB, thư mục, khoá pid, seed); `BrowserPool` mọc thêm `context_for_profile()` / `page_for()` sống *cạnh* `context_for()` cũ chứ không thay nó. Đường profile tự tắt trong ba trường hợp: engine `cloak` (`launch_context_async` không nhận `user_data_dir`), request headed (live view cần cửa sổ hiện lên), và mọi lỗi profile (khoá pid, kho chưa mở) — cả ba đều rơi về `storage_state` kèm một dòng stderr, không bao giờ để request chat chết vì một tính năng opt-in.
+
+**Pha 5 đã làm xong.** Nav còn 5 tab; `/recipes` và `/accounts` biến mất, ba panel
+`IntegratePanel` · `SitesPanel` · `ProfilesPanel` xếp dọc trong `/integrations`.
+Account nằm trong hàng recipe mở rộng được, gom theo domain của recipe; domain có
+account nhưng không recipe nào dùng vẫn hiện thành hàng riêng để account không
+biến mất khỏi UI khi recipe bị xoá. `AccountDialog` là một component dùng chung
+cho cả hai lối vào, và chọn đường lưu theo ô Profile: bỏ trống ⇒ storage_state,
+chọn profile ⇒ persistent context. Ô Domain bỏ trống thì server mở trang trắng,
+đọc cookie phiên lúc lưu để suy ra domain (`accounts.infer_domain`) và trả về
+những domain khác cùng phiên còn đăng nhập để thêm luôn.
+
+**Pha 6 đã làm xong.** Bảng `setting` là kho chính của cấu hình runtime; môi
+trường thật và `.env` vẫn thắng nó (bootstrap/CI), và `settings.preload()` — gọi
+từ `Config.__init__` trên một connection **read-only** — đổ hàng DB vào
+`os.environ` cho phần còn lại, nên mọi chỗ đang đọc env không phải sửa gì. Trang
+Settings hiện nguồn của từng khoá (`env` · `db` · `default`) và nói thẳng khi
+`.env` đang che giá trị vừa lưu, thay vì để người dùng tưởng đã đổi được.
+
+`api_key` thay `CHAT2API_KEYS`: mỗi key có nhãn, có scope (`chat` cho `/v1/*`,
+`admin` cho `/admin/*`), thu hồi được từng cái, và DB chỉ giữ sha256 — key thô
+chỉ tồn tại trong response lúc tạo. `CHAT2API_KEYS` vẫn được chấp nhận song song
+làm đường bootstrap, cùng lý do với `.env` thắng `setting`. Xác thực nằm trên
+đường nóng của mọi request nên tập key đang hoạt động được cache trong RAM, nạp
+một lần lúc khởi động và xoá mỗi khi tạo/thu hồi; sau đó `auth.require_key` chỉ
+là một phép tra dict. `request_log.api_key_id` giờ có giá trị thật, và
+`sessions.begin` gom session API theo id key thay vì hash của header.
+
 ### Test cần thêm
 
 - `tests/unit/test_store_migrate.py` — migration idempotent; DB rỗng và DB đã có version.
 - `tests/unit/test_importer.py` — recipe/account từ đĩa vào DB; chạy hai lần không nhân đôi.
 - `tests/integration/test_sessions_endpoints.py` — CRUD, fork, export, FTS có dấu tiếng Việt.
 - `tests/integration/test_pool_profile.py` — hai recipe cùng profile chạy song song; recipe thứ ba vượt `max_tabs` bị xếp hàng; profile bị khoá pid thì báo lỗi rõ.
+- `tests/integration/test_profile_endpoints.py` — CRUD profile, từ chối xoá khi recipe còn dùng, `/detect` lọc cookie đo đạc, `/admin/domains` gộp đĩa và recipe.
+- `tests/integration/test_account_endpoints.py` — thêm: mở browser khi chưa biết domain, dò domain từ cookie lúc lưu, và từ chối khi không có cookie phiên nào.
+- `tests/unit/test_settings_store.py` — thêm: lưu vào bảng `setting`, `preload` không tạo file, khoá đã preload không tự khoá chính nó sau restart.
+- `tests/unit/test_apikeys.py` — DB chỉ giữ băm, thu hồi/xoá, cache hết hiệu lực sau mỗi thay đổi, `last_used_at` có tiết chế.
+- `tests/integration/test_apikey_endpoints.py` — CRUD key, scope chặn đúng router, key bootstrap vẫn chạy, `request_log.api_key_id` được ghi.
 - `tests/unit/test_tool_extract.py` — ba bậc extractor, có cả trường hợp không phải tool_call.
 
 ---
@@ -423,7 +463,7 @@ Pha 4 là chỗ nguy hiểm nhất: nó thay cách mọi recipe lấy trình duy
 | 1 — `store/` + migration runner + applog/jobs xuống DB | ✅ xong |
 | 2 — import `recipes/` và `.accounts/` vào DB | ✅ xong |
 | 3 — session/message + `capture_html` + trang `/sessions` | ✅ xong |
-| 4 — persistent profile (opt-in) | chưa |
-| 5 — gộp `/integrations` | chưa |
-| 6 — settings + api_key vào DB | chưa |
+| 4 — persistent profile (opt-in) | ✅ xong |
+| 5 — gộp `/integrations` | ✅ xong |
+| 6 — settings + api_key vào DB | ✅ xong |
 | 7 — shim tool-calling | **không làm** |

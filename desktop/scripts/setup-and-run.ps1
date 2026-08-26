@@ -28,7 +28,7 @@
   powershell -ExecutionPolicy Bypass -File .\desktop\scripts\setup-and-run.ps1
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File .\desktop\scripts\setup-and-run.ps1 -Port 8200
+  powershell -ExecutionPolicy Bypass -File .\desktop\scripts\setup-and-run.ps1 -Port 9123
 #>
 
 param(
@@ -38,7 +38,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ScriptDir = $PSScriptRoot
 $DesktopDir = Split-Path -Parent $ScriptDir
 $RepoRoot = Split-Path -Parent $DesktopDir
 
@@ -61,6 +61,17 @@ function Write-Note($msg) {
 
 function Test-CommandExists([string]$Name) {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+# Windows PowerShell 5.1 turns a native command's REDIRECTED stderr into
+# ErrorRecords, so with $ErrorActionPreference = "Stop" at the top of this file
+# a single stderr line kills the whole script -- even when all we wanted was the
+# exit code answering "is this installed yet?". Every native call using `2>` has
+# to go through here. $LASTEXITCODE is global, so callers still read it as usual.
+function Invoke-NativeQuiet([scriptblock]$Body) {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & $Body } finally { $ErrorActionPreference = $prev }
 }
 
 function Invoke-WingetInstall([string[]]$WingetArgs) {
@@ -159,8 +170,11 @@ if (Test-VCTools) {
 # ---------------------------------------------------------------------------
 Write-Step "WebView2 runtime"
 $webview2ClientId = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+# Machine-wide (64-bit and 32-bit views) plus the per-user install -- without
+# the HKCU branch a machine that already has WebView2 re-runs winget every time.
 $webview2Present = (Test-Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$webview2ClientId") -or
-                   (Test-Path "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$webview2ClientId")
+                   (Test-Path "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$webview2ClientId") -or
+                   (Test-Path "HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$webview2ClientId")
 if ($webview2Present) {
     Write-Ok "WebView2 runtime present"
 } else {
@@ -173,7 +187,10 @@ if ($webview2Present) {
 # ---------------------------------------------------------------------------
 Write-Step "Python backend (chat2api)"
 if (Test-CommandExists "python") {
-    Write-Ok "$(python --version 2>&1)"
+    # Same redirect trap as above: a Python that greets on stderr (or a broken
+    # Store app-execution alias) would otherwise take the script down here.
+    $pythonVersion = Invoke-NativeQuiet { python --version 2>&1 }
+    Write-Ok "$pythonVersion"
 } else {
     Write-Host "    not found -- installing via winget..."
     Invoke-WingetInstall @("install", "--id", "Python.Python.3.11", "-e") | Out-Null
@@ -185,12 +202,25 @@ if (Test-CommandExists "python") {
 
 Push-Location $RepoRoot
 try {
-    python -c "import chat2api, fastapi, uvicorn, playwright" 2>$null
+    Invoke-NativeQuiet { python -c "import chat2api, fastapi, uvicorn, playwright" 2>$null } | Out-Null
     if ($LASTEXITCODE -eq 0) {
         Write-Ok "chat2api + dependencies importable"
     } else {
         Write-Host "    installing chat2api in editable mode + dev dependencies..."
         python -m pip install -e ".[dev]"
+    }
+
+    # Importing playwright does NOT mean the browser was downloaded: pip installs
+    # the library, Chromium is a separate download. Ask separately -- otherwise a
+    # machine that ran `pip install -e .` earlier sails past this step and dies on
+    # the first chat request instead. `executable_path` reports the path Playwright
+    # *expects*; nothing was downloaded means that path doesn't exist.
+    $chromiumProbe = "import sys, pathlib, playwright.sync_api as pw`n" +
+        "with pw.sync_playwright() as p: sys.exit(0 if pathlib.Path(p.chromium.executable_path).exists() else 1)"
+    Invoke-NativeQuiet { python -c $chromiumProbe 2>$null } | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Ok "Playwright Chromium present"
+    } else {
         Write-Host "    installing Playwright's Chromium browser..."
         python -m playwright install chromium
     }
@@ -204,10 +234,17 @@ try {
 Write-Step "Frontend dependencies"
 Push-Location $DesktopDir
 try {
-    if (Test-Path (Join-Path $DesktopDir "node_modules")) {
-        Write-Skip "node_modules already present"
-    } else {
+    # npm rewrites .package-lock.json on every install, so it stamps when the last
+    # one happened: a newer package.json means dependencies changed since then.
+    $stamp = Join-Path $DesktopDir "node_modules\.package-lock.json"
+    $manifest = Join-Path $DesktopDir "package.json"
+    if (-not (Test-Path $stamp)) {
         npm install
+    } elseif ((Get-Item $manifest).LastWriteTime -gt (Get-Item $stamp).LastWriteTime) {
+        Write-Host "    package.json is newer than the last install -- re-running npm install..."
+        npm install
+    } else {
+        Write-Skip "node_modules already present"
     }
 } finally {
     Pop-Location
@@ -225,7 +262,7 @@ if ($NoRun) {
 # 7. Backend port
 # ---------------------------------------------------------------------------
 function Test-PortExcluded([int]$TestPort) {
-    $ranges = netsh interface ipv4 show excludedportrange protocol=tcp 2>$null
+    $ranges = Invoke-NativeQuiet { netsh interface ipv4 show excludedportrange protocol=tcp 2>$null }
     foreach ($line in $ranges) {
         if ($line -match '^\s*(\d+)\s+(\d+)') {
             $start = [int]$Matches[1]

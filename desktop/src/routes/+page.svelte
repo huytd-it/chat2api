@@ -122,7 +122,7 @@
       <div class="dash-body shortcut-row">
         <a class="button secondary small" href="/sessions">Mở Sessions</a>
         <a class="button secondary small" href="/integrations">Thêm web chat mới</a>
-        <a class="button secondary small" href="/accounts">Quản lý account</a>
+        <a class="button secondary small" href="/integrations">Quản lý account</a>
         <a class="button secondary small" href="/settings">Chỉnh delay</a>
       </div>
     </article>
@@ -134,7 +134,7 @@
         <h2>Kênh đang phục vụ</h2>
         <p>{$recipes.length} recipe đã nạp.</p>
       </div>
-      <a class="button secondary small" href="/recipes">Mở trang Recipes</a>
+      <a class="button secondary small" href="/integrations">Mở trang Integrations</a>
     </div>
     <div class="dash-body">
       {#if $recipes.length}

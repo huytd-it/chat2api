@@ -1,14 +1,16 @@
 url: https://chat.qwen.ai/
 prompt:
   input_selector: textarea[placeholder='Ask Qwen']
-  input_mode: type
+  input_mode: fill
   submit: Enter
 response:
-  last_message_selector: .qwen-markdown, [class*='qwen-markdown'], .markdown-body
+  last_message_selector: .qwen-markdown
   done_signal:
     type: stable_text
     quiet_ms: 3000
     timeout_ms: 120000
+new_chat:
+  selector: div[role='button'][aria-label='New Chat']
 timing:
   ready_delay_ms: 2000
   input_delay_ms: 600
@@ -16,8 +18,4 @@ models:
 - id: qwen-web
 slug: chat
 login:
-  accounts:
-  - name: codex1
-    storage_state: auth/codex1.json
-  - name: codex2
-    storage_state: auth/codex2.json
+  anon_trial_limit: 20

@@ -95,3 +95,55 @@ async def test_overview_reports_counts(tmp_path):
         assert body["unhealthy"] == []
         assert body["open_browsers"] == []
         assert body["accounts"] == 0
+
+
+async def test_put_settings_writes_store_when_it_is_open(tmp_path, monkeypatch):
+    """Pha 6: kho mở thì `setting` là nơi lưu, .env không bị đụng tới."""
+    from chat2api import settings, store
+
+    monkeypatch.delenv("POOL_MAX_CONTEXTS", raising=False)
+    store.shutdown()
+    db = store.connect(tmp_path / "store" / "chat2api.db")
+    db.migrate()
+    settings.capture_env()
+    try:
+        client, cfg = await _client(tmp_path)
+        async with client:
+            got = await client.get("/admin/settings")
+            assert got.json()["persisted"] is True
+
+            r = await client.put("/admin/settings",
+                                 json={"values": {"POOL_MAX_CONTEXTS": "5"}})
+            assert r.status_code == 200 and r.json()["shadowed"] == []
+
+            after = next(f for f in (await client.get("/admin/settings")).json()["fields"]
+                         if f["key"] == "POOL_MAX_CONTEXTS")
+            assert (after["value"], after["source"]) == ("5", "db")
+
+        assert db.query("SELECT value FROM setting WHERE key = ?",
+                        ("POOL_MAX_CONTEXTS",))[0]["value"] == "5"
+        assert not cfg.env_path.exists()
+    finally:
+        store.shutdown()
+
+
+async def test_put_settings_says_when_dotenv_still_wins(tmp_path, monkeypatch):
+    from chat2api import settings, store
+
+    monkeypatch.setenv("BROWSER_ENGINE", "playwright")
+    store.shutdown()
+    db = store.connect(tmp_path / "store" / "chat2api.db")
+    db.migrate()
+    settings.capture_env()
+    try:
+        client, _ = await _client(tmp_path)
+        async with client:
+            r = await client.put("/admin/settings", json={"values": {"BROWSER_ENGINE": "cloak"}})
+            assert r.json()["shadowed"] == ["BROWSER_ENGINE"]
+
+            field = next(f for f in (await client.get("/admin/settings")).json()["fields"]
+                         if f["key"] == "BROWSER_ENGINE")
+            assert field["env_locked"] is True
+            assert field["value"] == "playwright"  # .env vẫn là thứ đang chạy
+    finally:
+        store.shutdown()

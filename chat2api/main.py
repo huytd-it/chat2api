@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from . import accounts, applog, auth, errors, live_view, profiles, sessions, store  # noqa: F401  (import auth để đăng ký dependency)
+from . import accounts, apikeys, applog, auth, errors, live_view, profiles, sessions, store  # noqa: F401  (import auth để đăng ký dependency)
 from .config import Config
 from .errors import OpenAIError
 from .providers.browser_recipe import TrialLimitExceeded
@@ -61,8 +61,17 @@ def create_app(cfg: Config) -> FastAPI:
             print(f"[chat2api] không mở được kho {cfg.db_path}: {error}", file=sys.stderr)
             store.shutdown()
             version = None
+        # Nạp sẵn tập api_key để request đầu tiên không phải xuống đĩa giữa
+        # đường xác thực (auth.require_key chỉ tra dict sau bước này).
+        active_keys = await asyncio.to_thread(apikeys.active)
         await pool.start()
         applog.log(f"Server khởi động (engine={cfg.browser_engine})")
+        if active_keys:
+            applog.log(f"auth: {len(active_keys)} api key đang hoạt động")
+        elif cfg.api_keys:
+            applog.log(f"auth: {len(cfg.api_keys)} key bootstrap từ CHAT2API_KEYS")
+        else:
+            applog.log("auth: chưa đặt api key nào, server đang mở", "warn")
         if version is not None:
             applog.log(f"store: {cfg.db_path} (schema v{version})")
         else:
@@ -177,6 +186,7 @@ def create_app(cfg: Config) -> FastAPI:
             request.headers.get("x-chat2api-session-id"), body.model, provider.slug,
             msgs, body.stream, request.headers.get("authorization", ""),
             request.headers.get("user-agent", ""),
+            getattr(request.state, "api_key_id", None),
         )
         response.headers["X-Chat2api-Session-Id"] = recording.session_id
 
@@ -345,9 +355,18 @@ def register_admin(app: FastAPI, admin) -> None:
 
     from .agents import llm
     from . import jobs, settings
-    from .schemas import (AccountLoginRequest, AddAccountRequest, IntegrateRequest,
-                          SaveAccountRequest, SessionForkRequest, SessionUpdateRequest,
-                          SettingsRequest)
+    from .schemas import (AccountLoginRequest, AddAccountRequest, ApiKeyCreateRequest,
+                          IntegrateRequest, ProfileAccountRequest, ProfileCreateRequest,
+                          ProfileOpenRequest, ProfileUpdateRequest, SaveAccountRequest,
+                          SessionForkRequest, SessionUpdateRequest, SettingsRequest)
+
+    # Tab do người dùng mở tay trong một profile. Đặt tên như một slug recipe để
+    # dùng chung cơ chế một-tab-một-slug của pool, nhưng không recipe nào tên
+    # được như vậy (slug thật chỉ gồm [a-z0-9-]).
+    MANUAL_SLUG = "__manual__"
+    # Nơi cất tạm state khi người dùng mở browser mà chưa biết domain (§6.1 bậc
+    # 4). Không phải domain hợp lệ nên không lọt vào danh sách domain.
+    PENDING_DIRNAME = "_pending"
 
     @admin.post("/integrate")
     async def integrate(body: IntegrateRequest, request: Request):
@@ -428,7 +447,138 @@ def register_admin(app: FastAPI, admin) -> None:
             item["tabs"] = pool_.tab_count(item["name"])
         return {"profiles": items, "mode": cfg.browser_profile_mode,
                 "profiles_dir": str(cfg.profiles_dir),
-                "max_profiles": cfg.pool_max_profiles}
+                "max_profiles": cfg.pool_max_profiles,
+                "persisted": store.default() is not None}
+
+    def _need_store() -> None:
+        if store.default() is None:
+            raise OpenAIError(503, "store_unavailable",
+                              "Kho dữ liệu chưa mở nên chưa quản lý được profile.")
+
+    async def _profile_or_404(ident: str) -> dict:
+        row = await asyncio.to_thread(profiles.find, ident)
+        if row is None:
+            _need_store()
+            raise OpenAIError(404, "not_found", f"Profile '{ident}' không tồn tại")
+        return row
+
+    @admin.post("/profiles")
+    async def profile_create(body: ProfileCreateRequest, request: Request):
+        _need_store()
+        try:
+            row = await asyncio.to_thread(
+                profiles.create, (body.name or "").strip().lower(),
+                request.app.state.cfg.profiles_dir, body.model_dump(exclude_none=True))
+        except ValueError as error:
+            raise OpenAIError(400, "invalid_profile", str(error))
+        applog.log(f"profile: tạo '{row['name']}'")
+        return row
+
+    @admin.patch("/profiles/{ident}")
+    async def profile_update(ident: str, body: ProfileUpdateRequest):
+        row = await _profile_or_404(ident)
+        if body.name is not None and body.name.strip() != row["name"]:
+            # Tên profile LÀ tên thư mục Chromium đang giữ mọi đăng nhập của nó.
+            # Đổi tên phải kéo theo di chuyển thư mục và nhả khoá pid, nên nói
+            # thẳng là không làm chứ không lặng lẽ bỏ qua.
+            raise OpenAIError(400, "rename_unsupported",
+                              "Không đổi tên profile được. Tạo profile mới rồi đăng nhập lại.")
+        try:
+            updated = await asyncio.to_thread(profiles.update, row["id"],
+                                              body.model_dump(exclude_none=True))
+        except ValueError as error:
+            raise OpenAIError(400, "invalid_profile", str(error))
+        applog.log(f"profile: cập nhật '{row['name']}'")
+        return updated
+
+    @admin.delete("/profiles/{ident}")
+    async def profile_delete(ident: str, request: Request, purge: bool = False):
+        row = await _profile_or_404(ident)
+        # Kiểm tra TRƯỚC khi đóng browser: từ chối xoá mà vẫn đá người dùng ra
+        # khỏi phiên đang chạy thì tệ hơn là không làm gì cả.
+        used = await asyncio.to_thread(profiles.blockers, row["id"])
+        if used:
+            raise OpenAIError(409, "profile_in_use",
+                              f"Profile '{row['name']}' còn được recipe dùng: {', '.join(used)}")
+        await request.app.state.pool.drop_profile(row["name"])
+        try:
+            await asyncio.to_thread(profiles.delete, row["id"], remove_dir=purge)
+        except profiles.ProfileInUse as error:
+            raise OpenAIError(409, "profile_in_use", str(error))
+        except profiles.ProfileLocked as error:
+            raise OpenAIError(409, "profile_locked", str(error))
+        applog.log(f"profile: xóa '{row['name']}'" + (" kèm thư mục" if purge else ""), "warn")
+        return {"ok": True}
+
+    @admin.post("/profiles/{ident}/open")
+    async def profile_open(ident: str, request: Request, body: ProfileOpenRequest):
+        """Mở cửa sổ profile để người dùng tự đăng nhập thêm domain (§6.1)."""
+        from dataclasses import replace
+
+        cfg = request.app.state.cfg
+        pool_ = request.app.state.pool
+        row = await _profile_or_404(ident)
+        if (row["engine"] or cfg.browser_engine) == "cloak":
+            raise OpenAIError(400, "engine_unsupported",
+                              "Engine cloak không mở được persistent profile.")
+        profile = await asyncio.to_thread(profiles.ensure_profile, row["name"], cfg.profiles_dir)
+        if profile is None:
+            _need_store()
+            raise OpenAIError(404, "not_found", f"Profile '{ident}' không tồn tại")
+        # Profile đang chạy nền (headless) thì giữ nguyên tiến trình đó — mở lại
+        # headed sẽ đụng khoá user_data_dir. Live view vẫn xem được tab.
+        reused = pool_.open_context(profile.name) is not None
+        try:
+            page = await pool_.page_for(replace(profile, headless=False), MANUAL_SLUG)
+        except profiles.ProfileLocked as error:
+            raise OpenAIError(409, "profile_locked", str(error))
+        except Exception as error:
+            applog.log(f"profile: không mở được '{profile.name}': {error}", "error")
+            raise OpenAIError(500, "profile_open_failed",
+                              f"Không mở được profile '{profile.name}': {error}")
+        target = body.url.strip()
+        if target:
+            try:
+                await page.goto(target, wait_until="domcontentloaded", timeout=30000)
+            except Exception as error:
+                applog.log(f"profile: '{profile.name}' không tới được {target}: {error}", "warn")
+        watch_id = f"profile-{profile.id}"
+        await live_view.register(watch_id, page)
+        applog.log(f"profile: mở cửa sổ '{profile.name}'")
+        return {"ok": True, "profile": profile.name, "watch_id": watch_id,
+                "headless": reused and bool(row["headless"])}
+
+    @admin.post("/profiles/{ident}/detect")
+    async def profile_detect(ident: str, request: Request):
+        """Domain profile này còn đăng nhập nhưng chưa khai báo account (§6.1)."""
+        row = await _profile_or_404(ident)
+        ctx = request.app.state.pool.open_context(row["name"])
+        if ctx is None:
+            raise OpenAIError(409, "profile_not_open",
+                              f"Profile '{row['name']}' chưa mở. Bấm Mở rồi dò lại.")
+        try:
+            cookies = await ctx.cookies()
+        except Exception as error:
+            raise OpenAIError(500, "detect_failed", f"Không đọc được cookie: {error}")
+        known = {item["host"] for item in await asyncio.to_thread(profiles.accounts_of, row["id"])}
+        hosts = accounts.session_hosts(cookies)
+        return {"profile": row["name"], "known": sorted(known),
+                "suggested": [host for host in hosts if host not in known]}
+
+    @admin.post("/profiles/{ident}/accounts")
+    async def profile_add_account(ident: str, body: ProfileAccountRequest):
+        """Khai báo "profile này đã đăng nhập domain kia" — nút thêm-luôn."""
+        row = await _profile_or_404(ident)
+        host = body.domain.strip().lower()
+        if not accounts.valid_domain(host):
+            raise OpenAIError(400, "invalid_domain", "Domain không hợp lệ")
+        label = (body.label or "").strip() or "main"
+        if not accounts.valid_name(label):
+            raise OpenAIError(400, "invalid_account_name",
+                              "Nhãn account chỉ được gồm chữ thường, số và dấu -")
+        item = await asyncio.to_thread(profiles.add_account, row["id"], host, label)
+        applog.log(f"account: gắn {host}/{label} vào profile '{row['name']}'")
+        return {"ok": True, "account": item}
 
     @admin.post("/profiles/{name}/close")
     async def profile_close(name: str, request: Request):
@@ -524,6 +674,10 @@ def register_admin(app: FastAPI, admin) -> None:
                 entry["accounts"] = provider.account_count
                 entry["account_names"] = provider.account_names
                 entry["trial"] = provider.trial_status
+                # Trang Integrations gộp account vào ngay trong hàng recipe, nên
+                # nó cần biết recipe này thuộc domain nào (§6).
+                entry["domain"] = provider.domain
+                entry["url"] = provider.url
             out.append(entry)
         return out
 
@@ -570,6 +724,19 @@ def register_admin(app: FastAPI, admin) -> None:
                 usage.setdefault(provider.domain, []).append(slug)
         return usage
 
+    @admin.get("/domains")
+    async def domain_list(request: Request):
+        """Mọi domain đã biết — nguồn cho dropdown ở dialog thêm account (§6.1)."""
+        cfg = request.app.state.cfg
+        usage = _domain_usage(request)
+        known = await asyncio.to_thread(profiles.known_hosts)
+        hosts = sorted(set(known) | set(accounts.list_domains(cfg.recipes_dir)) | set(usage))
+        return {"domains": [
+            {"host": host,
+             "accounts": len(accounts.list_accounts(cfg.recipes_dir, host)),
+             "recipes": sorted(usage.get(host, []))}
+            for host in hosts]}
+
     @admin.get("/accounts")
     async def list_all_accounts(request: Request):
         # Account thuộc về domain chứ không thuộc recipe: mọi recipe cùng domain
@@ -591,27 +758,62 @@ def register_admin(app: FastAPI, admin) -> None:
     async def start_domain_login(request: Request, body: AccountLoginRequest):
         cfg = request.app.state.cfg
         domain = (body.domain or accounts.domain_of(body.url)).strip().lower()
-        if not accounts.valid_domain(domain):
+        if domain and not accounts.valid_domain(domain):
             raise OpenAIError(400, "invalid_domain", "Domain không hợp lệ")
-        url = body.url.strip() or f"https://{domain}"
         session_id = f"acct-{uuid.uuid4().hex[:10]}"
-        state_path = accounts.account_path(cfg.recipes_dir, domain, body.name.strip()) \
-            if accounts.valid_name(body.name.strip()) else None
+        if domain:
+            url = body.url.strip() or f"https://{domain}"
+            login_dir = accounts.domain_dir(cfg.recipes_dir, domain)
+            state_path = accounts.account_path(cfg.recipes_dir, domain, body.name.strip()) \
+                if accounts.valid_name(body.name.strip()) else None
+        else:
+            # Bậc 4 của "tự dò domain" (§6.1): chưa biết đi đâu thì mở trang
+            # trắng, người dùng tự vào site và đăng nhập; domain suy ra từ cookie
+            # lúc lưu. State cất tạm ở _pending rồi chuyển về đúng domain sau.
+            url = body.url.strip() or "about:blank"
+            login_dir = accounts.store_dir(cfg.recipes_dir) / PENDING_DIRNAME
+            state_path = None
         try:
             await request.app.state.login_manager.start(
-                session_id, domain, url, accounts.domain_dir(cfg.recipes_dir, domain),
-                storage_state=state_path)
+                session_id, domain or "unknown", url, login_dir, storage_state=state_path)
         except Exception:
-            applog.log(f"account: không mở được browser cho {domain}", "error")
+            applog.log(f"account: không mở được browser cho {domain or 'domain chưa rõ'}", "error")
             raise OpenAIError(500, "login_open_failed",
                               "Không thể mở browser đăng nhập trên máy chạy chat2api.")
-        applog.log(f"account: mở browser đăng nhập {domain} (session={session_id})")
+        applog.log("account: mở browser đăng nhập "
+                   f"{domain or 'trang trắng, chờ tự dò domain'} (session={session_id})")
         return {"session_id": session_id, "domain": domain}
+
+    async def _login_snapshot(manager, session_id: str) -> dict:
+        """Cookie + URL của phiên đăng nhập, {} nếu manager không hỗ trợ.
+
+        Best-effort: đây chỉ là đường tự dò domain, không được làm hỏng việc lưu
+        account khi có gì đó trục trặc.
+        """
+        snapshot = getattr(manager, "snapshot", None)
+        if snapshot is None:
+            return {}
+        try:
+            return await snapshot(session_id) or {}
+        except Exception:
+            return {}
 
     @admin.post("/accounts/login/{session_id}/complete")
     async def complete_domain_login(session_id: str, request: Request, body: SaveAccountRequest):
         cfg = request.app.state.cfg
+        manager = request.app.state.login_manager
         domain, name = body.domain.strip().lower(), body.name.strip()
+        # Đọc cookie TRƯỚC complete() — complete() đóng browser, sau đó không
+        # còn gì để dò nữa.
+        snapshot = await _login_snapshot(manager, session_id)
+        cookies = snapshot.get("cookies") or []
+        if not domain:
+            domain = accounts.infer_domain(cookies, snapshot.get("url", ""))
+            if not domain:
+                raise OpenAIError(400, "domain_not_detected",
+                                  "Chưa dò được domain: hãy đăng nhập xong rồi lưu lại, "
+                                  "hoặc nhập domain bằng tay.")
+            applog.log(f"account: tự dò ra domain {domain} (session={session_id})")
         if not accounts.valid_domain(domain):
             raise OpenAIError(400, "invalid_domain", "Domain không hợp lệ")
         if not accounts.valid_name(name):
@@ -620,8 +822,7 @@ def register_admin(app: FastAPI, admin) -> None:
         try:
             # login_manager ghi vào <recipe_dir>/auth/<file>; recipe_dir ở đây là
             # thư mục domain nên state nằm đúng kho chung.
-            saved = await request.app.state.login_manager.complete(session_id,
-                                                                   filename=f"{name}.json")
+            saved = await manager.complete(session_id, filename=f"{name}.json")
         except Exception:
             applog.log(f"account: lưu session thất bại cho {domain}/{name}", "error")
             raise OpenAIError(500, "login_save_failed", "Không thể lưu session đăng nhập")
@@ -629,9 +830,19 @@ def register_admin(app: FastAPI, admin) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         if saved.resolve() != target.resolve():
             shutil.move(str(saved), str(target))
+            # Thư mục tạm của luồng "chưa biết domain" không được để lại rác.
+            pending = accounts.store_dir(cfg.recipes_dir) / PENDING_DIRNAME
+            if pending in saved.parents:
+                shutil.rmtree(pending, ignore_errors=True)
         request.app.state.router.reload()
         applog.log(f"account: đã lưu {domain}/{name}")
-        return {"ok": True, "domain": domain, "name": name}
+        # Cùng một lần đăng nhập thường mang theo cookie của domain khác (đăng
+        # nhập Google chẳng hạn). Chỉ ra chúng để người dùng thêm luôn, thay vì
+        # phải mở browser lại lần nữa — đây là chỗ "một profile nhiều domain"
+        # trở nên nhìn thấy được trên UI.
+        suggested = [host for host in accounts.session_hosts(cookies)
+                     if host != domain and not accounts.list_accounts(cfg.recipes_dir, host)]
+        return {"ok": True, "domain": domain, "name": name, "suggested": suggested}
 
     @admin.post("/accounts/{domain}/{name}/reopen")
     async def reopen_domain_login(domain: str, name: str, request: Request):
@@ -664,18 +875,67 @@ def register_admin(app: FastAPI, admin) -> None:
 
     @admin.get("/settings")
     async def get_settings(request: Request):
-        return {"fields": settings.describe(),
-                "env_path": str(request.app.state.cfg.env_path)}
+        fields = await asyncio.to_thread(settings.describe)
+        return {"fields": fields,
+                "env_path": str(request.app.state.cfg.env_path),
+                # false ⇒ đang ghi vào .env vì kho chưa mở; UI nói khác đi.
+                "persisted": store.default() is not None}
 
     @admin.put("/settings")
     async def put_settings(request: Request, body: SettingsRequest):
         clean, errs = settings.validate(body.values)
         if errs:
             raise OpenAIError(400, "invalid_settings", "; ".join(errs))
-        needs_restart = settings.save(request.app.state.cfg.env_path, clean)
+        needs_restart = await asyncio.to_thread(
+            settings.save, request.app.state.cfg.env_path, clean)
         request.app.state.router.reload()
         applog.log(f"settings: cập nhật {', '.join(sorted(clean))}")
-        return {"ok": True, "saved": sorted(clean), "needs_restart": sorted(needs_restart)}
+        return {"ok": True, "saved": sorted(clean), "needs_restart": sorted(needs_restart),
+                # Đã ghi xuống DB nhưng .env vẫn thắng: nói thẳng, đừng để người
+                # dùng tưởng đã đổi được.
+                "shadowed": settings.shadowed(clean)}
+
+    # ------------------------------------------------------------- api key
+
+    @admin.get("/api-keys")
+    async def api_key_list(request: Request):
+        keys = await asyncio.to_thread(apikeys.list_keys)
+        cfg = request.app.state.cfg
+        active = [k for k in keys if not k["revoked_at"]]
+        return {
+            "keys": keys,
+            "persisted": store.default() is not None,
+            # Key trong CHAT2API_KEYS không có hàng DB nên không liệt kê được;
+            # chỉ đếm để UI giải thích vì sao server vẫn đòi key khi bảng rỗng.
+            "bootstrap_keys": len(cfg.api_keys),
+            "enforced": bool(active or cfg.api_keys),
+        }
+
+    @admin.post("/api-keys")
+    async def api_key_create(body: ApiKeyCreateRequest, request: Request):
+        try:
+            row = await asyncio.to_thread(apikeys.create, body.label, body.scopes)
+        except ValueError as error:
+            raise OpenAIError(400, "invalid_api_key", str(error))
+        except RuntimeError as error:
+            raise OpenAIError(503, "store_unavailable", str(error))
+        # Chỉ ghi nhãn. Key thô chỉ tồn tại trong response này, không vào log.
+        applog.log(f"auth: tạo api key '{row['label']}' ({row['key_prefix']}…)")
+        return row
+
+    @admin.delete("/api-keys/{key_id}")
+    async def api_key_delete(key_id: int, purge: bool = False):
+        if purge:
+            removed = await asyncio.to_thread(apikeys.delete, key_id)
+            if not removed:
+                raise OpenAIError(404, "not_found", f"API key {key_id} không tồn tại")
+            applog.log(f"auth: xóa hẳn api key {key_id}", "warn")
+            return {"ok": True, "purged": True}
+        row = await asyncio.to_thread(apikeys.revoke, key_id)
+        if row is None:
+            raise OpenAIError(404, "not_found", f"API key {key_id} không tồn tại")
+        applog.log(f"auth: thu hồi api key '{row['label']}'", "warn")
+        return row
 
     @admin.get("/overview")
     async def overview(request: Request):

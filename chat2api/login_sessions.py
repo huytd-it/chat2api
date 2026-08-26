@@ -143,6 +143,26 @@ class LoginSessionManager:
         finally:
             await _finish_cleanup(self._remove_pending(job_id, current_task))
 
+    async def snapshot(self, job_id: str) -> dict:
+        """Cookie + URL hiện tại của phiên đang mở, để tự dò domain (§6.1).
+
+        Phải đọc TRƯỚC complete() vì complete() đóng browser. Trả về dict rỗng
+        khi không còn phiên nào — người gọi tự quyết định có bắt lỗi hay không.
+        """
+        async with self._lock:
+            session = self._sessions.get(job_id)
+        if session is None:
+            return {}
+        try:
+            cookies = await session.context.cookies()
+        except Exception:
+            cookies = []
+        try:
+            url = session.page.url
+        except Exception:
+            url = ""
+        return {"cookies": list(cookies), "url": url}
+
     async def complete(self, job_id: str, filename: str = "state.json") -> Path:
         async with self._lock:
             session = self._sessions.pop(job_id, None)
