@@ -31,6 +31,8 @@ class Recording:
     enabled: bool = True
     ttfb_ms: int | None = None
     fallback_used: bool = False
+    account_id: int | None = None
+    profile_id: int | None = None
 
 
 def normalize_session_id(value: str | None) -> str | None:
@@ -75,12 +77,20 @@ def begin(
     api_key_id: int | None = None,
     account_id: int | None = None,
     profile_id: int | None = None,
+    group_mode: str = "per_request",
 ) -> Recording:
-    """Mở recording và chèn phần history chưa có cùng request_log ``running``."""
+    """Mở recording và chèn phần history chưa có cùng request_log ``running``.
+
+    `group_mode` quyết định số phận của request KHÔNG kèm header session id:
+    ``per_request`` cho mỗi request một session riêng (mặc định — hai request
+    gửi cùng lúc phải là hai bản ghi, vì chúng chạy trên hai account khác nhau);
+    ``client_window`` gom chúng theo client + model trong cửa sổ 30 phút.
+    """
     now = store.now_ms()
     db = store.default()
     if db is None:
-        return Recording(requested_id or uuid.uuid4().hex, None, now, 0, enabled=False)
+        return Recording(requested_id or uuid.uuid4().hex, None, now, 0, enabled=False,
+                         account_id=account_id, profile_id=profile_id)
 
     conn = db.connection()
     explicit = normalize_session_id(requested_id)
@@ -91,7 +101,7 @@ def begin(
         row = None
         if session_id:
             row = conn.execute("SELECT * FROM session WHERE id = ?", (session_id,)).fetchone()
-        else:
+        elif group_mode == "client_window":
             # API client không truyền header vẫn hiện trong Sessions: nhóm theo
             # danh tính client (xem _client_fingerprint) và model trong cửa sổ
             # 30 phút.
@@ -103,6 +113,11 @@ def begin(
             ).fetchall()
             row = next((r for r in rows if json.loads(r["params"] or "{}").get("client") == fingerprint), None)
             session_id = row["id"] if row else uuid.uuid4().hex
+        else:
+            # per_request: mỗi lượt gọi là một bản ghi riêng. Gộp chúng lại sẽ
+            # trộn hai hội thoại chạy trên hai account thành một chuỗi message
+            # xen kẽ, và che mất chuyện request nào đi tới profile nào.
+            session_id = uuid.uuid4().hex
 
         if row is None:
             kind = "chat" if explicit else "api"
@@ -146,14 +161,15 @@ def begin(
 
         prompt_chars = sum(len(content) for _, content in incoming)
         cursor = conn.execute(
-            "INSERT INTO request_log(session_id, recipe_id, api_key_id, model_public_id, "
-            "stream, status, started_at, prompt_chars, client) "
-            "VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)",
-            (session_id, recipe_id, api_key_id, model, int(stream), now, prompt_chars,
-             user_agent[:200]),
+            "INSERT INTO request_log(session_id, recipe_id, api_key_id, account_id, "
+            "profile_id, model_public_id, stream, status, started_at, prompt_chars, client) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)",
+            (session_id, recipe_id, api_key_id, account_id, profile_id, model, int(stream),
+             now, prompt_chars, user_agent[:200]),
         )
         _refresh_session(conn, session_id, now)
-        return Recording(session_id, int(cursor.lastrowid), now, seq)
+        return Recording(session_id, int(cursor.lastrowid), now, seq,
+                         account_id=account_id, profile_id=profile_id)
 
 
 def first_delta(recording: Recording) -> None:
@@ -171,8 +187,13 @@ def finish(
     error_message: str | None = None,
     http_status: int | None = None,
     finish_reason: str = "stop",
+    conversation_url: str | None = None,
 ) -> None:
-    """Đóng recording trong một transaction, kể cả reply lỗi/partial/cancel."""
+    """Đóng recording trong một transaction, kể cả reply lỗi/partial/cancel.
+
+    `conversation_url` là link hội thoại thật trên site nguồn mà request này vừa
+    tạo ra — thứ duy nhất cho phép mở lại đúng chỗ để xem trực tiếp.
+    """
     if not recording.enabled:
         return
     db = store.default()
@@ -194,11 +215,14 @@ def finish(
         conn.execute(
             "UPDATE request_log SET message_id = ?, status = ?, http_status = ?, error_code = ?, "
             "error_message = ?, fallback_used = ?, ttfb_ms = ?, duration_ms = ?, "
-            "completion_chars = ? WHERE id = ?",
+            "completion_chars = ?, conversation_url = ? WHERE id = ?",
             (message_id, status, http_status, error_code, error_message,
              int(recording.fallback_used), recording.ttfb_ms, duration, len(content),
-             recording.request_id),
+             conversation_url, recording.request_id),
         )
+        if conversation_url:
+            conn.execute("UPDATE session SET site_conversation_url = ? WHERE id = ?",
+                         (conversation_url, recording.session_id))
         _refresh_session(conn, recording.session_id, now)
 
 
@@ -270,7 +294,13 @@ def get_session(session_id: str) -> dict | None:
         item["artifacts"] = [dict(a) for a in db.query(
             "SELECT * FROM artifact WHERE message_id = ? ORDER BY idx", (row["id"],))]
         request = db.query(
-            "SELECT * FROM request_log WHERE message_id = ? ORDER BY id DESC LIMIT 1", (row["id"],))
+            "SELECT rq.*, a.label AS account_label, p.name AS profile_name, "
+            "       d.host AS account_host "
+            "FROM request_log rq "
+            "LEFT JOIN account a ON a.id = rq.account_id "
+            "LEFT JOIN profile p ON p.id = rq.profile_id "
+            "LEFT JOIN domain  d ON d.id = a.domain_id "
+            "WHERE rq.message_id = ? ORDER BY rq.id DESC LIMIT 1", (row["id"],))
         item["request"] = dict(request[0]) if request else None
         messages.append(item)
     out["messages"] = messages

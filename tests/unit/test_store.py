@@ -4,6 +4,11 @@ import pytest
 
 from chat2api import store
 
+# Version cao nhất mà kho biết tới = baseline + mọi file trong migrations/.
+# Tính ra thay vì viết cứng, để thêm một migration không phải sửa test.
+MIGRATIONS = store._migration_files()
+LATEST = max([store.BASELINE_VERSION] + [version for version, _ in MIGRATIONS])
+
 
 @pytest.fixture
 def db(tmp_path):
@@ -15,21 +20,25 @@ def db(tmp_path):
 
 
 def test_migrate_creates_schema_and_stamps_version(db):
-    assert db.migrate() == store.BASELINE_VERSION
+    assert db.migrate() == LATEST
     names = {r["name"] for r in db.query(
         "SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
     # Bốn nhóm bảng của docs/design-v2.md §2 phải có mặt hết.
     assert {"profile", "domain", "account", "recipe", "model", "session", "message",
             "tool_call", "request_log", "job", "job_log", "app_log", "api_key",
             "v_session_list"} <= names
-    stamped = db.query("SELECT version, name FROM schema_migrations")
+    # DB rỗng chạy thẳng schema.sql rồi đóng dấu MỌI version đã biết — apply
+    # lại từng migration lên nó sẽ là double-apply.
+    stamped = db.query("SELECT version, name FROM schema_migrations ORDER BY version")
     assert [(r["version"], r["name"]) for r in stamped] == [
-        (store.BASELINE_VERSION, store.BASELINE_NAME)]
+        (store.BASELINE_VERSION, store.BASELINE_NAME),
+        *((version, path.name) for version, path in MIGRATIONS)]
 
 
 def test_migrate_is_idempotent(db):
-    assert db.migrate() == db.migrate() == store.BASELINE_VERSION
-    assert db.query("SELECT COUNT(*) AS n FROM schema_migrations")[0]["n"] == 1
+    assert db.migrate() == db.migrate() == LATEST
+    assert (db.query("SELECT COUNT(*) AS n FROM schema_migrations")[0]["n"]
+            == 1 + len(MIGRATIONS))
 
 
 def test_migrate_reopens_existing_db(tmp_path):
@@ -42,7 +51,7 @@ def test_migrate_reopens_existing_db(tmp_path):
     try:
         second.submit("INSERT INTO app_log(ts, level, source, message) VALUES (1, 'info', 'app', 'x')")
         second.flush()
-        assert second.migrate() == store.BASELINE_VERSION
+        assert second.migrate() == LATEST
         assert second.query("SELECT COUNT(*) AS n FROM app_log")[0]["n"] == 1
     finally:
         second.close()

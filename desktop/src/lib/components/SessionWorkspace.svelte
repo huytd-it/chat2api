@@ -10,10 +10,12 @@
     fetchSessions,
     fetchTestTargets,
     forkSession,
+    openSessionConversation,
     openTestTarget,
     streamChat,
     updateSession,
     type ChatMessage,
+    type ChatTarget,
     type SessionDetail,
     type SessionMessage,
     type SessionSummary,
@@ -58,6 +60,10 @@
   let maxRequestsPerAccount = $state(1);
   let markdownMode = $state<"rendered" | "raw">("rendered");
   let deleteDialogOpen = $state(false);
+  /** Target server chọn cho lượt đang gửi — đọc từ header nên có ngay trước khi
+   * có delta đầu tiên, tức là "đang gửi tới đâu" hiện được trong lúc còn chờ. */
+  let liveTarget = $state<ChatTarget | null>(null);
+  let openingConversation = $state(false);
 
   type BatchJob = {
     promptIndex: number;
@@ -175,6 +181,37 @@
   function inspect(message: SessionMessage) {
     inspected = message;
     benchOpen = false;
+  }
+
+  /** 'profile · host · account' cho một request đã lưu. '' khi request không
+   * chạy trên browser recipe (Gemini/passthrough) hoặc agent fallback đã thay. */
+  function targetOf(message: SessionMessage): string {
+    const request = message.request;
+    if (!request?.profile_name) return "";
+    return [request.profile_name, request.account_host, request.account_label]
+      .filter(Boolean).join(" · ");
+  }
+
+  function conversationUrlOf(message: SessionMessage): string {
+    return message.request?.conversation_url ?? "";
+  }
+
+  async function openConversation(sessionId: string) {
+    if (openingConversation) return;
+    openingConversation = true;
+    try {
+      const result = await openSessionConversation($apiKey, sessionId);
+      showToast(`Đã mở hội thoại trong profile ${result.profile}.`);
+    } catch (error) {
+      showToast("Không mở được hội thoại: " + (error as Error).message);
+    } finally {
+      openingConversation = false;
+    }
+  }
+
+  async function copyConversationUrl(url: string) {
+    await navigator.clipboard.writeText(url);
+    showToast("Đã chép link hội thoại.");
   }
 
   function formatDate(ts: number): string {
@@ -475,6 +512,7 @@
     };
     if (active) active.messages.push(temporary, reply);
 
+    liveTarget = null;
     abortCtrl = new AbortController();
     try {
       await streamChat(
@@ -488,6 +526,8 @@
         $headedBrowser,
         existingId,
         () => {},
+        undefined,
+        (target) => (liveTarget = target),
       );
       await openSession(existingId);
       await loadList();
@@ -652,6 +692,11 @@
               <span class="session-row-preview">{item.first_prompt || "Không có prompt"}</span>
               <span class="session-row-meta">
                 <code>{item.model_public_id || "—"}</code>
+                {#if item.profile_name}
+                  <span class="session-row-target" title={`Profile ${item.profile_name} · ${item.account_host ?? ""} · ${item.account_label ?? ""}`}>
+                    {item.profile_name}{item.account_label ? ` · ${item.account_label}` : ""}
+                  </span>
+                {/if}
                 <span>{item.message_count} msg</span>
                 <time>{relativeTime(item.updated_at)}</time>
               </span>
@@ -694,6 +739,19 @@
             <code>{active.model_public_id}</code>
             <span>{active.kind === "api" ? "API" : "DESKTOP"}</span>
             <span>{active.message_count} MSG</span>
+            {#if active.profile_name}
+              <span class="ident-target" title="Profile Chromium đã chạy phiên này">
+                {active.profile_name}{active.account_label ? ` · ${active.account_label}` : ""}
+              </span>
+            {/if}
+            {#if active.site_conversation_url}
+              <button
+                class="ident-link"
+                disabled={openingConversation}
+                title={`Mở ${active.site_conversation_url} trong profile ${active.profile_name ?? ""}`}
+                onclick={() => active && openConversation(active.id)}
+              >Xem trực tiếp</button>
+            {/if}
           </div>
         </div>
         <div class="session-tools">
@@ -763,6 +821,18 @@
               {/if}
               <button onclick={() => forkAt(message.seq)}>Tạo nhánh tại đây</button>
               {#if message.artifacts.length}<span>{message.artifacts.length} artifact</span>{/if}
+              {#if targetOf(message)}
+                <span class="message-target" title="Request này chạy trên profile/account nào">
+                  → {targetOf(message)}
+                </span>
+              {/if}
+              {#if conversationUrlOf(message)}
+                <button
+                  class="message-link"
+                  title={`Chép link: ${conversationUrlOf(message)}`}
+                  onclick={() => copyConversationUrl(conversationUrlOf(message))}
+                >Chép link</button>
+              {/if}
               <code>{message.char_count.toLocaleString()} chars</code>
             </footer>
           </article>
@@ -843,6 +913,11 @@
         {/if}
 
         {#if sending}
+          {#if liveTarget?.label}
+            <span class="live-target" title="Server đã chọn profile/account này cho request đang chạy">
+              → {liveTarget.label}
+            </span>
+          {/if}
           <button class="tool-button danger-tool" onclick={() => abortCtrl?.abort()}>Dừng · {elapsed}s</button>
         {:else}
           <button
@@ -980,6 +1055,11 @@
                       {#if openedTargets.includes(target.account_id)}
                         <i class="bench-open-flag">đang mở</i>
                       {/if}
+                      {#if target.busy > 0}
+                        <i class="bench-busy-flag" title="Request đang chạy trên account này">
+                          {target.busy} đang chạy
+                        </i>
+                      {/if}
                     </label>
                     {#if target.models.length > 1}
                       <select
@@ -1065,7 +1145,12 @@
   {/if}
 
   {#if inspected && active}
-    <MessageInspector message={inspected} session={active} onclose={() => (inspected = null)} />
+    <MessageInspector
+      message={inspected}
+      session={active}
+      onclose={() => (inspected = null)}
+      onopen={() => active && openConversation(active.id)}
+    />
   {/if}
 </section>
 

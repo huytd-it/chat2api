@@ -651,7 +651,7 @@
                   <option value={false}>Chạy ẩn (headless)</option>
                   <option value={true}>Hiện cửa sổ Chromium</option>
                 </select>
-                <p class="text-xs text-muted-foreground">Áp dụng cho request gửi từ trang Sessions.</p>
+                <p class="text-xs text-muted-foreground">Chỉ áp dụng cho request gửi từ trang Sessions. Client API bên ngoài dùng <code class="font-data">API_HEADED</code> ở nhóm API bên dưới.</p>
               </div>
             </Card.Content>
           </Card.Root>

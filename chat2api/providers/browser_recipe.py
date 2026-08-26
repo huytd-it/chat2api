@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import hashlib
 import os
 import re
 import sys
@@ -7,11 +8,13 @@ import time
 from pathlib import Path
 from typing import AsyncIterator
 
-from .. import accounts, store
+from .. import accounts, settings, store
 from ..prompt import flatten_messages
 from .base import ModelInfo, Provider
 
 LOGIN_STRATEGIES = {"round_robin", "fill_first"}
+# Cách chọn account khi client không tự chỉ định (API_ACCOUNT_STRATEGY).
+ASSIGN_STRATEGIES = {"least_busy", "round_robin", "sticky_session", "off"}
 
 # Mỗi mục: (env override, giá trị mặc định ms)
 TIMING_DEFAULTS = {
@@ -30,6 +33,30 @@ def _timing(cfg: dict, key: str) -> int:
         return max(0, int(raw))
     except (TypeError, ValueError):
         return default
+
+
+def _page_url(page) -> str | None:
+    """URL hiện tại của tab, None khi tab đã đóng/hỏng — không được ném lỗi."""
+    try:
+        url = page.url
+    except Exception:
+        return None
+    return url if url and url not in ("about:blank", "") else None
+
+
+def _profile_named(name: str, profiles_dir: Path):
+    """Profile theo tên, cấp thư mục user_data_dir nếu nó chưa từng được mở.
+
+    Hàng do importer tạo từ file `.accounts` có `user_data_dir` rỗng — mở
+    persistent context với đường dẫn rỗng thì Chromium chết. `ensure_profile`
+    chỉ điền vào chỗ trống, không đụng cấu hình người dùng đã sửa.
+    """
+    from .. import profiles as profiles_mod
+
+    try:
+        return profiles_mod.ensure_profile(name, profiles_dir)
+    except (ValueError, RuntimeError):
+        return profiles_mod.get_profile(name)
 
 
 async def _sleep_ms(ms: int) -> None:
@@ -178,6 +205,71 @@ class _AccountRotator:
             return account
 
 
+class Assignment:
+    """Account + profile + tab mà đúng MỘT request sẽ chạy trên.
+
+    Sinh ra trước khi gọi `stream()` chứ không phải bên trong, vì hai lý do:
+    handler phải trả header "request này đi tới đâu" ngay lúc mở response (SSE
+    không sửa header được nữa sau byte đầu), và chỗ giữ *chỗ* (`_inflight` của
+    recipe) phải được đặt trước khi request kế tiếp chọn account — nếu không hai
+    request đến cùng lúc đều thấy mọi account đang rảnh và cùng nhảy vào một cái.
+
+    Người tạo ra assignment cũng là người phải `release()` nó; `release()` gọi
+    nhiều lần vẫn an toàn.
+    """
+
+    __slots__ = (
+        "_released",
+        "account_id",
+        "account_label",
+        "conversation_url",
+        "ctx_key",
+        "headed",
+        "host",
+        "html",
+        "profile",
+        "profile_id",
+        "profile_name",
+        "recipe",
+        "slot",
+        "storage_state",
+    )
+
+    def __init__(self, recipe, ctx_key: str, *, account_id: int | None = None,
+                 account_label: str = "", profile_id: int | None = None,
+                 profile_name: str | None = None, host: str = "", slot: int = 0,
+                 storage_state: Path | None = None, profile=None):
+        self.recipe = recipe
+        self.ctx_key = ctx_key
+        self.account_id = account_id
+        self.account_label = account_label
+        self.profile_id = profile_id
+        self.profile_name = profile_name
+        self.host = host
+        self.slot = slot
+        self.storage_state = storage_state
+        self.profile = profile
+        # Điền sau khi stream xong: link hội thoại thật trên site và HTML gốc.
+        self.conversation_url: str | None = None
+        self.html: str | None = None
+        # Điền khi stream bắt đầu: request này có mở cửa sổ nhìn thấy được không.
+        self.headed: bool | None = None
+        self._released = False
+
+    @property
+    def label(self) -> str:
+        """Một dòng đọc được cho log và header: 'profile/host/account'."""
+        parts = [self.profile_name or "-", self.host or "-", self.account_label or "-"]
+        return "/".join(parts)
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        if self.recipe is not None:
+            self.recipe._unreserve(self.ctx_key)
+
+
 class BrowserRecipe(Provider):
     def __init__(self, recipe: dict, base_dir: Path, pool, headed: bool = False,
                  accounts_root: Path | None = None):
@@ -221,6 +313,11 @@ class BrowserRecipe(Provider):
         # cùng account phải xếp hàng qua _locks.
         self._pages: dict[str, object] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        # Số request đang giữ mỗi ctx_key (đã nhận nhưng chưa xong). Đây là thứ
+        # `least_busy` đọc để toả request ra nhiều account thay vì dồn một chỗ.
+        self._inflight: dict[str, int] = {}
+        self._assign_lock = asyncio.Lock()
+        self._assign_cursor = 0
         # Chế độ profile là opt-in và đọc từ env ngay tại đây thay vì nhận qua
         # tham số: provider được dựng ở nhiều chỗ (router, analyzer, test) mà
         # không phải chỗ nào cũng cầm Config.
@@ -279,10 +376,132 @@ class BrowserRecipe(Provider):
                 return storage_state
         return None
 
+    # ------------------------------------------------- chọn account cho request
+
+    def _reserve(self, ctx_key: str) -> None:
+        self._inflight[ctx_key] = self._inflight.get(ctx_key, 0) + 1
+
+    def _unreserve(self, ctx_key: str) -> None:
+        left = self._inflight.get(ctx_key, 0) - 1
+        if left > 0:
+            self._inflight[ctx_key] = left
+        else:
+            self._inflight.pop(ctx_key, None)
+
+    def inflight(self, ctx_key: str = "") -> int:
+        if ctx_key:
+            return self._inflight.get(ctx_key, 0)
+        return sum(self._inflight.values())
+
+    def _ctx_key_for(self, account_id: int, slot: int) -> str:
+        """Slot 0 giữ đúng tên cũ để tab headed đã mở bằng `open_target` dùng lại được."""
+        base = f"{self.slug}::account-{account_id}"
+        return base if slot == 0 else f"{base}#{slot}"
+
+    def db_accounts(self) -> list[dict]:
+        """Account trong DB phục vụ domain của recipe này (blocking — SQLite).
+
+        Đây mới là danh sách "gửi tới Account/Profile nào" mà UI hiểu được: kho
+        file `.accounts/` chỉ có tên, không có profile Chromium đi kèm.
+        """
+        db = store.default()
+        if db is None or not self.domain:
+            return []
+        try:
+            rows = db.query(
+                "SELECT a.id, a.label, a.profile_id, p.name AS profile_name, d.host "
+                "FROM account a JOIN profile p ON p.id = a.profile_id "
+                "JOIN domain d ON d.id = a.domain_id "
+                "WHERE a.disabled = 0 AND (d.host = ? OR d.host = ?) "
+                "ORDER BY a.id", (self.domain, "www." + self.domain))
+        except Exception:
+            return []
+        return [dict(row) for row in rows]
+
+    def _auto_enabled(self) -> bool:
+        """Tự gán account/profile được bật không.
+
+        Tắt khi người dùng chọn `off`, và khi engine là cloak — `launch_context_async`
+        không nhận `user_data_dir` nên không có persistent profile để gán.
+        """
+        strategy = settings.current("API_ACCOUNT_STRATEGY")
+        if strategy not in ASSIGN_STRATEGIES or strategy == "off":
+            return False
+        return os.environ.get("BROWSER_ENGINE", "playwright").strip().lower() != "cloak"
+
+    async def assign(self, account_id: int | None = None,
+                     sticky_key: str = "") -> Assignment:
+        """Chọn (và giữ chỗ) account + profile + tab cho một request.
+
+        `account_id` là chỉ định tường minh của client (header
+        X-Chat2api-Account-Id) — luôn thắng mọi chiến lược. Người gọi phải
+        `release()` assignment khi request kết thúc.
+        """
+        slots = max(1, settings.current_int("API_MAX_CONCURRENT_PER_ACCOUNT", 1))
+        if account_id is not None:
+            row, profile = await asyncio.to_thread(self.resolve_target, account_id)
+            async with self._assign_lock:
+                slot = self._quietest_slot(int(row["id"]), slots)
+                return self._make(row, profile, slot)
+
+        rows = await asyncio.to_thread(self.db_accounts) if self._auto_enabled() else []
+        if rows:
+            async with self._assign_lock:
+                row = self._pick_row(rows, sticky_key)
+                slot = self._quietest_slot(int(row["id"]), slots)
+                profile = await asyncio.to_thread(
+                    _profile_named, row["profile_name"], self._profiles_dir)
+                if profile is not None:
+                    return self._make(row, profile, slot)
+
+        # Không có account nào trong DB (hoặc chiến lược tắt): đường cũ — kho
+        # file `.accounts/` + storage_state, và hạn mức dùng thử ẩn danh.
+        name, storage_state = await self._rotator.next()
+        ctx_key = self.slug if len(self._accounts) <= 1 else f"{self.slug}::{name}"
+        async with self._assign_lock:
+            self._reserve(ctx_key)
+        return Assignment(self, ctx_key, account_label="" if name == "__anon__" else name,
+                          host=self.domain, storage_state=storage_state)
+
+    def _make(self, row, profile, slot: int) -> Assignment:
+        ctx_key = self._ctx_key_for(int(row["id"]), slot)
+        self._reserve(ctx_key)
+        return Assignment(
+            self, ctx_key, account_id=int(row["id"]), account_label=row["label"] or "main",
+            profile_id=int(row["profile_id"]), profile_name=row["profile_name"],
+            host=row["host"], slot=slot, profile=profile)
+
+    def _quietest_slot(self, account_id: int, slots: int) -> int:
+        keys = [self._ctx_key_for(account_id, slot) for slot in range(slots)]
+        return min(range(slots), key=lambda i: (self._inflight.get(keys[i], 0), i))
+
+    def _pick_row(self, rows: list[dict], sticky_key: str) -> dict:
+        strategy = settings.current("API_ACCOUNT_STRATEGY")
+        if strategy == "sticky_session" and sticky_key:
+            digest = hashlib.sha256(sticky_key.encode("utf-8", "replace")).digest()
+            return rows[int.from_bytes(digest[:8], "big") % len(rows)]
+        # sticky_session không có khoá để bám (client không gửi session id) thì
+        # xoay vòng, chứ không phải luôn trả về account đầu tiên.
+        if strategy in ("round_robin", "sticky_session"):
+            row = rows[self._assign_cursor % len(rows)]
+            self._assign_cursor += 1
+            return row
+        # least_busy: account nào ít request đang chạy nhất. Con trỏ xoay vòng
+        # phá hoà — nếu không, lúc mọi account đều rảnh thì request nào cũng
+        # rơi vào account đầu tiên và "nhiều request một lúc" lại về một profile.
+        offset = self._assign_cursor % len(rows)
+        self._assign_cursor += 1
+        order = [rows[(offset + i) % len(rows)] for i in range(len(rows))]
+        return min(order, key=lambda r: self.account_load(int(r["id"])))
+
+    def account_load(self, account_id: int) -> int:
+        """Số request đang chạy trên một account (cộng mọi slot của nó)."""
+        prefix = f"{self.slug}::account-{account_id}"
+        return sum(count for key, count in self._inflight.items()
+                   if key == prefix or key.startswith(prefix + "#"))
+
     def resolve_target(self, account_id: int):
         """Resolve a desktop test target and reject cross-domain accounts."""
-        from .. import profiles as profiles_mod
-
         db = store.default()
         if db is None:
             raise ValueError("Kho dữ liệu chưa mở")
@@ -300,23 +519,52 @@ class BrowserRecipe(Provider):
         if account_domain != self.domain:
             raise ValueError(
                 f"Account {account_id} thuộc {row['host']}, không dùng được cho {self.domain}")
-        profile = profiles_mod.get_profile(row["profile_name"])
+        profile = _profile_named(row["profile_name"], self._profiles_dir)
         if profile is None:
             raise ValueError(f"Profile '{row['profile_name']}' không tồn tại")
         return row, profile
 
-    async def open_target(self, account_id: int):
-        """Open the exact persistent-profile tab later used by ``stream``."""
+    def resolve_headed(self, headed: bool | None, profile) -> bool:
+        """Request này có mở cửa sổ nhìn thấy được không.
+
+        Thứ tự: header ``X-Chat2api-Headed`` của client → ``API_HEADED`` →
+        ô "Chạy ẩn" của chính profile → mặc định của provider. Đặt ở một chỗ để
+        request API và nút Gửi ở bàn test đi đúng cùng một đường.
+        """
+        if headed is not None:
+            return headed
+        mode = settings.current("API_HEADED")
+        if mode == "always":
+            return True
+        if mode == "never":
+            return False
+        if profile is not None:
+            return not profile.headless
+        return self._headed
+
+    async def open_profile_page(self, profile, ctx_key: str, headed: bool):
+        """Tab dài hạn trong một persistent profile, đúng chế độ hiện/ẩn đã chọn.
+
+        Profile đang chạy nền mà request muốn thấy cửa sổ thì phải dựng lại tiến
+        trình: Chromium không "hiện" được một cửa sổ chưa từng tồn tại. Chiều
+        ngược lại thì dùng lại cửa sổ đang mở — đóng nó đi là cướp mất thứ người
+        dùng đang nhìn.
+        """
         from dataclasses import replace
 
+        if headed and self.pool.profile_headless(profile.name) is True:
+            await self.pool.drop_profile(profile.name)
+        want = replace(profile, headless=False) if headed else profile
+        return await self.pool.page_for(want, ctx_key)
+
+    async def open_target(self, account_id: int, ctx_key: str = "", headed: bool = True):
+        """Open the exact persistent-profile tab later used by ``stream``."""
         row, profile = self.resolve_target(account_id)
-        tab_key = f"{self.slug}::account-{account_id}"
+        tab_key = ctx_key or self._ctx_key_for(account_id, 0)
         # Ghim ngay từ đầu: mở nhiều target một lượt thì lần mở sau không được
         # phép đóng profile/tab mà lần mở trước vừa dựng xong.
         async with self.pool.hold(profile.name, tab_key):
-            if self.pool.profile_headless(profile.name) is True:
-                await self.pool.drop_profile(profile.name)
-            page = await self.pool.page_for(replace(profile, headless=False), tab_key)
+            page = await self.open_profile_page(profile, tab_key, headed)
             await page.goto(self._new_chat_url or self.url, wait_until="domcontentloaded",
                             timeout=min(int(self.ds.get("timeout_ms", 120000)), 60000))
         return row, page
@@ -498,18 +746,32 @@ class BrowserRecipe(Provider):
 
     async def stream(self, messages: list[dict], model_id: str,
                      headed: bool | None = None,
-                     target_account_id: int | None = None) -> AsyncIterator[str]:
+                     target_account_id: int | None = None,
+                     assignment: "Assignment | None" = None) -> AsyncIterator[str]:
         prompt = flatten_messages(messages)
         self.last_response_html = None
-        target_profile = None
-        if target_account_id is not None:
-            target, target_profile = self.resolve_target(target_account_id)
-            account_name, storage_state = target["label"], None
-            ctx_key = f"{self.slug}::account-{target_account_id}"
-        else:
-            account_name, storage_state = await self._rotator.next()
-            ctx_key = self.slug if len(self._accounts) <= 1 else f"{self.slug}::{account_name}"
-        effective_headed = self._headed if headed is None else headed
+        # Handler thường gán sẵn (để trả header "đi tới đâu" trước khi stream mở);
+        # gọi thẳng stream() không kèm assignment vẫn chạy được, tự gán rồi tự nhả.
+        owned = assignment is None
+        if owned:
+            assignment = await self.assign(target_account_id)
+        try:
+            async for delta in self._run(prompt, assignment, headed):
+                yield delta
+        finally:
+            if owned:
+                assignment.release()
+
+    async def _run(self, prompt: str, assignment: "Assignment",
+                   headed: bool | None) -> AsyncIterator[str]:
+        target_profile = assignment.profile
+        storage_state = assignment.storage_state
+        ctx_key = assignment.ctx_key
+        # Handler đã chốt và đã trả về trong header rồi thì phải chạy đúng cái
+        # đó, không tự quyết lại — nếu không, header nói một đằng, cửa sổ một nẻo.
+        if assignment.headed is None:
+            assignment.headed = self.resolve_headed(headed, target_profile)
+        effective_headed = assignment.headed
         timeout_ms = int(self.ds.get("timeout_ms", 120000))
         quiet_ms = int(self.ds.get("quiet_ms", 3000))
         # Page dùng chung cho mỗi ctx_key nên hai request cùng account phải nối
@@ -517,10 +779,7 @@ class BrowserRecipe(Provider):
         async with self._lock_for(ctx_key), contextlib.AsyncExitStack() as stack:
             if target_profile is not None:
                 await stack.enter_async_context(self.pool.hold(target_profile.name, ctx_key))
-                if effective_headed:
-                    _, page = await self.open_target(target_account_id)
-                else:
-                    page = await self.pool.page_for(target_profile, ctx_key)
+                page = await self.open_profile_page(target_profile, ctx_key, effective_headed)
             else:
                 page = await self._acquire_page(ctx_key, storage_state, effective_headed)
             deadline = time.monotonic() + timeout_ms / 1000
@@ -544,11 +803,16 @@ class BrowserRecipe(Provider):
                 dtype = self.ds.get("type", "stable_text")
                 stable_since = None
                 last = ""
+                # HTML gốc giữ ở biến cục bộ chứ không phải trên self: hai
+                # request song song (hai account) dùng chung một instance
+                # provider, ghi vào self là cái sau đè lên cái trước.
+                captured_html: str | None = None
                 while True:
                     if time.monotonic() > deadline:
                         raise TimeoutError(f"recipe '{self.slug}' timeout sau {timeout_ms}ms")
                     text, reply_html = await self._reply(page)
                     if reply_html is not None:
+                        captured_html = reply_html
                         self.last_response_html = reply_html
                     if text != last:
                         if (not self._structured_markdown and text.startswith(last)
@@ -566,11 +830,18 @@ class BrowserRecipe(Provider):
                         done = ((count > 0) == appear) and stable_since is not None \
                             and (time.monotonic() - stable_since) * 1000 >= min(quiet_ms, 1000)
                     if done:
+                        assignment.html = captured_html
+                        assignment.conversation_url = _page_url(page)
                         if self._structured_markdown:
                             yield last
                         return
                     await asyncio.sleep(0.5)
             finally:
+                if assignment.conversation_url is None:
+                    # Cả đường lỗi/timeout cũng phải để lại link: đó chính là chỗ
+                    # người dùng cần mở ra xem site thật đang hiện cái gì.
+                    assignment.conversation_url = _page_url(page)
+                    assignment.html = captured_html
                 # Không đóng page/browser ở đây: cửa sổ phải còn nguyên sau khi
                 # trả lời xong, chỉ đóng khi người dùng tắt tay hoặc gọi
                 # close_browser(). keep_context=false là lựa chọn tường minh

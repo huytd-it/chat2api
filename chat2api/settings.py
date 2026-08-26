@@ -53,6 +53,33 @@ FIELDS: list[dict] = [
      "apply": "restart", "label": "Số tab tối đa trong một profile",
      "help": "Vượt thì tab RẢNH ít dùng nhất bị đóng, browser vẫn mở. Đây là trần "
              "cho số domain/account của cùng một profile chạy song song."},
+    {"key": "API_ACCOUNT_STRATEGY", "type": "choice", "default": "least_busy", "group": "API",
+     "apply": "reload", "label": "Cách chọn account cho mỗi request",
+     "choices": ["least_busy", "round_robin", "sticky_session", "off"],
+     "help": "Client gọi /v1/chat/completions mà không gửi header X-Chat2api-Account-Id thì "
+             "server tự chọn. least_busy: ưu tiên account đang rảnh nhất (nhiều request một "
+             "lúc sẽ toả ra nhiều profile). round_robin: xoay vòng đều. sticky_session: cùng "
+             "một session luôn về đúng một account. off: giữ cách cũ (storage_state, không gắn "
+             "profile vào request)."},
+    {"key": "API_MAX_CONCURRENT_PER_ACCOUNT", "type": "int", "default": "1", "group": "API",
+     "apply": "reload", "label": "Số request song song trên một account",
+     "help": "Mỗi slot là một tab riêng trong cùng profile. Để 1 nếu site chỉ chịu được một "
+             "hội thoại mỗi lúc; request thứ hai của cùng account sẽ xếp hàng."},
+    {"key": "API_MAX_CONCURRENT_REQUESTS", "type": "int", "default": "0", "group": "API",
+     "apply": "reload", "label": "Trần request chat song song",
+     "help": "0 = không giới hạn. Vượt trần thì request mới chờ, không bị từ chối."},
+    {"key": "API_HEADED", "type": "choice", "default": "auto", "group": "API",
+     "apply": "reload", "label": "Hiện cửa sổ browser cho request API",
+     "choices": ["auto", "always", "never"],
+     "help": "always: mọi request API mở cửa sổ Chromium nhìn thấy được — giống hệt nút "
+             "Gửi ở bàn test Sessions. never: luôn chạy ẩn. auto: theo ô 'Chạy ẩn' của từng "
+             "profile ở tab Profiles. Header X-Chat2api-Headed của client vẫn thắng cả ba."},
+    {"key": "API_SESSION_MODE", "type": "choice", "default": "per_request", "group": "API",
+     "apply": "reload", "label": "Gom request thành session",
+     "choices": ["per_request", "client_window"],
+     "help": "per_request: mỗi request không kèm header X-Chat2api-Session-Id là một session "
+             "riêng. client_window: gom các request cùng client + model trong 30 phút vào "
+             "chung một session."},
     {"key": "RECIPE_TIMEOUT_MS", "type": "int", "default": "120000", "group": "Server",
      "apply": "restart", "label": "Hạn chờ recipe trả lời (ms)"},
     {"key": "ANON_TRIAL_LIMIT", "type": "int", "default": "20", "group": "Server",
@@ -102,6 +129,32 @@ def env_locked(key: str) -> bool:
 def shadowed(keys) -> list[str]:
     """Trong các khoá vừa lưu, khoá nào bị `.env` che mất."""
     return sorted(key for key in keys if key in _env_keys)
+
+
+
+def current(key: str) -> str:
+    """Giá trị đang chạy của một khoá — không phải giá trị lúc khởi động.
+
+    `preload()` và `save()` đều bơm vào `os.environ`, nên đọc từ đó là cách duy
+    nhất để một khoá `apply: reload` có hiệu lực ngay khi người dùng bấm Lưu.
+    """
+    field = BY_KEY.get(key)
+    if field is None:
+        return ""
+    value = os.environ.get(key, "")
+    return value if value != "" else str(field["default"])
+
+
+def current_bool(key: str) -> bool:
+    return current(key).strip().lower() in TRUE
+
+
+def current_int(key: str, minimum: int | None = None) -> int:
+    try:
+        value = int(current(key))
+    except (TypeError, ValueError):
+        value = int(BY_KEY[key]["default"])
+    return value if minimum is None else max(minimum, value)
 
 
 def stored() -> dict[str, str]:

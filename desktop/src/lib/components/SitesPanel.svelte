@@ -1,58 +1,56 @@
 <script lang="ts">
   import { apiKey, showToast } from "../stores";
-  import { accounts, recipes, recipesLoading, refreshAccounts, refreshAfterRecipeChange, refreshAfterRecipeDelete, refreshDomains, refreshRecipes } from "../sync";
-  import { cancelAccountLogin, closeRecipeBrowser, completeDomainLogin, deleteDomainAccount, deleteRecipe, reloadRecipe, reopenDomainAccount, type AccountInfo, type RecipeInfo } from "../api";
-  import AccountDialog from "./AccountDialog.svelte";
+  import { profiles, recipes, recipesLoading, refreshAfterRecipeChange, refreshAfterRecipeDelete, refreshProfiles, refreshRecipes } from "../sync";
+  import { closeRecipeBrowser, deleteRecipe, reloadRecipe, type RecipeInfo } from "../api";
   import { Button } from "$lib/components/ui/button";
   import { Badge, type BadgeVariant } from "$lib/components/ui/badge";
   import * as Card from "$lib/components/ui/card";
   import * as AlertDialog from "$lib/components/ui/alert-dialog";
-  import * as Table from "$lib/components/ui/table";
-  import { Browser, CaretDown, CaretRight, CircleNotch, Plus, Repeat, Trash, Users, WarningCircle, X } from "phosphor-svelte";
+  import { Browser, CaretDown, CaretRight, CircleNotch, Repeat, Stack, Trash, WarningCircle, X } from "phosphor-svelte";
 
   interface Props {
     /** Slug cần cuộn tới và làm nổi bật (ví dụ ngay sau khi tích hợp thành công). */
     highlightSlug?: string | null;
     onHighlighted?: () => void;
+    /** Chuyển sang tab Profiles — nơi duy nhất sửa được profile/account. */
+    onManageProfiles?: () => void;
   }
-  let { highlightSlug = null, onHighlighted }: Props = $props();
+  let { highlightSlug = null, onHighlighted, onManageProfiles }: Props = $props();
 
   let expanded = $state<Record<string, boolean>>({});
   let busySlug = $state<string | null>(null);
-  let busyAccount = $state<string | null>(null);
-  let dialogDomain = $state<string | null>(null);
-  let reopenSession = $state<string | null>(null);
-  let reopenDomain = $state("");
-  let reopenName = $state("");
-  let reopenBusy = $state(false);
   let deleteRecipeTarget = $state<string | null>(null);
-  let deleteAccountTarget = $state<{ domain: string; name: string } | null>(null);
   let panelError = $state("");
   let refreshing = $state(false);
 
-  function accountsOf(domain: string | undefined): AccountInfo[] { return domain ? $accounts.find((d) => d.domain === domain)?.accounts ?? [] : []; }
+  /** Profile đang đăng nhập một domain, theo đúng bảng `profile`/`account` mà
+   * router dùng để chọn account cho mỗi request. Panel này chỉ ĐỌC: mọi thao
+   * tác thêm/sửa/xóa nằm ở tab Profiles, để một thứ chỉ có một chỗ quản lý. */
+  function profilesServing(domain: string | undefined) {
+    if (!domain) return [];
+    const wanted = domain.toLowerCase().replace(/^www\./, "");
+    return $profiles
+      .map((profile) => ({
+        profile,
+        accounts: profile.accounts.filter(
+          (account) => account.host.toLowerCase().replace(/^www\./, "") === wanted && !account.disabled),
+      }))
+      .filter((item) => item.accounts.length > 0);
+  }
+
   function toggle(slug: string) { expanded = { ...expanded, [slug]: !expanded[slug] }; }
   function fail(e: unknown) { panelError = (e as Error).message; showToast(panelError); }
-  async function refresh() { refreshing = true; panelError = ""; try { await Promise.all([refreshRecipes(), refreshAccounts(), refreshDomains()]); } catch (e) { fail(e); } finally { refreshing = false; } }
+  async function refresh() { refreshing = true; panelError = ""; try { await Promise.all([refreshRecipes(), refreshProfiles()]); } catch (e) { fail(e); } finally { refreshing = false; } }
   async function onReload(slug: string) { busySlug = slug; panelError = ""; try { await reloadRecipe($apiKey, slug); await refreshAfterRecipeChange(); } catch (e) { fail(e); } finally { busySlug = null; } }
   async function onCloseBrowser(slug: string) { busySlug = slug; panelError = ""; try { const closed = await closeRecipeBrowser($apiKey, slug); showToast(closed ? `Đã tắt browser của ${slug}` : `Browser của ${slug} chưa mở`); } catch (e) { fail(e); } finally { busySlug = null; } }
   async function confirmDeleteRecipe() {
     const slug = deleteRecipeTarget; if (!slug) return; deleteRecipeTarget = null; busySlug = slug; panelError = "";
     try { await deleteRecipe($apiKey, slug); showToast(`Đã xóa recipe ${slug}`); await refreshAfterRecipeDelete(); } catch (e) { fail(e); } finally { busySlug = null; }
   }
-  async function onReopen(domain: string, name: string) { busyAccount = `${domain}/${name}`; panelError = ""; try { const res = await reopenDomainAccount($apiKey, domain, name); reopenSession = res.session_id; reopenDomain = domain; reopenName = name; } catch (e) { fail(e); } finally { busyAccount = null; } }
-  async function saveReopen() { if (!reopenSession) return; reopenBusy = true; panelError = ""; try { await completeDomainLogin($apiKey, reopenSession, reopenDomain, reopenName); showToast(`Đã cập nhật ${reopenDomain}/${reopenName}`); reopenSession = null; await refreshAccounts(); } catch (e) { fail(e); } finally { reopenBusy = false; } }
-  async function cancelReopen() { const session = reopenSession; reopenSession = null; if (session) await cancelAccountLogin($apiKey, reopenDomain, session).catch(() => {}); }
-  async function confirmDeleteAccount() {
-    const target = deleteAccountTarget; if (!target) return; deleteAccountTarget = null; const key = `${target.domain}/${target.name}`; busyAccount = key; panelError = "";
-    try { await deleteDomainAccount($apiKey, target.domain, target.name); showToast(`Đã xóa ${key}`); await Promise.all([refreshAccounts(), refreshRecipes()]); } catch (e) { fail(e); } finally { busyAccount = null; }
-  }
-  function formatWhen(seconds: number): string { return new Date(seconds * 1000).toLocaleString(); }
-  const orphanDomains = $derived($accounts.filter((d) => d.recipes.length === 0 && d.accounts.length > 0));
 
-  function healthOf(rec: RecipeInfo, accountCount: number): { label: string; variant: BadgeVariant } {
+  function healthOf(rec: RecipeInfo, profileCount: number): { label: string; variant: BadgeVariant } {
     if (rec.unhealthy) return { label: "Lỗi sức khỏe", variant: "destructive" };
-    if (rec.type === "BrowserRecipe" && accountCount === 0 && rec.trial) {
+    if (rec.type === "BrowserRecipe" && profileCount === 0 && rec.trial) {
       return { label: `Dùng thử: ${rec.trial.used}/${rec.trial.limit}`, variant: "warning" };
     }
     return { label: "Sẵn sàng", variant: "success" };
@@ -69,7 +67,7 @@
 </script>
 
 <Card.Root class="overflow-hidden" aria-labelledby="sites-title">
-  <Card.Header class="flex-row items-center justify-between gap-4 border-b"><div class="flex items-start gap-3"><div class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Browser size={19} /></div><div><Card.Title id="sites-title">Sites & accounts</Card.Title><Card.Description>Kiểm tra recipe, model và phiên đăng nhập theo domain.</Card.Description></div></div><Button variant="outline" size="sm" disabled={refreshing} onclick={refresh}><Repeat class={refreshing ? "animate-spin" : ""} /> {refreshing ? "Đang tải" : "Làm mới"}</Button></Card.Header>
+  <Card.Header class="flex-row items-center justify-between gap-4 border-b"><div class="flex items-start gap-3"><div class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Browser size={19} /></div><div><Card.Title id="sites-title">Sites</Card.Title><Card.Description>Recipe, model và domain. Đăng nhập nằm ở tab Profiles.</Card.Description></div></div><Button variant="outline" size="sm" disabled={refreshing} onclick={refresh}><Repeat class={refreshing ? "animate-spin" : ""} /> {refreshing ? "Đang tải" : "Làm mới"}</Button></Card.Header>
   <Card.Content class="p-0">
     {#if panelError}<div class="m-4 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive" role="alert"><WarningCircle class="mt-0.5 shrink-0" />{panelError}</div>{/if}
     {#if $recipesLoading && !$recipes.length}<div class="flex min-h-36 flex-col items-center justify-center gap-2 p-6 text-muted-foreground" role="status" aria-live="polite"><CircleNotch class="animate-spin" size={24} /><p class="text-sm">Đang tải recipes…</p></div>
@@ -77,51 +75,47 @@
 
     <div class="divide-y">
       {#each $recipes as rec (rec.slug)}
-        {@const isBrowser = rec.type === "BrowserRecipe"}{@const list = accountsOf(rec.domain)}{@const health = healthOf(rec, list.length)}
+        {@const isBrowser = rec.type === "BrowserRecipe"}{@const serving = profilesServing(rec.domain)}{@const health = healthOf(rec, serving.length)}
         <article id={`recipe-row-${rec.slug}`} class={highlightSlug === rec.slug ? "ring-2 ring-inset ring-primary/60 transition-shadow" : ""}>
           <button class="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 text-left hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring sm:grid-cols-[auto_minmax(10rem,1fr)_minmax(8rem,1fr)_auto_auto]" onclick={() => toggle(rec.slug)} aria-expanded={expanded[rec.slug] ?? false}>
-            {#if expanded[rec.slug]}<CaretDown />{:else}<CaretRight />{/if}<span class="min-w-0"><strong class="block truncate font-data text-sm">{rec.slug}</strong><span class="block truncate font-data text-xs text-muted-foreground sm:hidden">{rec.domain ?? "—"}</span></span><span class="hidden truncate font-data text-xs text-muted-foreground sm:block">{rec.domain ?? "—"}</span><Badge variant={health.variant}>{health.label}</Badge><span class="hidden text-xs text-muted-foreground sm:inline">{isBrowser ? `${list.length} account` : `${rec.models.length} model`}</span>
+            {#if expanded[rec.slug]}<CaretDown />{:else}<CaretRight />{/if}<span class="min-w-0"><strong class="block truncate font-data text-sm">{rec.slug}</strong><span class="block truncate font-data text-xs text-muted-foreground sm:hidden">{rec.domain ?? "—"}</span></span><span class="hidden truncate font-data text-xs text-muted-foreground sm:block">{rec.domain ?? "—"}</span><Badge variant={health.variant}>{health.label}</Badge><span class="hidden text-xs text-muted-foreground sm:inline">{isBrowser ? `${serving.length} profile` : `${rec.models.length} model`}</span>
           </button>
           {#if expanded[rec.slug]}
             <div class="grid gap-4 border-t bg-muted/15 p-4 sm:p-5">
               <dl class="grid gap-2 text-sm sm:grid-cols-[6rem_minmax(0,1fr)]"><dt class="text-muted-foreground">Models</dt><dd class="break-words font-data text-xs">{rec.models.join(", ") || "—"}</dd>{#if rec.url}<dt class="text-muted-foreground">URL</dt><dd class="break-all font-data text-xs">{rec.url}</dd>{/if}</dl>
               <div class="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => onReload(rec.slug)}><Repeat class={busySlug === rec.slug ? "animate-spin" : ""} /> Reload</Button>{#if isBrowser}<Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => onCloseBrowser(rec.slug)}><X /> Đóng browser</Button>{/if}<Button variant="destructive" size="sm" disabled={busySlug === rec.slug} onclick={() => (deleteRecipeTarget = rec.slug)}><Trash /> Xóa recipe</Button></div>
-              {#if isBrowser}<div class="border-t pt-4"><div class="mb-3 flex items-center justify-between gap-3"><div><h4 class="text-sm font-medium">Accounts</h4><p class="font-data text-xs text-muted-foreground">{rec.domain}</p></div><Button variant="outline" size="sm" onclick={() => (dialogDomain = rec.domain ?? "")}><Plus /> Thêm account</Button></div>
-                {#if list.length}<div class="overflow-x-auto rounded-lg border">
-                  <Table.Root>
-                    <Table.Header><Table.Row><Table.Head>Account</Table.Head><Table.Head>Cập nhật</Table.Head><Table.Head class="text-right">Thao tác</Table.Head></Table.Row></Table.Header>
-                    <Table.Body>
-                      {#each list as account (account.name)}
-                        {@const key = `${rec.domain}/${account.name}`}
-                        <Table.Row>
-                          <Table.Cell class="font-data text-xs">{account.name}</Table.Cell>
-                          <Table.Cell class="whitespace-nowrap text-xs text-muted-foreground">{formatWhen(account.updated_at)}</Table.Cell>
-                          <Table.Cell class="text-right"><div class="flex justify-end gap-1"><Button variant="ghost" size="sm" disabled={busyAccount === key} onclick={() => onReopen(rec.domain ?? "", account.name)}>Đăng nhập lại</Button><Button variant="destructive" size="icon-sm" aria-label={`Xóa account ${account.name}`} disabled={busyAccount === key} onclick={() => (deleteAccountTarget = { domain: rec.domain ?? "", name: account.name })}><Trash /></Button></div></Table.Cell>
-                        </Table.Row>
-                        {#if reopenSession && reopenDomain === rec.domain && reopenName === account.name}
-                          <Table.Row><Table.Cell colspan={3} class="whitespace-normal bg-warning/5 p-0"><div class="flex flex-col gap-3 p-3 sm:flex-row sm:items-center"><div class="min-w-0 flex-1"><p class="text-sm font-medium text-warning">Đăng nhập lại {reopenDomain}/{reopenName}</p><p class="text-xs text-muted-foreground">Hoàn tất trong browser rồi lưu để ghi đè state cũ.</p></div><div class="flex gap-2"><Button disabled={reopenBusy} onclick={saveReopen}>{#if reopenBusy}<CircleNotch class="animate-spin" />{/if} Lưu</Button><Button variant="outline" disabled={reopenBusy} onclick={cancelReopen}>Hủy</Button></div></div></Table.Cell></Table.Row>
-                        {/if}
+              {#if isBrowser}
+                <div class="border-t pt-4">
+                  <div class="mb-3 flex items-center justify-between gap-3">
+                    <div>
+                      <h4 class="text-sm font-medium">Chạy trên</h4>
+                      <p class="font-data text-xs text-muted-foreground">{rec.domain}</p>
+                    </div>
+                    <Button variant="outline" size="sm" onclick={() => onManageProfiles?.()}><Stack /> Quản lý ở Profiles</Button>
+                  </div>
+                  {#if serving.length}
+                    <ul class="grid gap-1.5">
+                      {#each serving as item (item.profile.id)}
+                        <li class="flex flex-wrap items-center gap-2 rounded-lg border bg-card px-3 py-2 text-sm">
+                          <span class={`size-2 shrink-0 rounded-full ${item.profile.open ? "bg-success" : "bg-muted-foreground"}`}></span>
+                          <strong class="font-data">{item.profile.name}</strong>
+                          {#each item.accounts as account (account.id)}<Badge variant="outline" class="font-data">{account.label}</Badge>{/each}
+                          <span class="ml-auto text-xs text-muted-foreground">{item.profile.open ? `đang chạy · ${item.profile.tabs} tab` : "rảnh"}</span>
+                        </li>
                       {/each}
-                    </Table.Body>
-                  </Table.Root>
+                    </ul>
+                    <p class="mt-2 text-xs text-muted-foreground">Request được chia lần lượt cho {serving.length} profile trên — càng nhiều profile thì càng nhiều request chạy song song được.</p>
+                  {:else}
+                    <div class="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning"><WarningCircle class="mt-0.5 shrink-0" />Chưa profile nào đăng nhập {rec.domain} — recipe đang chạy ẩn danh và sẽ hết lượt dùng thử. Thêm ở tab Profiles.</div>
+                  {/if}
                 </div>
-                {:else}<div class="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning"><WarningCircle class="mt-0.5 shrink-0" />Chưa có account — recipe đang chạy ẩn danh và sẽ hết lượt dùng thử.</div>{/if}
-              </div>{/if}
+              {/if}
             </div>
           {/if}
         </article>
       {/each}
-      {#if orphanDomains.length}
-        <div class="bg-muted/5 px-4 pt-4">
-          <h4 class="text-sm font-medium">Domain chưa gắn recipe</h4>
-          <p class="mt-0.5 text-xs text-muted-foreground">Các domain này có account đã lưu nhưng chưa recipe nào dùng — xóa nếu không còn cần, hoặc thêm integration mới dùng domain này.</p>
-        </div>
-      {/if}
-      {#each orphanDomains as d (d.domain)}<article class="grid gap-3 bg-muted/10 p-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><div><strong class="font-data text-sm">{d.domain}</strong><p class="text-xs text-muted-foreground">{d.accounts.length} account · chưa recipe nào dùng</p></div><div class="flex flex-wrap gap-1">{#each d.accounts as account (account.name)}<Button variant="destructive" size="sm" disabled={busyAccount === `${d.domain}/${account.name}`} onclick={() => (deleteAccountTarget = { domain: d.domain, name: account.name })}><Trash /> Xóa {account.name}</Button>{/each}</div></article>{/each}
     </div>
   </Card.Content>
 </Card.Root>
 
-{#if dialogDomain !== null}<AccountDialog domain={dialogDomain} lockDomain={Boolean(dialogDomain)} onclose={() => (dialogDomain = null)} />{/if}
-<AlertDialog.Root open={deleteRecipeTarget !== null} onOpenChange={(open) => { if (!open) deleteRecipeTarget = null; }}><AlertDialog.Content><AlertDialog.Header><AlertDialog.Title>Xóa recipe {deleteRecipeTarget}?</AlertDialog.Title><AlertDialog.Description>Recipe sẽ bị gỡ khỏi router. Các model của recipe này sẽ không còn khả dụng.</AlertDialog.Description></AlertDialog.Header><AlertDialog.Footer><AlertDialog.Cancel>Hủy</AlertDialog.Cancel><AlertDialog.Action variant="destructive" onclick={confirmDeleteRecipe}>Xóa recipe</AlertDialog.Action></AlertDialog.Footer></AlertDialog.Content></AlertDialog.Root>
-<AlertDialog.Root open={deleteAccountTarget !== null} onOpenChange={(open) => { if (!open) deleteAccountTarget = null; }}><AlertDialog.Content><AlertDialog.Header><AlertDialog.Title>Xóa account {deleteAccountTarget?.domain}/{deleteAccountTarget?.name}?</AlertDialog.Title><AlertDialog.Description>Recipe dùng domain này sẽ mất phiên đăng nhập và có thể quay lại chế độ trial hoặc anonymous.</AlertDialog.Description></AlertDialog.Header><AlertDialog.Footer><AlertDialog.Cancel>Hủy</AlertDialog.Cancel><AlertDialog.Action variant="destructive" onclick={confirmDeleteAccount}>Xóa account</AlertDialog.Action></AlertDialog.Footer></AlertDialog.Content></AlertDialog.Root>
+<AlertDialog.Root open={deleteRecipeTarget !== null} onOpenChange={(open) => { if (!open) deleteRecipeTarget = null; }}><AlertDialog.Content><AlertDialog.Header><AlertDialog.Title>Xóa recipe {deleteRecipeTarget}?</AlertDialog.Title><AlertDialog.Description>Recipe sẽ bị gỡ khỏi router. Các model của recipe này sẽ không còn khả dụng. Profile và đăng nhập không bị đụng tới.</AlertDialog.Description></AlertDialog.Header><AlertDialog.Footer><AlertDialog.Cancel>Hủy</AlertDialog.Cancel><AlertDialog.Action variant="destructive" onclick={confirmDeleteRecipe}>Xóa recipe</AlertDialog.Action></AlertDialog.Footer></AlertDialog.Content></AlertDialog.Root>

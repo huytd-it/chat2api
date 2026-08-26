@@ -131,10 +131,13 @@ export async function apiBase(): Promise<string> {
   return cachedBase;
 }
 
-function headers(key: string, headed = false, sessionId = "", accountId?: number): HeadersInit {
+function headers(key: string, headed?: boolean, sessionId = "", accountId?: number): HeadersInit {
   const h: Record<string, string> = { "Content-Type": "application/json" };
   if (key) h["Authorization"] = "Bearer " + key;
-  if (headed) h["X-Chat2api-Headed"] = "true";
+  // Gửi cả "false" chứ không chỉ "true": bỏ header đi nghĩa là "tuỳ server"
+  // (API_HEADED rồi tới ô Chạy ẩn của profile), mà ô chọn ở Settings là ý muốn
+  // dứt khoát của người dùng cho request gửi từ desktop.
+  if (headed !== undefined) h["X-Chat2api-Headed"] = headed ? "true" : "false";
   if (sessionId) h["X-Chat2api-Session-Id"] = sessionId;
   if (accountId != null) h["X-Chat2api-Account-Id"] = String(accountId);
   return h;
@@ -175,6 +178,16 @@ export interface RequestRecord {
   error_message: string | null;
   prompt_chars: number;
   completion_chars: number;
+  /** Account/profile mà ĐÚNG request này đã chạy trên. Null khi provider không
+   * phải browser recipe (Gemini, passthrough) hoặc khi agent fallback đã chạy
+   * thay recipe. */
+  account_id: number | null;
+  account_label: string | null;
+  account_host: string | null;
+  profile_id: number | null;
+  profile_name: string | null;
+  /** Link hội thoại thật trên site nguồn — mở ra là thấy đúng lượt chat này. */
+  conversation_url: string | null;
 }
 
 export interface SessionArtifact {
@@ -212,6 +225,10 @@ export interface SessionSummary {
   recipe_slug: string | null;
   profile_name: string | null;
   account_label: string | null;
+  account_host: string | null;
+  account_id: number | null;
+  profile_id: number | null;
+  site_conversation_url: string | null;
   pinned: number;
   archived: number;
   message_count: number;
@@ -225,6 +242,34 @@ export interface SessionSummary {
 export interface SessionDetail extends SessionSummary {
   tags: string[];
   messages: SessionMessage[];
+}
+
+/** Account/profile mà server đã chọn cho một request — đọc từ header response,
+ * có ngay từ byte đầu nên UI nói được "đang gửi tới đâu" trong lúc còn stream. */
+export interface ChatTarget {
+  sessionId: string;
+  accountId: number | null;
+  accountLabel: string;
+  profileId: number | null;
+  profileName: string;
+  /** 'profile/host/account' — một dòng hiển thị sẵn. */
+  label: string;
+}
+
+function readTarget(r: Response): ChatTarget {
+  const num = (name: string) => {
+    const raw = r.headers.get(name);
+    const value = raw ? Number(raw) : NaN;
+    return Number.isFinite(value) ? value : null;
+  };
+  return {
+    sessionId: r.headers.get("X-Chat2api-Session-Id") ?? "",
+    accountId: num("X-Chat2api-Account-Id"),
+    accountLabel: r.headers.get("X-Chat2api-Account-Label") ?? "",
+    profileId: num("X-Chat2api-Profile-Id"),
+    profileName: r.headers.get("X-Chat2api-Profile-Name") ?? "",
+    label: r.headers.get("X-Chat2api-Target") ?? "",
+  };
 }
 
 /** Streams an SSE chat completion, invoking onDelta for each content chunk.
@@ -241,10 +286,11 @@ export async function streamChat(
   messages: ChatMessage[],
   onDelta: (text: string) => void,
   signal?: AbortSignal,
-  headed = false,
+  headed?: boolean,
   sessionId = "",
   onSessionId?: (sessionId: string) => void,
   accountId?: number,
+  onTarget?: (target: ChatTarget) => void,
 ): Promise<void> {
   const base = await apiBase();
   const r = await fetch(base + "/v1/chat/completions", {
@@ -261,8 +307,9 @@ export async function streamChat(
     const data = await r.json().catch(() => ({}));
     throw new Error(data?.error?.message || r.statusText);
   }
-  const resolvedSessionId = r.headers.get("X-Chat2api-Session-Id");
-  if (resolvedSessionId && onSessionId) onSessionId(resolvedSessionId);
+  const target = readTarget(r);
+  if (target.sessionId && onSessionId) onSessionId(target.sessionId);
+  if (onTarget) onTarget(target);
   const reader = r.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
@@ -305,6 +352,8 @@ export interface TestTarget {
   recipes: string[];
   models: string[];
   ready: boolean;
+  /** Request đang chạy trên account này ngay lúc này. */
+  busy: number;
 }
 
 export interface TestTargetList {
@@ -342,6 +391,20 @@ export async function openTestTarget(
     headers: headers(key),
     body: JSON.stringify({ model, account_id: accountId }),
   });
+  return asJson(r);
+}
+
+/** Mở lại hội thoại của một session trong ĐÚNG profile đã chạy nó. Dán link vào
+ * browser thường chỉ thấy trang đăng nhập — chỉ profile đó mới có phiên. */
+export async function openSessionConversation(
+  key: string,
+  sessionId: string,
+): Promise<{ ok: true; profile: string; url: string }> {
+  const base = await apiBase();
+  const r = await fetch(
+    base + "/admin/sessions/" + encodeURIComponent(sessionId) + "/open",
+    { method: "POST", headers: headers(key) },
+  );
   return asJson(r);
 }
 

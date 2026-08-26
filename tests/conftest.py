@@ -1,8 +1,19 @@
+import atexit
 import os
+import shutil
+import tempfile
 
 import pytest
 
-from chat2api import settings
+# Phải đặt TRƯỚC mọi import chạm tới `chat2api.main`: module đó dựng `Config()`
+# ngay lúc import, và `Config()` đổ bảng `setting` của DB trong CHAT2API_DATA_DIR
+# vào os.environ. Trỏ vào kho thật của máy đang code thì một lần bấm Lưu ở app
+# sẽ lặng lẽ đổi kết quả cả suite — đúng những gì đã xảy ra với POOL_MAX_PROFILES.
+_DATA_DIR = tempfile.mkdtemp(prefix="chat2api-tests-")
+os.environ["CHAT2API_DATA_DIR"] = _DATA_DIR
+atexit.register(shutil.rmtree, _DATA_DIR, True)
+
+from chat2api import settings  # import phải nằm sau khi ghim CHAT2API_DATA_DIR
 
 
 @pytest.fixture(autouse=True)

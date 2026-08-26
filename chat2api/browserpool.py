@@ -374,6 +374,15 @@ class BrowserPool:
     def open_profiles(self) -> list[str]:
         return list(self._profiles)
 
+    @property
+    def busy_tabs(self) -> int:
+        """Số tab đang thật sự chạy một request.
+
+        Khác `inflight` của recipe (đếm cả request đang xếp hàng): `hold` chỉ
+        được vào SAU khoá của ctx_key, nên con số này là mức song song thật.
+        """
+        return len(self._busy_tabs)
+
     def tab_count(self, profile_name: str) -> int:
         prefix = f"{profile_name}::"
         return sum(1 for k, p in self._pages.items()

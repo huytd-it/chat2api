@@ -9,7 +9,8 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from . import accounts, apikeys, applog, auth, errors, profiles, sessions, store  # noqa: F401  (import auth để đăng ký dependency)
+from . import (accounts, apikeys, applog, auth, errors, profiles, sessions,  # noqa: F401  (import auth để đăng ký dependency)
+               settings, store)
 from .config import Config
 from .errors import OpenAIError
 from .providers.browser_recipe import TrialLimitExceeded
@@ -33,6 +34,66 @@ def _sse_error(e: OpenAIError) -> str:
     # hiển thị đúng thông điệp (timeout, hết lượt dùng thử, upstream fail...).
     return "data: " + json.dumps(
         {"error": {"message": e.message, "type": e.typ, "code": e.code}}) + "\n\n"
+
+
+def _target_headers(session_id: str, assignment) -> dict[str, str]:
+    """Header nói thẳng request này chạy trên profile/account nào.
+
+    Client đọc được ngay từ response đầu tiên, kể cả khi stream còn chưa có
+    delta nào — nên "gửi tới đâu" không còn phải suy đoán từ log.
+    """
+    out = {"X-Chat2api-Session-Id": session_id}
+    if assignment is None or assignment.account_id is None:
+        return out
+    out["X-Chat2api-Account-Id"] = str(assignment.account_id)
+    out["X-Chat2api-Account-Label"] = assignment.account_label or ""
+    out["X-Chat2api-Profile-Id"] = str(assignment.profile_id or "")
+    out["X-Chat2api-Profile-Name"] = assignment.profile_name or ""
+    out["X-Chat2api-Target"] = assignment.label
+    if assignment.headed is not None:
+        out["X-Chat2api-Headed"] = "true" if assignment.headed else "false"
+    return out
+
+
+def _reply_extras(provider, assignment, browser_recipe_cls) -> tuple[str | None, str | None]:
+    """(HTML gốc, link hội thoại) của đúng request này.
+
+    Đọc từ assignment chứ không từ `provider.last_response_html`: một provider
+    phục vụ nhiều request song song, thuộc tính trên instance là của lượt nào
+    ghi sau cùng chứ không phải của lượt đang kết thúc.
+    """
+    if assignment is not None:
+        return assignment.html, assignment.conversation_url
+    if isinstance(provider, browser_recipe_cls):
+        return provider.last_response_html, None
+    return None, None
+
+
+class _ConcurrencyGate:
+    """Trần số request chat chạy song song (API_MAX_CONCURRENT_REQUESTS).
+
+    Vượt trần thì request mới CHỜ chứ không bị từ chối — client gửi một loạt
+    request vẫn nhận đủ câu trả lời, chỉ là không mở 20 tab Chromium một lúc.
+    0 = không giới hạn.
+    """
+
+    def __init__(self) -> None:
+        self._sem: asyncio.Semaphore | None = None
+        self._size = 0
+
+    @asynccontextmanager
+    async def slot(self):
+        limit = settings.current_int("API_MAX_CONCURRENT_REQUESTS", 0)
+        if limit <= 0:
+            yield
+            return
+        # Đổi trần lúc đang chạy thì dựng semaphore mới; các request đang giữ
+        # semaphore cũ vẫn chạy tiếp, trần mới có hiệu lực đủ từ lượt sau.
+        if self._sem is None or self._size != limit:
+            self._sem = asyncio.Semaphore(limit)
+            self._size = limit
+        async with self._sem:
+            yield
 
 
 def create_app(cfg: Config) -> FastAPI:
@@ -126,11 +187,21 @@ def create_app(cfg: Config) -> FastAPI:
     # the Tauri desktop app's frontend runs on a different origin than this API
     # port, making every request cross-origin. No cookies/credentials are used
     # (auth is a Bearer token), so a wildcard origin is safe here.
+    # expose_headers là bắt buộc: trình duyệt chỉ cho JS đọc vài header
+    # safelisted, nên nếu không liệt kê ra đây thì desktop nhận response 200
+    # nhưng `headers.get("X-Chat2api-...")` luôn null — mất cả session id lẫn
+    # thông tin "request này đi tới account/profile nào".
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=[
+            "X-Chat2api-Session-Id", "X-Chat2api-Account-Id",
+            "X-Chat2api-Account-Label", "X-Chat2api-Profile-Id",
+            "X-Chat2api-Profile-Name", "X-Chat2api-Target",
+            "X-Chat2api-Conversation-Url", "X-Chat2api-Headed",
+        ],
     )
     errors.register_error_handler(app)
     app.state.cfg = cfg
@@ -138,6 +209,7 @@ def create_app(cfg: Config) -> FastAPI:
     app.state.login_manager = login_manager
     app.state.router = router
     app.state.recipe_publish_lock = asyncio.Lock()
+    app.state.chat_gate = _ConcurrencyGate()
 
     @app.get("/health")
     async def health(request: Request):
@@ -172,13 +244,13 @@ def create_app(cfg: Config) -> FastAPI:
         except ModelNotFound:
             applog.log(f"chat: model không tồn tại: {body.model}", "error")
             raise OpenAIError(404, "model_not_found", f"The model '{body.model}' does not exist")
-        applog.log(f"chat: model={body.model} stream={body.stream}")
         msgs = body.as_list()
         cid = "chatcmpl-" + uuid.uuid4().hex[:29]
         from .providers.browser_recipe import BrowserRecipe as BR
 
+        requested_session = sessions.normalize_session_id(
+            request.headers.get("x-chat2api-session-id"))
         target_account_id = None
-        target_profile_id = None
         raw_target = request.headers.get("x-chat2api-account-id", "").strip()
         if raw_target:
             if not isinstance(provider, BR):
@@ -186,28 +258,61 @@ def create_app(cfg: Config) -> FastAPI:
                                   "Chỉ browser recipe hỗ trợ chọn profile/account")
             try:
                 target_account_id = int(raw_target)
-                target, _ = provider.resolve_target(target_account_id)
-                target_profile_id = int(target["profile_id"])
-            except (TypeError, ValueError) as error:
+            except (TypeError, ValueError):
+                raise OpenAIError(400, "invalid_target",
+                                  f"X-Chat2api-Account-Id không phải số: {raw_target!r}")
+
+        # Chọn account/profile TRƯỚC khi mở response: SSE không sửa được header
+        # sau byte đầu, mà "request này đi tới đâu" phải trả về ngay. Đây cũng là
+        # chỗ hai request đến cùng lúc được tách ra hai account khác nhau — chọn
+        # muộn hơn (bên trong stream) thì cả hai đã cùng nhìn thấy mọi account rảnh.
+        assignment = None
+        if isinstance(provider, BR):
+            try:
+                assignment = await provider.assign(
+                    target_account_id, sticky_key=requested_session or "")
+            except ValueError as error:
                 raise OpenAIError(400, "invalid_target", str(error))
+            except TrialLimitExceeded as error:
+                applog.log(f"chat: hết lượt dùng thử ({provider.slug}): {error}", "warn")
+                raise OpenAIError(403, "trial_limit_exceeded", str(error))
 
         # Ghi một transaction trước provider và một transaction khi kết thúc;
-        # tuyệt đối không ghi từng SSE delta. Header này cho desktop nối nhiều
-        # lượt vào cùng session; client API không gửi vẫn được gom theo model +
-        # fingerprint trong cửa sổ 30 phút (xem sessions.begin).
-        recording = await asyncio.to_thread(
-            sessions.begin,
-            request.headers.get("x-chat2api-session-id"), body.model, provider.slug,
-            msgs, body.stream, request.headers.get("authorization", ""),
-            request.headers.get("user-agent", ""),
-            getattr(request.state, "api_key_id", None),
-            target_account_id, target_profile_id,
-        )
-        response.headers["X-Chat2api-Session-Id"] = recording.session_id
+        # tuyệt đối không ghi từng SSE delta. Header session cho desktop nối
+        # nhiều lượt vào cùng một bản ghi; client API không gửi thì mỗi request
+        # là một session riêng (đổi được bằng API_SESSION_MODE).
+        # Ba trạng thái, không phải hai: "true"/"false" là mệnh lệnh của client,
+        # KHÔNG gửi header (None) là nhường cho API_HEADED rồi tới ô "Chạy ẩn"
+        # của profile. Trước đây header vắng mặt bị hiểu thành "chạy ẩn", nên
+        # request API không bao giờ mở được cửa sổ dù cấu hình thế nào.
+        raw_headed = request.headers.get("x-chat2api-headed", "").strip().lower()
+        headed = True if raw_headed == "true" else False if raw_headed == "false" else None
 
-        # Chỉ dùng cho desktop test thủ công: chạy recipe trong cửa sổ Chromium
-        # hiện ra thay vì headless, để nhìn thẳng vào trang thật.
-        headed = request.headers.get("x-chat2api-headed", "").strip().lower() == "true"
+        try:
+            recording = await asyncio.to_thread(
+                sessions.begin,
+                requested_session, body.model, provider.slug,
+                msgs, body.stream, request.headers.get("authorization", ""),
+                request.headers.get("user-agent", ""),
+                getattr(request.state, "api_key_id", None),
+                assignment.account_id if assignment else None,
+                assignment.profile_id if assignment else None,
+                settings.current("API_SESSION_MODE"),
+            )
+        except Exception:
+            # Chỗ đã giữ ở `assign()` chỉ được nhả trong đường đi qua stream;
+            # hỏng trước đó mà không nhả thì account đó bận vĩnh viễn.
+            if assignment is not None:
+                assignment.release()
+            raise
+        if assignment is not None:
+            assignment.headed = provider.resolve_headed(headed, assignment.profile)
+        target_headers = _target_headers(recording.session_id, assignment)
+        response.headers.update(target_headers)
+        applog.log(
+            f"chat: model={body.model} stream={body.stream} session={recording.session_id[:8]}"
+            + (f" → {assignment.label}" if assignment and assignment.account_id else "")
+            + (" (cửa sổ)" if assignment and assignment.headed else ""))
 
         def fallback_ok(reason: str) -> bool:
             from .agents import llm
@@ -226,14 +331,24 @@ def create_app(cfg: Config) -> FastAPI:
 
         async def upstream():
             sent = {"n": 0}
-            if rt.is_unhealthy(provider.slug) and fallback_ok("unhealthy recipe"):
-                async for d in agent_stream():
+            # Trần song song ôm trọn cả stream: giữ chỗ từ lúc bắt đầu tới byte
+            # cuối, chứ không phải chỉ lúc mở tab.
+            async with request.app.state.chat_gate.slot():
+                if rt.is_unhealthy(provider.slug) and fallback_ok("unhealthy recipe"):
+                    async for d in agent_stream():
+                        yield d
+                    return
+                async for d in _run_provider(sent):
                     yield d
-                return
+
+        async def _run_provider(sent):
             try:
                 stream_kwargs = {"headed": headed} if isinstance(provider, BR) else {}
-                if target_account_id is not None:
-                    stream_kwargs["target_account_id"] = target_account_id
+                if assignment is not None:
+                    # Assignment đã mang sẵn account + profile + tab, nên không
+                    # truyền kèm target_account_id nữa (stream chỉ dùng nó khi
+                    # phải tự gán).
+                    stream_kwargs["assignment"] = assignment
                 async for d in provider.stream(msgs, local, **stream_kwargs):
                     sent["n"] += 1
                     yield d
@@ -293,12 +408,13 @@ def create_app(cfg: Config) -> FastAPI:
                     raise
                 finally:
                     text = "".join(parts)
-                    html = provider.last_response_html if isinstance(provider, BR) else None
+                    html, url = _reply_extras(provider, assignment, BR)
                     if cancelled:
                         await asyncio.to_thread(
                             sessions.finish, recording, text,
                             status="cancelled", error_code="client_cancelled",
-                            error_message="Client đã ngắt stream", finish_reason="error")
+                            error_message="Client đã ngắt stream", finish_reason="error",
+                            conversation_url=url)
                     elif final_error is not None:
                         status = ("timeout" if final_error.code == "recipe_timeout" else
                                   "trial_limit" if final_error.code == "trial_limit_exceeded" else "error")
@@ -306,43 +422,55 @@ def create_app(cfg: Config) -> FastAPI:
                             sessions.finish, recording, text,
                             html=html, status=status, error_code=final_error.code,
                             error_message=final_error.message, http_status=final_error.status,
-                            finish_reason="error")
+                            finish_reason="error", conversation_url=url)
                     else:
                         await asyncio.to_thread(
-                            sessions.finish, recording, text, html=html)
+                            sessions.finish, recording, text, html=html, conversation_url=url)
+                    # Nhả chỗ đã giữ ở `assign()` — kể cả khi client ngắt giữa
+                    # chừng, nếu không account đó vĩnh viễn bị coi là đang bận.
+                    if assignment is not None:
+                        assignment.release()
                 if not cancelled:
                     yield "data: [DONE]\n\n"
 
-            sse_headers = {"X-Chat2api-Session-Id": recording.session_id}
-            return StreamingResponse(gen(), media_type="text/event-stream", headers=sse_headers)
+            return StreamingResponse(gen(), media_type="text/event-stream",
+                                     headers=target_headers)
 
         parts: list[str] = []
         try:
-            async for d in upstream():
-                if not parts:
-                    sessions.first_delta(recording)
-                parts.append(d)
-        except TimeoutError:
-            error = OpenAIError(504, "recipe_timeout", "Recipe timeout", "api_error")
+            try:
+                async for d in upstream():
+                    if not parts:
+                        sessions.first_delta(recording)
+                    parts.append(d)
+            except TimeoutError:
+                error = OpenAIError(504, "recipe_timeout", "Recipe timeout", "api_error")
+                _, url = _reply_extras(provider, assignment, BR)
+                await asyncio.to_thread(
+                    sessions.finish, recording, "".join(parts),
+                    status="timeout", error_code=error.code,
+                    error_message=error.message, http_status=error.status,
+                    finish_reason="error", conversation_url=url)
+                raise error
+            except OpenAIError as error:
+                status = "trial_limit" if error.code == "trial_limit_exceeded" else "error"
+                _, url = _reply_extras(provider, assignment, BR)
+                await asyncio.to_thread(
+                    sessions.finish, recording, "".join(parts),
+                    status=status, error_code=error.code,
+                    error_message=error.message, http_status=error.status,
+                    finish_reason="error", conversation_url=url)
+                raise
+            text = "".join(parts)
+            html, url = _reply_extras(provider, assignment, BR)
             await asyncio.to_thread(
-                sessions.finish, recording, "".join(parts),
-                status="timeout", error_code=error.code,
-                error_message=error.message, http_status=error.status,
-                finish_reason="error")
-            raise error
-        except OpenAIError as error:
-            status = "trial_limit" if error.code == "trial_limit_exceeded" else "error"
-            await asyncio.to_thread(
-                sessions.finish, recording, "".join(parts),
-                status=status, error_code=error.code,
-                error_message=error.message, http_status=error.status,
-                finish_reason="error")
-            raise
-        text = "".join(parts)
-        html = provider.last_response_html if isinstance(provider, BR) else None
-        await asyncio.to_thread(
-            sessions.finish, recording, text, html=html)
-        response.headers["X-Chat2api-Session-Id"] = recording.session_id
+                sessions.finish, recording, text, html=html, conversation_url=url)
+        finally:
+            if assignment is not None:
+                assignment.release()
+        response.headers.update(target_headers)
+        if url:
+            response.headers["X-Chat2api-Conversation-Url"] = url
         return {"id": cid, "object": "chat.completion", "created": int(time.time()),
                 "model": body.model,
                 "choices": [{"index": 0,
@@ -426,6 +554,10 @@ def register_admin(app: FastAPI, admin) -> None:
                 "profile_max_tabs": int(row["max_tabs"] or cfg.profile_max_tabs),
                 "recipes": [provider.slug for provider in providers_],
                 "models": models_,
+                # Request đang chạy trên account này (mọi recipe cùng domain).
+                # Bàn test đọc để biết chọn thêm target là thêm việc song song
+                # thật, hay chỉ xếp thêm hàng vào một tab đang bận.
+                "busy": sum(provider.account_load(row["id"]) for provider in providers_),
                 # Không có recipe nào phục vụ domain này ⇒ chọn cũng không chạy
                 # được; desktop hiện nó mờ kèm lý do thay vì giấu đi.
                 "ready": bool(models_),
@@ -736,6 +868,45 @@ def register_admin(app: FastAPI, admin) -> None:
         if item is None:
             raise OpenAIError(404, "not_found", "Session không tồn tại")
         return item
+
+    @admin.post("/sessions/{session_id}/open")
+    async def session_open(session_id: str, request: Request):
+        """Mở lại hội thoại của session trong đúng profile đã chạy nó.
+
+        Khác việc dán link vào browser thường: chỉ profile này mới có đăng nhập
+        đã tạo ra hội thoại đó, mở chỗ khác chỉ thấy trang đăng nhập.
+        """
+        from dataclasses import replace
+
+        cfg = request.app.state.cfg
+        item = await asyncio.to_thread(sessions.get_session, session_id)
+        if item is None:
+            raise OpenAIError(404, "not_found", "Session không tồn tại")
+        url = (item.get("site_conversation_url") or "").strip()
+        if not url:
+            raise OpenAIError(409, "no_conversation_url",
+                              "Session này chưa ghi được link hội thoại trên site nguồn.")
+        profile_name = item.get("profile_name")
+        if not profile_name:
+            raise OpenAIError(409, "no_profile",
+                              "Session này không gắn với profile nào để mở lại.")
+        profile = await asyncio.to_thread(profiles.ensure_profile, profile_name,
+                                          cfg.profiles_dir)
+        if profile is None:
+            _need_store()
+            raise OpenAIError(404, "not_found", f"Profile '{profile_name}' không tồn tại")
+        pool_ = request.app.state.pool
+        try:
+            page = await pool_.page_for(replace(profile, headless=False),
+                                        f"{MANUAL_SLUG}-session-{session_id[:12]}")
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        except profiles.ProfileLocked as error:
+            raise OpenAIError(409, "profile_locked", str(error))
+        except Exception as error:
+            applog.log(f"session: không mở được {url} trong '{profile_name}': {error}", "error")
+            raise OpenAIError(500, "session_open_failed", str(error))
+        applog.log(f"session: mở lại {url} trong profile '{profile_name}'")
+        return {"ok": True, "profile": profile_name, "url": url}
 
     @admin.get("/sessions/{session_id}/export")
     async def session_export(session_id: str, format: str = "md"):

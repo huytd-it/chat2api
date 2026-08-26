@@ -141,7 +141,7 @@ async def test_headed_header_propagates_to_browser_recipe_stream(app_client):
             from chat2api.providers.base import ModelInfo
             return [ModelInfo(id="spy/m1", slug="spy")]
 
-        async def stream(self, messages, model_id, headed=None):
+        async def stream(self, messages, model_id, headed=None, assignment=None):
             seen.append(headed)
             yield "ok"
 
@@ -155,8 +155,14 @@ async def test_headed_header_propagates_to_browser_recipe_stream(app_client):
         "model": "spy/m1", "messages": [{"role": "user", "content": "hi"}]},
         headers={"X-Chat2api-Headed": "true"})
     assert r2.status_code == 200
+    r3 = await app_client.post("/v1/chat/completions", json={
+        "model": "spy/m1", "messages": [{"role": "user", "content": "hi"}]},
+        headers={"X-Chat2api-Headed": "false"})
+    assert r3.status_code == 200
 
-    assert seen == [False, True]
+    # Ba trạng thái: không gửi header ⇒ None ("tuỳ server": API_HEADED rồi tới ô
+    # Chạy ẩn của profile), "true"/"false" là mệnh lệnh và thắng mọi cài đặt.
+    assert seen == [None, True, False]
 
 
 async def test_target_account_header_is_validated_and_forwarded(app_client, tmp_path):
@@ -178,8 +184,10 @@ async def test_target_account_header_is_validated_and_forwarded(app_client, tmp_
             }, Path("."), None)
 
         async def stream(self, messages, model_id, headed=None,
-                         target_account_id=None):
-            seen.append(target_account_id)
+                         target_account_id=None, assignment=None):
+            # Handler gán account/profile TRƯỚC khi gọi stream rồi truyền qua
+            # `assignment`; target_account_id chỉ còn cho lời gọi trực tiếp.
+            seen.append(assignment.account_id if assignment else target_account_id)
             yield "ok"
 
     try:
@@ -195,6 +203,130 @@ async def test_target_account_header_is_validated_and_forwarded(app_client, tmp_
         assert seen == [account["id"]]
         row = db.query("SELECT account_id, profile_id FROM session WHERE id = 'targeted-chat'")[0]
         assert (row["account_id"], row["profile_id"]) == (account["id"], profile.id)
+    finally:
+        store.shutdown()
+
+
+def _two_account_spy(app, tmp_path, *, delay: float = 0.0):
+    """Recipe giả có hai account trên hai profile, không mở Chromium.
+
+    Trả về (db, spy, seen) — `seen` ghi lại assignment của từng request để test
+    kiểm "request nào đi tới account nào".
+    """
+    import asyncio
+    from pathlib import Path
+
+    from chat2api import profiles, store
+    from chat2api.providers.browser_recipe import BrowserRecipe
+
+    db = store.connect(tmp_path / "spread.db")
+    db.migrate()
+    for name, label in (("alpha", "one"), ("beta", "two")):
+        profile = profiles.ensure_profile(name, tmp_path / "profiles")
+        profiles.add_account(profile.id, "example.com", label)
+    seen = []
+
+    class SpreadSpy(BrowserRecipe):
+        def __init__(self):
+            super().__init__({
+                "slug": "spread-spy", "url": "https://example.com/chat",
+                "models": [{"id": "m1"}],
+            }, Path("."), None)
+
+        async def stream(self, messages, model_id, headed=None,
+                         target_account_id=None, assignment=None):
+            seen.append(assignment)
+            if delay:
+                await asyncio.sleep(delay)
+            assignment.conversation_url = f"https://example.com/c/{assignment.account_label}"
+            yield "ok"
+
+    spy = SpreadSpy()
+    app.state.router.providers["spread-spy"] = spy
+    return db, spy, seen
+
+
+async def test_response_headers_name_the_account_and_profile(app_client, tmp_path):
+    from chat2api import store
+
+    app = app_client._transport.app
+    db, _, seen = _two_account_spy(app, tmp_path)
+    try:
+        r = await app_client.post("/v1/chat/completions", json={
+            "model": "spread-spy/m1", "messages": [{"role": "user", "content": "hi"}]})
+        assert r.status_code == 200
+        # Không gửi header target nào mà vẫn biết mình đã đi tới đâu.
+        assert r.headers["X-Chat2api-Account-Label"] in ("one", "two")
+        assert r.headers["X-Chat2api-Profile-Name"] in ("alpha", "beta")
+        assert r.headers["X-Chat2api-Target"].count("/") == 2
+        assert r.headers["X-Chat2api-Conversation-Url"].startswith("https://example.com/c/")
+
+        session_id = r.headers["X-Chat2api-Session-Id"]
+        row = db.query(
+            "SELECT account_id, profile_id, site_conversation_url FROM session WHERE id = ?",
+            (session_id,))[0]
+        assert row["account_id"] == seen[0].account_id
+        assert row["profile_id"] == seen[0].profile_id
+        assert row["site_conversation_url"] == seen[0].conversation_url
+        log = db.query("SELECT account_id, profile_id, conversation_url FROM request_log")[0]
+        assert (log["account_id"], log["profile_id"]) == (seen[0].account_id, seen[0].profile_id)
+        assert log["conversation_url"] == seen[0].conversation_url
+    finally:
+        store.shutdown()
+
+
+async def test_concurrent_requests_go_to_different_profiles(app_client, tmp_path):
+    import asyncio
+
+    from chat2api import store
+
+    app = app_client._transport.app
+    db, _, seen = _two_account_spy(app, tmp_path, delay=0.05)
+    try:
+        body = {"model": "spread-spy/m1", "messages": [{"role": "user", "content": "hi"}]}
+        first, second = await asyncio.gather(
+            app_client.post("/v1/chat/completions", json=body),
+            app_client.post("/v1/chat/completions", json=body))
+        assert (first.status_code, second.status_code) == (200, 200)
+        # Hai request một lúc ⇒ hai profile, và hai bản ghi session riêng.
+        assert {a.profile_name for a in seen} == {"alpha", "beta"}
+        assert first.headers["X-Chat2api-Profile-Name"] != second.headers["X-Chat2api-Profile-Name"]
+        assert first.headers["X-Chat2api-Session-Id"] != second.headers["X-Chat2api-Session-Id"]
+        assert db.query("SELECT COUNT(*) AS n FROM session")[0]["n"] == 2
+    finally:
+        store.shutdown()
+
+
+async def test_client_window_mode_groups_requests_back_into_one_session(app_client, tmp_path):
+    from chat2api import settings, store
+
+    app = app_client._transport.app
+    db, _, _ = _two_account_spy(app, tmp_path)
+    try:
+        settings.save(tmp_path / ".env", {"API_SESSION_MODE": "client_window"})
+        body = {"model": "spread-spy/m1", "messages": [{"role": "user", "content": "hi"}]}
+        first = await app_client.post("/v1/chat/completions", json=body)
+        second = await app_client.post("/v1/chat/completions", json=body)
+        assert (first.headers["X-Chat2api-Session-Id"]
+                == second.headers["X-Chat2api-Session-Id"])
+        assert db.query("SELECT COUNT(*) AS n FROM session")[0]["n"] == 1
+    finally:
+        store.shutdown()
+
+
+async def test_assignment_is_released_when_the_request_ends(app_client, tmp_path):
+    from chat2api import store
+
+    app = app_client._transport.app
+    db, spy, _ = _two_account_spy(app, tmp_path)
+    try:
+        for _ in range(3):
+            r = await app_client.post("/v1/chat/completions", json={
+                "model": "spread-spy/m1", "messages": [{"role": "user", "content": "hi"}]})
+            assert r.status_code == 200
+        # Rò chỗ giữ thì account đó vĩnh viễn bị coi là bận và mọi request sau
+        # dồn hết sang account còn lại.
+        assert spy.inflight() == 0
     finally:
         store.shutdown()
 

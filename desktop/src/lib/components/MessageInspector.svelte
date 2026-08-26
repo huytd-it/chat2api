@@ -6,11 +6,23 @@
     message,
     session,
     onclose,
+    onopen,
   }: {
     message: SessionMessage;
     session: SessionDetail;
     onclose: () => void;
+    /** Mở lại hội thoại trong đúng profile đã chạy request này. */
+    onopen?: () => void;
   } = $props();
+
+  /** 'profile · host · account' của ĐÚNG request sinh ra message này — không
+   * phải của session: một session có thể trải qua nhiều account. */
+  const target = $derived([
+    message.request?.profile_name,
+    message.request?.account_host,
+    message.request?.account_label,
+  ].filter(Boolean).join(" · "));
+  const conversationUrl = $derived(message.request?.conversation_url ?? "");
 
   type Tab = "pretty" | "markdown" | "html" | "json";
   let tab = $state<Tab>("pretty");
@@ -89,6 +101,16 @@
       <pre class="inspector-source">{responseJson}</pre>
     {/if}
   </div>
+
+  {#if target || conversationUrl}
+    <div class="inspector-target">
+      <span class="target-label">Đã gửi tới</span>
+      <strong>{target || "—"}</strong>
+      {#if conversationUrl}
+        <button class="tool-button" title={conversationUrl} onclick={onopen}>Xem trực tiếp</button>
+      {/if}
+    </div>
+  {/if}
 
   <footer class="inspector-foot">
     <div class="signal-facts">

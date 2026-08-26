@@ -37,6 +37,50 @@ thể cần PowerShell chạy Administrator.
 
 Model id: `<provider>/<model>`, ví dụ `gemini/gemini-flash`, `qwen/qwen-max`.
 
+### Request đi tới Account/Profile nào
+
+Với recipe chạy bằng browser, server tự chọn một account (và profile Chromium
+của nó) cho **từng** request rồi nói ra ngay trong header response — không cần
+client gửi gì thêm:
+
+    X-Chat2api-Session-Id        phiên đã ghi request này
+    X-Chat2api-Account-Id        id account trong kho
+    X-Chat2api-Account-Label     nhãn account, vd "main"
+    X-Chat2api-Profile-Name      profile Chromium đã chạy
+    X-Chat2api-Target            "profile/host/account" gộp sẵn một dòng
+    X-Chat2api-Headed            request này có mở cửa sổ nhìn thấy được không
+    X-Chat2api-Conversation-Url  link hội thoại thật trên site (chỉ ở chế độ non-stream)
+
+Header có ngay từ byte đầu, kể cả khi `stream: true` và chưa có delta nào.
+Cùng thông tin đó được lưu vào `request_log` và `session`, nên trang Sessions
+hiện được "→ profile · host · account" dưới từng message và có nút **Xem trực
+tiếp** mở lại hội thoại trong đúng profile đã tạo ra nó.
+
+Muốn ghim một request vào đúng một account thì gửi
+`X-Chat2api-Account-Id: <id>` — chỉ định tường minh luôn thắng mọi chiến lược.
+
+### Nhiều request cùng lúc
+
+Hai request đến cùng lúc được chia sang **hai account/profile khác nhau**, và
+mỗi cái là một session riêng. Bốn khoá ở nhóm **API** của trang Settings điều
+khiển việc này:
+
+| Khoá | Mặc định | Ý nghĩa |
+| --- | --- | --- |
+| `API_ACCOUNT_STRATEGY` | `least_busy` | `least_busy` chọn account rảnh nhất; `round_robin` xoay vòng đều; `sticky_session` ghim một session vào một account; `off` giữ cách cũ (storage_state, request không gắn profile). |
+| `API_MAX_CONCURRENT_PER_ACCOUNT` | `1` | Số request chạy song song trên **một** account — mỗi slot là một tab riêng trong cùng profile. Vượt thì xếp hàng. |
+| `API_MAX_CONCURRENT_REQUESTS` | `0` | Trần request chat song song toàn server (0 = không giới hạn). Vượt trần thì chờ, không bị từ chối. |
+| `API_SESSION_MODE` | `per_request` | `per_request`: request không kèm `X-Chat2api-Session-Id` là một session riêng. `client_window`: gom theo client + model trong cửa sổ 30 phút. |
+| `API_HEADED` | `auto` | `always`: mọi request API mở cửa sổ Chromium nhìn thấy được. `never`: luôn chạy ẩn. `auto`: theo ô "Chạy ẩn" của từng profile. |
+
+Site chặn headless (Cloudflare, bot-detect) thì đặt `API_HEADED=always` —
+request API sẽ đi đúng đường mà nút **Gửi** ở bàn test Sessions đang dùng.
+Client gửi `X-Chat2api-Headed: true|false` thì header thắng cả cài đặt lẫn
+profile; không gửi header nghĩa là "tuỳ server".
+
+Chỉ có bấy nhiêu account thì request thứ N+1 xếp hàng sau chúng — thêm account
+cho domain đó (trang Browser profiles) là cách duy nhất để chạy song song hơn.
+
 ## Tích hợp sẵn (không cần agent)
 
 - **Gemini**: dán cookie từ trình duyệt vào `recipes/secrets/gemini-cookies.txt`
@@ -146,8 +190,11 @@ request (mở và đóng) — không ghi từng SSE delta.
 
 - Header `X-Chat2api-Session-Id` (tùy chọn) nối nhiều lượt vào cùng một phiên;
   server luôn trả lại header này để client biết mình vừa ghi vào đâu.
-- Không gửi header thì vẫn được lưu dưới `kind='api'`, gom theo model + hash của
-  `Authorization` và `User-Agent` trong cửa sổ 30 phút.
+- Không gửi header thì được lưu dưới `kind='api'`, mỗi request một session
+  (`API_SESSION_MODE=per_request`). Đặt `client_window` để quay lại cách gom
+  theo model + hash của `Authorization` và `User-Agent` trong cửa sổ 30 phút.
+- `request_log` ghi luôn `account_id`, `profile_id` và `conversation_url` của
+  từng request, nên một session trải qua nhiều account vẫn truy được từng lượt.
 - Reply lỗi / timeout / hết lượt / client ngắt giữa chừng đều được lưu kèm phần
   text đã nhận được, không mất trắng.
 - Recipe khai báo `response.capture_html: true` thì lưu thêm outerHTML gốc của
@@ -195,7 +242,9 @@ ENABLE_AGENT_FALLBACK · POOL_MAX_CONTEXTS · BROWSER_ENGINE=playwright|cloak ·
 BROWSER_PROFILE_MODE=storage_state|profile · POOL_MAX_PROFILES · PROFILE_MAX_TABS ·
 RECIPE_TIMEOUT_MS · INTEGRATE_MAX_ROUNDS ·
 ANON_TRIAL_LIMIT (0 = không giới hạn dùng thử ẩn danh) ·
-RECIPE_READY_DELAY_MS · RECIPE_INPUT_DELAY_MS · RECIPE_READY_TIMEOUT_MS
+RECIPE_READY_DELAY_MS · RECIPE_INPUT_DELAY_MS · RECIPE_READY_TIMEOUT_MS ·
+API_ACCOUNT_STRATEGY · API_MAX_CONCURRENT_PER_ACCOUNT ·
+API_MAX_CONCURRENT_REQUESTS · API_SESSION_MODE · API_HEADED
 
 Các khoá trên giờ lưu trong bảng `setting` của kho SQLite và sửa được từ trang
 Settings. Đặt trong môi trường thật hay `.env` vẫn **thắng** hàng trong kho —
