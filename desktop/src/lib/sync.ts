@@ -116,7 +116,19 @@ export async function refreshDomains() {
   }
 }
 
-/** Mọi thứ trang Integrations hiển thị, nạp trong một lượt. */
+/** Mọi thứ trang Integrations hiển thị, nạp trong một lượt — chỉ dùng cho lần
+ * tải đầu tiên; các thao tác đơn lẻ nên gọi refreshX() đúng phần bị ảnh hưởng
+ * để tránh giật hình toàn trang (xem refreshAfterRecipeChange/Delete bên dưới). */
 export async function refreshIntegrations() {
   await Promise.all([refreshRecipes(), refreshAccounts(), refreshProfiles(), refreshDomains()]);
+}
+
+/** Sau reload/tạo mới một recipe: health và model có thể đổi. */
+export async function refreshAfterRecipeChange() {
+  await Promise.all([refreshRecipes(), refreshModels()]);
+}
+
+/** Sau khi xóa một recipe: domain của nó có thể thành orphan, model mất theo. */
+export async function refreshAfterRecipeDelete() {
+  await Promise.all([refreshRecipes(), refreshAccounts(), refreshDomains(), refreshModels()]);
 }

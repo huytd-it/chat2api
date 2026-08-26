@@ -1,12 +1,20 @@
 <script lang="ts">
   import { apiKey, showToast } from "../stores";
   import { startIntegration, fetchJob, jobAction, type JobStatus } from "../api";
-  import { refreshIntegrations, refreshModels } from "../sync";
+  import { refreshAccounts, refreshDomains, refreshModels, refreshRecipes } from "../sync";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Switch } from "$lib/components/ui/switch";
   import * as Card from "$lib/components/ui/card";
-  import { Browser, Check, CircleNotch, Copy, Globe, TerminalWindow, X } from "phosphor-svelte";
+  import * as Collapsible from "$lib/components/ui/collapsible";
+  import JobStepTracker from "./JobStepTracker.svelte";
+  import { Browser, CaretDown, Check, CircleNotch, Copy, Globe, TerminalWindow, X } from "phosphor-svelte";
+
+  interface Props {
+    /** Gọi một lần khi job đăng ký model thành công, kèm slug của recipe mới. */
+    onSuccess?: (slug: string) => void;
+  }
+  let { onSuccess }: Props = $props();
 
   let siteUrl = $state("");
   let headedMode = $state(false);
@@ -17,6 +25,8 @@
   let loginButtonsDisabled = $state(false);
   let jobLogEl = $state<HTMLElement | null>(null);
   let statusKind = $state<"idle" | "busy" | "error" | "success">("idle");
+  let currentJobStatus = $state("idle");
+  let logOpen = $state(false);
   let copyStatus = $state("");
 
   const terminalStatuses = ["ok", "failed", "cancelled", "login_timeout"];
@@ -41,6 +51,7 @@
     const canLogin = j.status === "waiting_login" && j.can_complete_login === true;
     loginActionsVisible = canLogin;
     statusKind = j.status === "ok" ? "success" : ["failed", "cancelled", "login_timeout"].includes(j.status) ? "error" : "busy";
+    currentJobStatus = j.status;
     if (canLogin) {
       if (actionInFlightFor !== pollGeneration) resetLoginButtons();
       jobStatusText = "Chrome đã mở. Hãy đăng nhập trong cửa sổ đó";
@@ -59,6 +70,7 @@
         loginActionsVisible = false;
         jobStatusText = "Timeout: job quá lâu, kiểm tra lại sau";
         statusKind = "error";
+        currentJobStatus = "failed";
         stopPolling();
         return;
       }
@@ -73,11 +85,16 @@
         if (jobLogEl) requestAnimationFrame(() => { if (jobLogEl) jobLogEl.scrollTop = jobLogEl.scrollHeight; });
         showJobStatus(j);
         terminal = terminalStatuses.includes(j.status);
-        if (terminal) { stopPolling(); refreshModels(); refreshIntegrations(); }
+        if (terminal) {
+          stopPolling();
+          await Promise.all([refreshModels(), refreshRecipes(), refreshAccounts(), refreshDomains()]);
+          if (j.status === "ok" && j.slug) onSuccess?.(j.slug);
+        }
       } catch (e: any) {
         if (generation === pollGeneration && jobId === activeJobId && e?.name !== "AbortError") {
           jobStatusText = "Poll lỗi: " + e;
           statusKind = "error";
+          currentJobStatus = "failed";
         }
       } finally {
         if (pollAbort === controller) pollAbort = null;
@@ -100,11 +117,11 @@
         startPolling(jobId); actionInFlightFor = null; showJobStatus({ status: "resuming" });
       } else {
         showJobStatus(data);
-        if (terminalStatuses.includes(data.status)) { stopPolling(); refreshModels(); refreshIntegrations(); }
+        if (terminalStatuses.includes(data.status)) { stopPolling(); await Promise.all([refreshModels(), refreshRecipes(), refreshAccounts(), refreshDomains()]); }
       }
     } catch (e) {
       if (generation === pollGeneration && jobId === activeJobId && actionToken === actionGeneration) {
-        jobStatusText = "Lỗi: " + e; statusKind = "error"; resetLoginButtons();
+        jobStatusText = "Lỗi: " + e; statusKind = "error"; currentJobStatus = "failed"; resetLoginButtons();
       }
     } finally {
       if (generation === pollGeneration && jobId === activeJobId && actionToken === actionGeneration) actionInFlightFor = null;
@@ -116,13 +133,13 @@
     try { new URL(url); } catch { showToast("URL không hợp lệ."); return; }
     const operation = ++operationGeneration;
     actionGeneration++; actionInFlightFor = null; resetLoginButtons(); integrateDisabled = true; stopPolling();
-    loginActionsVisible = false; jobLog = ""; statusKind = "busy"; jobStatusText = "Đang khởi tạo analyzer…";
+    loginActionsVisible = false; jobLog = ""; statusKind = "busy"; currentJobStatus = "running"; jobStatusText = "Đang khởi tạo analyzer…";
     try {
       const data = await startIntegration($apiKey, url, headedMode);
       if (operation !== operationGeneration) return;
       jobStatusText = "Đang chạy job " + data.job_id + "…"; resetLoginButtons(); startPolling(data.job_id);
     } catch (e) {
-      if (operation === operationGeneration) { jobStatusText = "Lỗi: " + e; statusKind = "error"; }
+      if (operation === operationGeneration) { jobStatusText = "Lỗi: " + e; statusKind = "error"; currentJobStatus = "failed"; }
     } finally { if (operation === operationGeneration) integrateDisabled = false; }
   }
   async function copyLog() {
@@ -146,20 +163,35 @@
     <label class="flex cursor-pointer items-center justify-between gap-4 rounded-lg border bg-muted/30 px-3 py-2.5 text-sm"><span><strong class="font-medium">Hiện browser khi test</strong><span class="block text-xs text-muted-foreground">Tắt headless để quan sát analyzer thao tác.</span></span><Switch bind:checked={headedMode} aria-label="Hiện browser khi test" /></label>
 
     <section class="overflow-hidden rounded-lg border" aria-labelledby="job-progress-title">
-      <header class="flex min-h-12 flex-wrap items-center justify-between gap-2 border-b bg-muted/30 px-3 py-2">
-        <div class="flex items-center gap-2"><TerminalWindow size={17} class="text-muted-foreground" aria-hidden="true" /><h3 id="job-progress-title" class="text-sm font-medium">Tiến trình analyzer</h3>{#if statusKind === "busy"}<CircleNotch class="animate-spin text-warning" size={15} aria-hidden="true" />{/if}</div>
-        <Button variant="ghost" size="sm" disabled={!jobLog} onclick={copyLog}><Copy /> Sao chép</Button>
+      <header class="flex min-h-12 flex-wrap items-center gap-3 border-b bg-muted/30 px-3 py-2.5">
+        <h3 id="job-progress-title" class="sr-only">Tiến trình analyzer</h3>
+        <JobStepTracker status={currentJobStatus} />
       </header>
       {#if jobStatusText}
         <div class={`flex items-center gap-2 border-b px-3 py-2 text-sm ${statusKind === "error" ? "bg-destructive/5 text-destructive" : statusKind === "success" ? "bg-success/5 text-success" : "bg-warning/5 text-warning"}`} role={statusKind === "error" ? "alert" : "status"} aria-live="polite">
           <span class={`size-2 shrink-0 rounded-full ${statusKind === "error" ? "bg-destructive" : statusKind === "success" ? "bg-success" : "bg-warning"}`}></span>{jobStatusText}
         </div>
       {/if}
-      {#if loginActionsVisible}<div class="flex flex-wrap gap-2 border-b p-3"><Button disabled={loginButtonsDisabled} onclick={() => postJobAction("login-complete")}><Check /> Đã đăng nhập</Button><Button variant="outline" disabled={loginButtonsDisabled} onclick={() => postJobAction("cancel")}><X /> Hủy job</Button></div>{/if}
-      <div class="relative min-h-52 bg-[#0a0d0a] shadow-inner">
-        {#if !jobLog}<div class="absolute inset-0 flex flex-col items-center justify-center gap-2 p-6 text-center"><TerminalWindow size={25} class="text-[#2c6b47]" aria-hidden="true" /><p class="text-sm text-[#d7f5e2]">Chưa có nhật ký</p><p class="font-data text-xs text-[#6f9b7d]">Log sẽ xuất hiện sau khi analyzer bắt đầu.</p></div>{/if}
-        <pre class="m-0 max-h-80 min-h-52 overflow-auto whitespace-pre-wrap break-words p-3 font-data text-[11px] leading-6 text-[#8be8a8]" bind:this={jobLogEl} aria-label="Nhật ký job" aria-live="polite">{jobLog}</pre>
-      </div>
+      {#if loginActionsVisible}
+        <div class="flex flex-col gap-3 border-b bg-warning/5 p-3">
+          <div class="flex items-start gap-2 text-sm text-warning"><Browser class="mt-0.5 shrink-0" size={17} aria-hidden="true" /><p>Một cửa sổ Chrome mới đã mở <strong>ngoài ứng dụng này</strong> — tìm cửa sổ đó trên taskbar, đăng nhập xong rồi quay lại đây và bấm "Đã đăng nhập".</p></div>
+          <div class="flex flex-wrap gap-2"><Button disabled={loginButtonsDisabled} onclick={() => postJobAction("login-complete")}><Check /> Đã đăng nhập</Button><Button variant="outline" disabled={loginButtonsDisabled} onclick={() => postJobAction("cancel")}><X /> Hủy job</Button></div>
+        </div>
+      {/if}
+      <Collapsible.Root bind:open={logOpen}>
+        <div class="flex items-center justify-between gap-2 border-b bg-muted/10 px-3 py-1.5">
+          <Collapsible.Trigger class="flex items-center gap-1.5 py-1 text-xs font-medium text-muted-foreground hover:text-foreground">
+            <CaretDown class={`transition-transform ${logOpen ? "" : "-rotate-90"}`} size={13} aria-hidden="true" /> Xem log chi tiết
+          </Collapsible.Trigger>
+          <Button variant="ghost" size="sm" disabled={!jobLog} onclick={copyLog}><Copy /> Sao chép</Button>
+        </div>
+        <Collapsible.Content>
+          <div class="relative min-h-52 bg-[#0a0d0a] shadow-inner">
+            {#if !jobLog}<div class="absolute inset-0 flex flex-col items-center justify-center gap-2 p-6 text-center"><TerminalWindow size={25} class="text-[#2c6b47]" aria-hidden="true" /><p class="text-sm text-[#d7f5e2]">Chưa có nhật ký</p><p class="font-data text-xs text-[#6f9b7d]">Log sẽ xuất hiện sau khi analyzer bắt đầu.</p></div>{/if}
+            <pre class="m-0 max-h-80 min-h-52 overflow-auto whitespace-pre-wrap break-words p-3 font-data text-[11px] leading-6 text-[#8be8a8]" bind:this={jobLogEl} aria-label="Nhật ký job" aria-live="polite">{jobLog}</pre>
+          </div>
+        </Collapsible.Content>
+      </Collapsible.Root>
     </section>
   </Card.Content>
 </Card.Root>

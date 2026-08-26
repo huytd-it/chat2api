@@ -3,7 +3,7 @@
   // điền sẵn, khoá lại), hay mở độc lập từ panel Profile (domain gõ tay, chọn
   // từ dropdown, hoặc để trống cho server tự dò).
   import { apiKey, showToast } from "../stores";
-  import { domains, profiles, refreshIntegrations } from "../sync";
+  import { domains, profiles, refreshAccounts, refreshDomains, refreshProfiles } from "../sync";
   import {
     addProfileAccount,
     cancelAccountLogin,
@@ -117,6 +117,8 @@
         }
         await addProfileAccount($apiKey, profileId, target, name);
         statusText = `Đã gắn ${target}/${name} vào profile ${profileName}.`;
+        done = true;
+        await refreshProfiles();
       } else {
         if (!sessionId) return;
         // domain rỗng là hợp lệ: server tự dò từ cookie rồi trả về domain thật.
@@ -125,9 +127,9 @@
         suggested = res.suggested ?? [];
         sessionId = null;
         statusText = `Đã lưu ${res.domain}/${name}.`;
+        done = true;
+        await Promise.all([refreshAccounts(), refreshDomains()]);
       }
-      done = true;
-      await refreshIntegrations();
     } catch (e) {
       showToast((e as Error).message);
     } finally {
@@ -143,7 +145,7 @@
         await addProfileAccount($apiKey, profileId, candidate, label.trim() || "main");
         suggested = suggested.filter((h) => h !== candidate);
         statusText = `Đã gắn ${candidate} vào profile ${profileName}.`;
-        await refreshIntegrations();
+        await refreshProfiles();
       } catch (e) {
         showToast((e as Error).message);
       } finally {

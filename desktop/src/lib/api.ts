@@ -40,6 +40,7 @@ export interface JobStatus {
   status: string;
   log: string[];
   can_complete_login?: boolean;
+  slug?: string;
 }
 
 export interface AccountInfo {

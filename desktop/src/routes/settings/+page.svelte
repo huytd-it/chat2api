@@ -2,15 +2,18 @@
   import { onMount } from "svelte";
   import { apiKey, headedBrowser, showToast } from "$lib/stores";
   import {
+    apiBase,
     closeProfile,
     createApiKey,
     deleteApiKey,
     fetchApiKeys,
+    fetchModels,
     fetchProfiles,
     fetchSettings,
     saveSettings,
     type ApiKeyInfo,
     type ApiKeyList,
+    type ModelInfo,
     type ProfileList,
     type SettingField,
   } from "$lib/api";
@@ -25,12 +28,15 @@
   import {
     Browser,
     CircleNotch,
+    Code,
     Copy,
     Eye,
     EyeSlash,
     Gauge,
     Key,
+    Link,
     Repeat,
+    Rocket,
     ShieldCheck,
     Trash,
     UserCircle,
@@ -49,7 +55,7 @@
   let restartKeys = $state<string[]>([]);
   let shadowedKeys = $state<string[]>([]);
 
-  let activeTab = $state("client");
+  let activeTab = $state("deploy");
 
   // Bearer token của client này — khác hẳn khối `fields` bên dưới: nó không
   // nằm trong .env của server mà chỉ lưu cục bộ, nên có ô riêng ở trên cùng.
@@ -60,6 +66,124 @@
     apiKey.set(keyInput.trim());
     refreshModels();
     refreshRecipes();
+  }
+
+  // -------------------------------------------------------- Deploy config
+  // Config để client (Open WebUI, LobeChat, ChatBox, SDK OpenAI...) trỏ vào
+  // server này. Base URL đọc từ apiBase(); model chỉ là ví dụ lấy từ
+  // /v1/models, không ảnh hưởng gì tới việc lưu settings.
+  let deployBaseUrl = $state("");
+  let deployKey = $state($apiKey);
+  let deployKeyVisible = $state(false);
+  let deployModels = $state<ModelInfo[]>([]);
+  let deployModel = $state("");
+  let deployModelsLoading = $state(true);
+  let deployModelsError = $state("");
+
+  async function loadDeployBase() {
+    deployBaseUrl = await apiBase();
+  }
+
+  async function loadDeployModels() {
+    deployModelsLoading = true;
+    deployModelsError = "";
+    try {
+      deployModels = await fetchModels($apiKey);
+      // Giữ lựa chọn cũ nếu vẫn còn trong danh sách, không thì lấy model đầu tiên.
+      if (!deployModels.some((m) => m.id === deployModel)) {
+        deployModel = deployModels[0]?.id ?? "";
+      }
+    } catch (e) {
+      deployModels = [];
+      deployModelsError = (e as Error).message;
+    } finally {
+      deployModelsLoading = false;
+    }
+  }
+
+  onMount(loadDeployBase);
+  onMount(loadDeployModels);
+
+  function useClientKeyForDeploy() {
+    deployKey = $apiKey;
+    showToast("Đã dùng API key của client này");
+  }
+
+  const resolvedDeployBase = $derived(deployBaseUrl || "http://127.0.0.1:8100");
+  const resolvedDeployModel = $derived(deployModel.trim() || "<model-id>");
+  const maskedDeployKey = $derived(deployKey ? "•".repeat(Math.min(Math.max(deployKey.length, 12), 32)) : "");
+  const shownDeployKey = $derived(
+    deployKeyVisible || !deployKey ? deployKey.trim() || "<YOUR_API_KEY>" : maskedDeployKey,
+  );
+
+  function buildSnippets(base: string, key: string, model: string) {
+    return {
+      curl:
+        `curl ${base}/v1/chat/completions \\\n` +
+        `  -H "Content-Type: application/json" \\\n` +
+        `  -H "Authorization: Bearer ${key}" \\\n` +
+        `  -d '{"model": "${model}", "messages": [{"role": "user", "content": "Xin chào"}]}'`,
+      python:
+        `from openai import OpenAI\n\n` +
+        `client = OpenAI(base_url="${base}/v1", api_key="${key}")\n` +
+        `resp = client.chat.completions.create(\n` +
+        `    model="${model}",\n` +
+        `    messages=[{"role": "user", "content": "Xin chào"}],\n` +
+        `)\n` +
+        `print(resp.choices[0].message.content)`,
+      node:
+        `import OpenAI from "openai";\n\n` +
+        `const client = new OpenAI({ baseURL: "${base}/v1", apiKey: "${key}" });\n` +
+        `const resp = await client.chat.completions.create({\n` +
+        `  model: "${model}",\n` +
+        `  messages: [{ role: "user", content: "Xin chào" }],\n` +
+        `});\n` +
+        `console.log(resp.choices[0].message.content);`,
+      env: `OPENAI_API_BASE=${base}/v1\nOPENAI_API_KEY=${key}`,
+    };
+  }
+
+  // Hiển thị dùng key có thể bị che; Copy luôn lấy key thật bên dưới để dán
+  // đúng giá trị, kể cả khi đang ẩn.
+  const displaySnippets = $derived(buildSnippets(resolvedDeployBase, shownDeployKey, resolvedDeployModel));
+
+  const deploySnippetList = [
+    { id: "curl" as const, label: "curl" },
+    { id: "python" as const, label: "Python (openai)" },
+    { id: "node" as const, label: "Node.js (openai)" },
+    { id: "env" as const, label: "Biến môi trường" },
+  ];
+
+  async function copyDeploySnippet(id: keyof ReturnType<typeof buildSnippets>) {
+    const real = buildSnippets(resolvedDeployBase, deployKey.trim() || "<YOUR_API_KEY>", resolvedDeployModel);
+    try {
+      await navigator.clipboard.writeText(real[id]);
+      showToast("Đã chép config vào clipboard");
+    } catch {
+      showToast("Không chép được — hãy tự bôi đen đoạn code");
+    }
+  }
+
+  async function copyDeployBase() {
+    try {
+      await navigator.clipboard.writeText(resolvedDeployBase);
+      showToast("Đã chép Base URL");
+    } catch {
+      showToast("Không chép được");
+    }
+  }
+
+  async function copyDeployKey() {
+    if (!deployKey.trim()) {
+      showToast("Chưa có key để chép");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(deployKey.trim());
+      showToast("Đã chép API key");
+    } catch {
+      showToast("Không chép được");
+    }
   }
 
   const reloadGroups = $derived([...new Set(fields.filter((f) => f.apply !== "restart").map((f) => f.group))]);
@@ -327,6 +451,20 @@
   </div>
 {/snippet}
 
+{#snippet codeBlock(id: keyof ReturnType<typeof buildSnippets>, label: string, code: string)}
+  <div class="overflow-hidden rounded-lg border">
+    <header class="flex min-h-10 items-center justify-between gap-2 border-b bg-muted/30 px-3 py-1.5">
+      <span class="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+        <Code size={14} aria-hidden="true" /> {label}
+      </span>
+      <Button variant="ghost" size="sm" onclick={() => copyDeploySnippet(id)}>
+        <Copy /> Chép
+      </Button>
+    </header>
+    <pre class="m-0 max-h-56 overflow-auto whitespace-pre-wrap break-all bg-card p-3 font-data text-xs leading-6">{code}</pre>
+  </div>
+{/snippet}
+
 <section class="h-full overflow-y-auto" aria-labelledby="settings-title">
   <div class="mx-auto flex w-full max-w-5xl flex-col gap-5 p-4 sm:p-6 lg:p-8">
     <header>
@@ -364,60 +502,124 @@
 
     <Tabs.Root bind:value={activeTab} class="w-full">
       <Tabs.List class="w-full max-w-full overflow-x-auto sm:w-fit">
-        <Tabs.Trigger value="client"><Key /> Client</Tabs.Trigger>
+        <Tabs.Trigger value="deploy"><Rocket /> Triển khai</Tabs.Trigger>
         <Tabs.Trigger value="general"><Gauge /> Runtime</Tabs.Trigger>
         <Tabs.Trigger value="profiles"><Browser /> Browser profiles</Tabs.Trigger>
         <Tabs.Trigger value="keys"><ShieldCheck /> API keys</Tabs.Trigger>
-        {#if hasRestartFields}
-          <Tabs.Trigger value="restart"><Warning /> Restart changes</Tabs.Trigger>
-        {/if}
       </Tabs.List>
 
-      <!-- Client authentication -->
-      <Tabs.Content value="client" class="mt-3">
-        <Card.Root aria-labelledby="client-title">
+      <!-- Deploy config for clients -->
+      <Tabs.Content value="deploy" class="mt-3">
+        <Card.Root aria-labelledby="deploy-title">
           <Card.Header class="border-b">
             <div class="flex items-start gap-3">
               <div class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                <Key size={19} />
+                <Rocket size={19} aria-hidden="true" />
               </div>
               <div>
-                <Card.Title id="client-title">Client authentication</Card.Title>
+                <Card.Title id="deploy-title">Triển khai cho client</Card.Title>
                 <Card.Description>
-                  Chỉ lưu trên máy này, không ghi vào .env. Để trống nếu server chưa bật CHAT2API_KEYS.
+                  Trỏ bất kỳ ứng dụng tương thích OpenAI API (Open WebUI, LobeChat, ChatBox, n8n,
+                  code dùng SDK OpenAI…) vào server này bằng Base URL và API key bên dưới.
                 </Card.Description>
               </div>
             </div>
           </Card.Header>
-          <Card.Content class="grid gap-4 p-4 sm:p-6">
+          <Card.Content class="grid gap-5 p-4 sm:p-6">
+            <ol class="grid gap-1.5 text-sm leading-6 text-muted-foreground">
+              <li>1. Chép <strong class="text-foreground">Base URL</strong> và <strong class="text-foreground">API key</strong> ở dưới.</li>
+              <li>2. Dán vào cấu hình OpenAI-compatible của client (thường gọi là "API Base" / "Base URL" + "API Key").</li>
+              <li>3. Chọn model — danh sách đầy đủ nằm ở <span class="font-data">{resolvedDeployBase}/v1/models</span>.</li>
+            </ol>
+
+            <div class="grid gap-4 sm:grid-cols-2">
+              <div class="grid gap-1.5">
+                <label for="deploy-base" class="flex items-center gap-1.5 text-sm font-medium">
+                  <Link size={14} aria-hidden="true" /> Base URL
+                </label>
+                <div class="flex gap-1.5">
+                  <Input id="deploy-base" readonly class="font-data" value={resolvedDeployBase} />
+                  <Button variant="outline" size="icon-sm" aria-label="Chép Base URL" onclick={copyDeployBase}>
+                    <Copy />
+                  </Button>
+                </div>
+              </div>
+
+              <div class="grid gap-1.5">
+                <label for="deploy-key" class="text-sm font-medium">API key</label>
+                <div class="flex gap-1.5">
+                  <Input
+                    id="deploy-key"
+                    type={deployKeyVisible ? "text" : "password"}
+                    autocomplete="off"
+                    class="font-data"
+                    placeholder="Dán hoặc tạo key ở tab API keys"
+                    bind:value={deployKey}
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon-sm"
+                    type="button"
+                    aria-label={deployKeyVisible ? "Ẩn API key" : "Hiện API key"}
+                    aria-pressed={deployKeyVisible}
+                    onclick={() => (deployKeyVisible = !deployKeyVisible)}
+                  >
+                    {#if deployKeyVisible}<EyeSlash />{:else}<Eye />{/if}
+                  </Button>
+                  <Button variant="outline" size="icon-sm" aria-label="Chép API key" onclick={copyDeployKey}>
+                    <Copy />
+                  </Button>
+                </div>
+                <p class="text-xs text-muted-foreground">
+                  {#if $apiKey && deployKey !== $apiKey}
+                    <button type="button" class="underline underline-offset-2" onclick={useClientKeyForDeploy}>
+                      Dùng key của client này
+                    </button>
+                  {:else}
+                    Tạo key riêng cho từng client ở tab API keys để dễ thu hồi sau này.
+                  {/if}
+                </p>
+              </div>
+            </div>
+
             <div class="grid gap-1.5">
-              <label for="client-key" class="text-sm font-medium">API key gửi kèm request</label>
-              <div class="flex gap-1.5">
-                <Input
-                  id="client-key"
-                  type={keyVisible ? "text" : "password"}
-                  autocomplete="off"
-                  placeholder="Bearer token"
-                  class="font-data"
-                  bind:value={keyInput}
-                  onchange={commitKey}
-                />
-                <Button
-                  variant="outline"
-                  size="icon-sm"
-                  type="button"
-                  aria-label={keyVisible ? "Ẩn API key" : "Hiện API key"}
-                  aria-pressed={keyVisible}
-                  onclick={() => (keyVisible = !keyVisible)}
-                >
-                  {#if keyVisible}<EyeSlash />{:else}<Eye />{/if}
+              <div class="flex items-center justify-between gap-2">
+                <label for="deploy-model" class="text-sm font-medium">Model</label>
+                <Button variant="ghost" size="sm" disabled={deployModelsLoading} onclick={loadDeployModels}>
+                  <Repeat class={deployModelsLoading ? "animate-spin" : ""} />
+                  {deployModelsLoading ? "Đang tải" : "Làm mới"}
                 </Button>
               </div>
-              <p class="text-xs text-muted-foreground" aria-live="polite">
-                {$apiKey
-                  ? "Key này đang dùng cho mọi request chat + admin từ máy này."
-                  : "Chưa có key — mọi request hiện không có Bearer token."}
-              </p>
+              {#if deployModelsLoading}
+                <Skeleton class="h-8 w-full sm:w-72" />
+              {:else if deployModelsError}
+                <div class="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive" role="alert">
+                  <WarningCircle class="mt-0.5 shrink-0" />
+                  <span>Không nạp được danh sách model: {deployModelsError}</span>
+                </div>
+              {:else if deployModels.length}
+                <select
+                  id="deploy-model"
+                  class="h-8 w-full rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 sm:w-72"
+                  bind:value={deployModel}
+                >
+                  {#each deployModels as m (m.id)}
+                    <option value={m.id}>{m.id}</option>
+                  {/each}
+                </select>
+                <p class="text-xs text-muted-foreground">{deployModels.length} model khả dụng.</p>
+              {:else}
+                <div class="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning" role="status">
+                  <WarningCircle class="mt-0.5 shrink-0" />
+                  <span>Chưa có model nào sẵn sàng — các đoạn code dưới đây dùng placeholder <span class="font-data">&lt;model-id&gt;</span>, thay bằng model thật trước khi dùng.</span>
+                </div>
+              {/if}
+            </div>
+
+            <div class="grid gap-3">
+              {#each deploySnippetList as s (s.id)}
+                {@render codeBlock(s.id, s.label, displaySnippets[s.id])}
+              {/each}
             </div>
           </Card.Content>
         </Card.Root>
@@ -476,11 +678,10 @@
               <span>{loadError}</span>
               <Button variant="outline" size="sm" onclick={load}><Repeat /> Thử lại</Button>
             </div>
-          {:else if !reloadGroups.length}
+          {:else if !reloadGroups.length && !restartGroups.length}
             <div class="flex min-h-36 flex-col items-center justify-center rounded-lg border bg-card p-6 text-center">
               <Gauge class="mb-2 text-muted-foreground" size={28} />
-              <p class="font-medium">Không có thiết lập áp dụng ngay</p>
-              <p class="mt-1 text-sm text-muted-foreground">Xem tab Restart changes cho các mục cần khởi động lại.</p>
+              <p class="font-medium">Không có thiết lập nào</p>
             </div>
           {:else}
             {#each reloadGroups as group (group)}
@@ -495,6 +696,32 @@
                 </Card.Content>
               </Card.Root>
             {/each}
+
+            {#if hasRestartFields}
+              <div class="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning" role="note">
+                <WarningCircle class="mt-0.5 shrink-0" />
+                <span>
+                  Các mục dưới đây chỉ có hiệu lực sau khi khởi động lại chat2api. Lưu vẫn ghi vào
+                  kho, giá trị được áp dụng ở lần chạy kế tiếp.
+                </span>
+              </div>
+              {#each restartGroups as group (group)}
+                <Card.Root>
+                  <Card.Header class="border-b">
+                    <Card.Title class="flex items-center gap-2 text-base">
+                      {group}
+                      <Badge variant="secondary">restart</Badge>
+                    </Card.Title>
+                  </Card.Header>
+                  <Card.Content class="grid gap-5 p-4 sm:grid-cols-2 sm:p-6">
+                    {#each fieldsOf(group, "restart") as field (field.key)}
+                      {@render fieldRow(field)}
+                    {/each}
+                  </Card.Content>
+                </Card.Root>
+              {/each}
+            {/if}
+
             {@render saveBar()}
           {/if}
         </div>
@@ -632,6 +859,55 @@
 
       <!-- API keys -->
       <Tabs.Content value="keys" class="mt-3">
+        <div class="flex flex-col gap-4">
+        <Card.Root aria-labelledby="client-title">
+          <Card.Header class="border-b">
+            <div class="flex items-start gap-3">
+              <div class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <Key size={19} />
+              </div>
+              <div>
+                <Card.Title id="client-title">Key của máy này</Card.Title>
+                <Card.Description>
+                  Bearer token mà chính desktop app này dùng để gọi server — chỉ lưu trên máy này,
+                  không ghi vào .env. Để trống nếu server chưa bật CHAT2API_KEYS.
+                </Card.Description>
+              </div>
+            </div>
+          </Card.Header>
+          <Card.Content class="grid gap-4 p-4 sm:p-6">
+            <div class="grid gap-1.5">
+              <label for="client-key" class="text-sm font-medium">API key gửi kèm request</label>
+              <div class="flex gap-1.5">
+                <Input
+                  id="client-key"
+                  type={keyVisible ? "text" : "password"}
+                  autocomplete="off"
+                  placeholder="Bearer token"
+                  class="font-data"
+                  bind:value={keyInput}
+                  onchange={commitKey}
+                />
+                <Button
+                  variant="outline"
+                  size="icon-sm"
+                  type="button"
+                  aria-label={keyVisible ? "Ẩn API key" : "Hiện API key"}
+                  aria-pressed={keyVisible}
+                  onclick={() => (keyVisible = !keyVisible)}
+                >
+                  {#if keyVisible}<EyeSlash />{:else}<Eye />{/if}
+                </Button>
+              </div>
+              <p class="text-xs text-muted-foreground" aria-live="polite">
+                {$apiKey
+                  ? "Key này đang dùng cho mọi request chat + admin từ máy này."
+                  : "Chưa có key — mọi request hiện không có Bearer token."}
+              </p>
+            </div>
+          </Card.Content>
+        </Card.Root>
+
         <Card.Root aria-labelledby="keys-title">
           <Card.Header class="flex-row items-center justify-between gap-4 border-b">
             <div class="flex items-start gap-3">
@@ -724,6 +1000,17 @@
                       <Copy />
                     </Button>
                     <Button
+                      variant="outline"
+                      size="sm"
+                      onclick={() => {
+                        deployKey = freshKey!.key;
+                        activeTab = "deploy";
+                        showToast("Đã đưa key vào tab Triển khai");
+                      }}
+                    >
+                      <Rocket /> Dùng để triển khai
+                    </Button>
+                    <Button
                       variant="secondary"
                       size="sm"
                       onclick={() => {
@@ -814,68 +1101,8 @@
             {/if}
           </Card.Content>
         </Card.Root>
+        </div>
       </Tabs.Content>
-
-      <!-- Restart-required changes -->
-      {#if hasRestartFields}
-        <Tabs.Content value="restart" class="mt-3">
-          <div class="flex flex-col gap-4">
-            <div class="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning" role="note">
-              <WarningCircle class="mt-0.5 shrink-0" />
-              <span>
-                Các mục này chỉ có hiệu lực sau khi khởi động lại chat2api. Lưu vẫn ghi vào kho,
-                giá trị được áp dụng ở lần chạy kế tiếp.
-              </span>
-            </div>
-
-            {#if loading}
-              <div class="grid gap-4" aria-label="Đang nạp settings" aria-busy="true">
-                <Card.Root>
-                  <Card.Content class="grid gap-4 p-4 sm:p-6">
-                    <div class="grid gap-2">
-                      <Skeleton class="h-4 w-32" />
-                      <Skeleton class="h-8 w-full" />
-                      <Skeleton class="h-3 w-2/3" />
-                    </div>
-                    <div class="grid gap-2">
-                      <Skeleton class="h-4 w-32" />
-                      <Skeleton class="h-8 w-full" />
-                      <Skeleton class="h-3 w-1/2" />
-                    </div>
-                  </Card.Content>
-                </Card.Root>
-              </div>
-            {:else if loadError}
-              <div class="flex flex-col items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive" role="alert">
-                <span>{loadError}</span>
-                <Button variant="outline" size="sm" onclick={load}><Repeat /> Thử lại</Button>
-              </div>
-            {:else if !restartGroups.length}
-              <div class="flex min-h-36 flex-col items-center justify-center rounded-lg border bg-card p-6 text-center">
-                <Warning class="mb-2 text-muted-foreground" size={28} />
-                <p class="font-medium">Không có mục nào cần khởi động lại</p>
-              </div>
-            {:else}
-              {#each restartGroups as group (group)}
-                <Card.Root>
-                  <Card.Header class="border-b">
-                    <Card.Title class="flex items-center gap-2 text-base">
-                      {group}
-                      <Badge variant="secondary">restart</Badge>
-                    </Card.Title>
-                  </Card.Header>
-                  <Card.Content class="grid gap-5 p-4 sm:grid-cols-2 sm:p-6">
-                    {#each fieldsOf(group, "restart") as field (field.key)}
-                      {@render fieldRow(field)}
-                    {/each}
-                  </Card.Content>
-                </Card.Root>
-              {/each}
-              {@render saveBar()}
-            {/if}
-          </div>
-        </Tabs.Content>
-      {/if}
     </Tabs.Root>
   </div>
 </section>
