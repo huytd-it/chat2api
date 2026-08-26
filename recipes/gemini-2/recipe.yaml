@@ -1,0 +1,21 @@
+url: https://gemini.google.com/app
+prompt:
+  input_selector: rich-textarea .ql-editor[contenteditable="true"]
+  input_mode: fill
+  submit: Enter
+response:
+  last_message_selector: model-response .model-response-text
+  done_signal:
+    type: stable_text
+    quiet_ms: 3000
+    timeout_ms: 120000
+new_chat:
+  url: https://gemini.google.com/app
+timing:
+  ready_delay_ms: 2000
+  input_delay_ms: 600
+models:
+- id: gemini-web
+slug: gemini-2
+login:
+  anon_trial_limit: 20
