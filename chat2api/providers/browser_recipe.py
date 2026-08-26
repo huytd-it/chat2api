@@ -195,6 +195,7 @@ class BrowserRecipe(Provider):
         # đổi hành vi và DB không phình ngoài ý muốn. Main đọc giá trị cuối này
         # sau khi stream kết thúc để lưu cùng message assistant.
         self._capture_html = bool(self.response_cfg.get("capture_html", False))
+        self._structured_markdown = self.response_cfg.get("format") == "markdown"
         self.last_response_html: str | None = None
         login_cfg = recipe.get("login") or {}
         # Kho account chung nằm cạnh các recipe (recipes/.accounts). Analyzer chạy
@@ -402,21 +403,83 @@ class BrowserRecipe(Provider):
         return [ModelInfo(id=f"{self.slug}/{m['id']}", slug=self.slug) for m in self._recipe["models"]]
 
     async def _reply(self, page) -> tuple[str, str | None]:
-        """Đọc reply hiện tại và, khi bật, outerHTML của cùng một element."""
+        """Đọc reply dưới dạng Markdown và, khi bật, outerHTML gốc."""
         sel = self.response_cfg["last_message_selector"]
         result = await page.evaluate(
-            """([sel, captureHtml]) => {
+            r"""([sel, captureHtml, structuredMarkdown]) => {
                  const els = document.querySelectorAll(sel);
                  if (!els.length) return ["", null];
                  const el = els[els.length - 1];
-                 return [el.innerText || "", captureHtml ? el.outerHTML : null];
+                 if (!structuredMarkdown) {
+                   return [el.innerText || "", captureHtml ? el.outerHTML : null];
+                 }
+
+                 const clean = value => value
+                   .replace(/[ \t]+\n/g, "\n")
+                   .replace(/\n{3,}/g, "\n\n")
+                   .trim();
+                 const inline = node => {
+                   if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
+                   if (node.nodeType !== Node.ELEMENT_NODE) return "";
+                   const tag = node.tagName.toLowerCase();
+                   const body = Array.from(node.childNodes).map(inline).join("");
+                   if (tag === "br") return "  \n";
+                   if (tag === "strong" || tag === "b") return `**${body}**`;
+                   if (tag === "em" || tag === "i") return `*${body}*`;
+                   if (tag === "code") return `\`${body}\``;
+                   if (tag === "a") {
+                     const href = node.getAttribute("href");
+                     return href ? `[${body}](${href})` : body;
+                   }
+                   return body;
+                 };
+                 const block = (node, depth = 0) => {
+                   if (node.nodeType === Node.TEXT_NODE) {
+                     const value = node.nodeValue || "";
+                     return value.trim() ? value : "";
+                   }
+                   if (node.nodeType !== Node.ELEMENT_NODE) return "";
+                   const tag = node.tagName.toLowerCase();
+                   if (/^h[1-6]$/.test(tag)) {
+                     return `${"#".repeat(Number(tag[1]))} ${clean(inline(node))}\n\n`;
+                   }
+                   if (tag === "p" || node.classList.contains("qwen-markdown-paragraph")) {
+                     return `${clean(inline(node))}\n\n`;
+                   }
+                   if (tag === "hr") return "---\n\n";
+                   if (tag === "pre") return `\`\`\`\n${node.innerText || ""}\n\`\`\`\n\n`;
+                   if (tag === "ul" || tag === "ol") {
+                     const items = Array.from(node.children).filter(child =>
+                       child.tagName.toLowerCase() === "li");
+                     return items.map((item, index) => {
+                       const marker = tag === "ol" ? `${index + 1}.` : "-";
+                       const text = clean(Array.from(item.childNodes).map(child =>
+                         child.nodeType === Node.ELEMENT_NODE &&
+                         ["ul", "ol"].includes(child.tagName.toLowerCase())
+                           ? "" : inline(child)).join(""));
+                       const nested = Array.from(item.children)
+                         .filter(child => ["ul", "ol"].includes(child.tagName.toLowerCase()))
+                         .map(child => block(child, depth + 1).trimEnd())
+                         .join("\n");
+                       return `${"  ".repeat(depth)}${marker} ${text}${nested ? `\n${nested}` : ""}`;
+                     }).join("\n") + "\n\n";
+                   }
+                   if (tag === "blockquote") {
+                     return clean(Array.from(node.childNodes).map(child => block(child, depth)).join(""))
+                       .split("\n").map(line => `> ${line}`).join("\n") + "\n\n";
+                   }
+                   return Array.from(node.childNodes).map(child => block(child, depth)).join("");
+                 };
+
+                 const markdown = clean(Array.from(el.childNodes).map(node => block(node)).join(""));
+                 return [markdown || el.innerText || "", captureHtml ? el.outerHTML : null];
                }""",
-            [sel, self._capture_html],
+            [sel, self._capture_html, self._structured_markdown],
         )
         return str(result[0] or ""), result[1]
 
     async def _reply_text(self, page) -> str:
-        """Compatibility helper cho code/test ngoài module chỉ cần innerText."""
+        """Compatibility helper cho code/test ngoài module chỉ cần nội dung."""
         text, _ = await self._reply(page)
         return text
 
@@ -488,7 +551,8 @@ class BrowserRecipe(Provider):
                     if reply_html is not None:
                         self.last_response_html = reply_html
                     if text != last:
-                        if text.startswith(last) and text.strip() != prompt.strip():
+                        if (not self._structured_markdown and text.startswith(last)
+                                and text.strip() != prompt.strip()):
                             yield text[len(last):]
                         last = text
                         stable_since = time.monotonic()
@@ -502,6 +566,8 @@ class BrowserRecipe(Provider):
                         done = ((count > 0) == appear) and stable_since is not None \
                             and (time.monotonic() - stable_since) * 1000 >= min(quiet_ms, 1000)
                     if done:
+                        if self._structured_markdown:
+                            yield last
                         return
                     await asyncio.sleep(0.5)
             finally:

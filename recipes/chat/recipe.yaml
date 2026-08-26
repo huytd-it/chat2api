@@ -5,6 +5,8 @@ prompt:
   submit: Enter
 response:
   last_message_selector: .qwen-markdown
+  format: markdown
+  capture_html: true
   done_signal:
     type: stable_text
     quiet_ms: 3000

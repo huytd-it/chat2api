@@ -15,47 +15,101 @@ function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ESCAPES[c]);
 }
 
+function renderInline(value: string): string {
+  return value
+    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    .replace(
+      /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
+    );
+}
+
 export function renderMarkdown(src: string): string {
-  let s = esc(src);
+  let s = esc(src.replace(/\r\n?/g, "\n"));
 
   // Fenced code blocks được trích ra trước để các rule inline không đụng vào.
   const blocks: string[] = [];
   s = s.replace(/```([a-zA-Z0-9+#-]*)\n?([\s\S]*?)```/g, (_m, lang: string, code: string) => {
     const cls = lang ? ` class="lang-${esc(lang)}"` : "";
     blocks.push(`<pre><code${cls}>${code.replace(/\n$/, "")}</code></pre>`);
-    return `\u0000B${blocks.length - 1}\u0000`;
+    return `\n\u0000B${blocks.length - 1}\u0000\n`;
   });
   // Fence chưa đóng (đang stream) — render phần có sẵn như code block.
   s = s.replace(/```([a-zA-Z0-9+#-]*)\n?([\s\S]*)$/g, (_m, lang: string, code: string) => {
     const cls = lang ? ` class="lang-${esc(lang)}"` : "";
     blocks.push(`<pre><code${cls}>${code}</code></pre>`);
-    return `\u0000B${blocks.length - 1}\u0000`;
+    return `\n\u0000B${blocks.length - 1}\u0000\n`;
   });
 
-  s = s.replace(/`([^`\n]+)`/g, "<code>$1</code>");
-  s = s.replace(/^#{1,6}\s+(.+)$/gm, "<strong>$1</strong>");
-  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  s = s.replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
-    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  const out: string[] = [];
+  let paragraph: string[] = [];
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    out.push(`<p>${paragraph.map(renderInline).join("\n")}</p>`);
+    paragraph = [];
+  };
 
-  // Bullets → dòng với dấu đầu dòng giữ nguyên (tránh xây cả cây list).
-  // Gom paragraph: cách nhau bởi dòng trống; xuống dòng đơn thành <br>.
-  const parts = s.split(/\u0000B(\d+)\u0000/);
-  let out = "";
-  for (let i = 0; i < parts.length; i++) {
-    if (i % 2 === 1) {
-      out += blocks[Number(parts[i])];
+  const lines = s.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const block = line.trim().match(/^\u0000B(\d+)\u0000$/);
+    if (block) {
+      flushParagraph();
+      out.push(blocks[Number(block[1])]);
       continue;
     }
-    const seg = parts[i];
-    if (!seg.trim()) continue;
-    const paras = seg.split(/\n{2,}/);
-    for (const p of paras) {
-      const trimmed = p.trim();
-      if (!trimmed) continue;
-      out += `<p>${trimmed.replace(/\n/g, "<br>")}</p>`;
+    if (!line.trim()) {
+      flushParagraph();
+      continue;
     }
+
+    const heading = line.match(/^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$/);
+    if (heading) {
+      flushParagraph();
+      const level = heading[1].length;
+      const content = heading[2].replace(/[ \t]+#+[ \t]*$/, "").trim();
+      out.push(`<h${level}>${renderInline(content)}</h${level}>`);
+      continue;
+    }
+
+    if (/^ {0,3}((\* *){3,}|(- *){3,}|(_ *){3,})$/.test(line)) {
+      flushParagraph();
+      out.push("<hr>");
+      continue;
+    }
+
+    const listItem = line.match(/^\s*([-+*]|\d+[.)])\s+(.+)$/);
+    if (listItem) {
+      flushParagraph();
+      const ordered = /^\d/.test(listItem[1]);
+      const tag = ordered ? "ol" : "ul";
+      const items: string[] = [];
+      let cursor = index;
+      while (cursor < lines.length) {
+        const item = lines[cursor].match(/^\s*([-+*]|\d+[.)])\s+(.+)$/);
+        if (!item || /^\d/.test(item[1]) !== ordered) break;
+        items.push(`<li>${renderInline(item[2].trim())}</li>`);
+        cursor += 1;
+      }
+      out.push(`<${tag}>${items.join("")}</${tag}>`);
+      index = cursor - 1;
+      continue;
+    }
+
+    // Setext heading: dòng chữ theo sau bởi === hoặc ---.
+    const underline = lines[index + 1]?.match(/^ {0,3}(=+|-+)[ \t]*$/);
+    if (underline) {
+      flushParagraph();
+      const level = underline[1][0] === "=" ? 1 : 2;
+      out.push(`<h${level}>${renderInline(line.trim())}</h${level}>`);
+      index += 1;
+      continue;
+    }
+
+    paragraph.push(line.trim());
   }
-  return out;
+  flushParagraph();
+  return out.join("");
 }

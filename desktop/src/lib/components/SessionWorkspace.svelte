@@ -55,6 +55,7 @@
   let openedTargets = $state<number[]>([]);
   let rotationMode = $state<"broadcast" | "round_robin" | "fill_first">("broadcast");
   let maxRequestsPerAccount = $state(1);
+  let markdownMode = $state<"rendered" | "raw">("rendered");
 
   type BatchJob = {
     promptIndex: number;
@@ -693,6 +694,16 @@
           </div>
         </div>
         <div class="session-tools">
+          <button
+            class="tool-button"
+            class:active={markdownMode === "raw"}
+            title={markdownMode === "raw" ? "Hiển thị Markdown đã render" : "Hiển thị Markdown thô"}
+            aria-label={markdownMode === "raw" ? "Chuyển sang Markdown đã render" : "Chuyển sang Markdown thô"}
+            aria-pressed={markdownMode === "raw"}
+            onclick={() => (markdownMode = markdownMode === "raw" ? "rendered" : "raw")}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18v12H3V6Zm3 8V9l2.5 3L11 9v5m3-2 2 2 2-2m-2 2V9" /></svg><span>Raw MD</span>
+          </button>
           <button class="tool-button" class:active={Boolean(active.pinned)} title="Ghim session" onclick={togglePin}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 4 6 0 1 5 3 3H5l3-3 1-5ZM12 12v8" /></svg><span>Ghim</span>
           </button>
@@ -730,7 +741,11 @@
             {#if message.content || (message.id < 0 && sending)}
               <div class="recorded-content">
                 {#if message.role === "assistant"}
-                  {@html renderMarkdown(message.content_markdown ?? message.content)}
+                  {#if markdownMode === "raw"}
+                    <pre class="raw-markdown">{message.content_markdown ?? message.content}</pre>
+                  {:else}
+                    {@html renderMarkdown(message.content_markdown ?? message.content)}
+                  {/if}
                 {:else}
                   {message.content}
                 {/if}

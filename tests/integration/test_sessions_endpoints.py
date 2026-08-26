@@ -200,8 +200,10 @@ def test_browser_reply_capture_html_is_opt_in(tmp_path):
     class Page:
         def __init__(self):
             self.args = None
+            self.script = None
 
         async def evaluate(self, script, args):
+            self.script = script
             self.args = args
             return ["text", "<div>text</div>" if args[1] else None]
 
@@ -217,4 +219,7 @@ def test_browser_reply_capture_html_is_opt_in(tmp_path):
 
     import asyncio
     assert asyncio.run(provider._reply(page)) == ("text", "<div>text</div>")
-    assert page.args == [".reply", True]
+    assert page.args == [".reply", True, False]
+    assert "qwen-markdown-paragraph" in page.script
+    assert 'if (tag === "hr") return "---\\n\\n"' in page.script
+    assert 'const marker = tag === "ol" ? `${index + 1}.` : "-"' in page.script

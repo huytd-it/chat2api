@@ -25,6 +25,39 @@ async def test_roundtrip_stream(fixture_recipe, tmp_path):
         await pool.aclose()
 
 
+async def test_reply_preserves_markdown_block_structure(fixture_recipe, tmp_path):
+    recipe = {**fixture_recipe, "response": {
+        **fixture_recipe["response"], "last_message_selector": ".qwen-markdown",
+        "format": "markdown",
+    }}
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(recipe, tmp_path, pool)
+        context = await pool.context_for("markdown")
+        page = await context.new_page()
+        await page.set_content("""
+          <div class="qwen-markdown">
+            <div class="qwen-markdown-paragraph"><span>Đoạn một.</span></div>
+            <div class="qwen-markdown-space"></div>
+            <div class="qwen-markdown-paragraph"><span>Đoạn hai.</span></div>
+            <div class="qwen-markdown-hr"><hr></div>
+            <div class="qwen-markdown-paragraph"><strong>GLOSSARY</strong></div>
+            <ul><li>秦老板: Chủ tiệm họ Tần</li><li>警服: đồng phục cảnh sát</li></ul>
+          </div>
+        """)
+
+        text, html = await provider._reply(page)
+
+        assert text == (
+            "Đoạn một.\n\nĐoạn hai.\n\n---\n\n**GLOSSARY**\n\n"
+            "- 秦老板: Chủ tiệm họ Tần\n- 警服: đồng phục cảnh sát"
+        )
+        assert html is None
+    finally:
+        await pool.aclose()
+
+
 async def test_multi_account_round_robin_uses_distinct_contexts(fixture_recipe, tmp_path, monkeypatch):
     for name in ("a1", "a2"):
         (tmp_path / f"{name}.json").write_text('{"cookies": [], "origins": []}', encoding="utf-8")
