@@ -145,6 +145,47 @@ async def test_delete_refuses_while_a_recipe_uses_the_domain(client):
     assert (await c.get("/admin/profiles")).json()["profiles"] == []
 
 
+async def test_delete_allowed_when_another_profile_still_serves_the_domain(client):
+    """Domain còn account ở profile khác thì recipe vẫn chạy — không được chặn."""
+    c, app, db, cfg = client
+    _write_recipe(cfg.recipes_dir)
+    keep = (await _create(c, "keep")).json()
+    drop = (await _create(c, "drop")).json()
+    for profile in (keep, drop):
+        await c.post(f"/admin/profiles/{profile['id']}/accounts",
+                     json={"domain": "site.example", "label": "main"})
+    from chat2api.store import importer
+    importer.import_all(db, cfg.recipes_dir)
+
+    assert (await c.delete(f"/admin/profiles/{drop['id']}")).status_code == 200
+    assert [p["name"] for p in (await c.get("/admin/profiles")).json()["profiles"]] == ["keep"]
+
+    # Còn lại đúng một account cho domain đó -> lúc này mới là chặn thật.
+    refused = await c.delete(f"/admin/profiles/{keep['id']}")
+    assert refused.status_code == 409
+    assert refused.json()["error"]["code"] == "profile_in_use"
+
+
+async def test_delete_refuses_when_a_recipe_pins_the_profile(client):
+    """Recipe ghim thẳng profile thì dù domain còn account khác vẫn phải chặn."""
+    c, app, db, cfg = client
+    _write_recipe(cfg.recipes_dir)
+    keep = (await _create(c, "keep")).json()
+    pinned = (await _create(c, "pinned")).json()
+    for profile in (keep, pinned):
+        await c.post(f"/admin/profiles/{profile['id']}/accounts",
+                     json={"domain": "site.example", "label": "main"})
+    from chat2api.store import importer
+    importer.import_all(db, cfg.recipes_dir)
+    conn = db.connection()
+    conn.execute("UPDATE recipe SET profile_id = ? WHERE slug = 'sitea'", (pinned["id"],))
+    conn.commit()
+
+    refused = await c.delete(f"/admin/profiles/{pinned['id']}")
+    assert refused.status_code == 409
+    assert "sitea" in refused.json()["error"]["message"]
+
+
 async def test_add_account_creates_domain_and_shows_in_listing(client):
     c, *_ = client
     created = (await _create(c, "main")).json()

@@ -57,7 +57,7 @@
     {#snippet child({ props })}
       <div
         {...props}
-        class="flex items-center gap-2 rounded-md border border-border px-2.5 py-1.5 text-xs"
+        class="flex items-center gap-2 border-l border-border px-2.5 py-1 text-xs sm:border sm:bg-card/60"
         data-state={$serverStatus.state}
       >
         <span class={cn("size-2 rounded-full", dotClass, $serverStatus.state === "loading" && "animate-pulse")}

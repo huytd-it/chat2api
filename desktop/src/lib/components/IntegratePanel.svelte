@@ -1,22 +1,29 @@
 <script lang="ts">
   import { apiKey, showToast } from "../stores";
   import { startIntegration, fetchJob, jobAction, type JobStatus } from "../api";
-  import { refreshAccounts, refreshDomains, refreshModels, refreshRecipes } from "../sync";
+  import { profiles, refreshAccounts, refreshDomains, refreshModels, refreshRecipes } from "../sync";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Switch } from "$lib/components/ui/switch";
+  import * as Select from "$lib/components/ui/select";
   import * as Card from "$lib/components/ui/card";
   import * as Collapsible from "$lib/components/ui/collapsible";
   import JobStepTracker from "./JobStepTracker.svelte";
-  import { Browser, CaretDown, Check, CircleNotch, Copy, Globe, TerminalWindow, X } from "phosphor-svelte";
+  import { Browser, CaretDown, Check, CircleNotch, Copy, Globe, Stack, TerminalWindow, WarningCircle, X } from "phosphor-svelte";
 
   interface Props {
     /** Gọi một lần khi job đăng ký model thành công, kèm slug của recipe mới. */
     onSuccess?: (slug: string) => void;
+    /** Chuyển sang tab Profiles — dùng khi chưa có profile nào để tạo trước. */
+    onManageProfiles?: () => void;
   }
-  let { onSuccess }: Props = $props();
+  let { onSuccess, onManageProfiles }: Props = $props();
 
   let siteUrl = $state("");
+  // Bắt buộc chọn trước khi tích hợp: login lúc tích hợp (nếu site cần) gắn
+  // thẳng vào profile này, tránh rơi vào một profile tự sinh ngoài ý muốn.
+  let selectedProfileId = $state("");
+  const selectedProfileName = $derived($profiles.find((p) => String(p.id) === selectedProfileId)?.name ?? "");
   let headedMode = $state(false);
   let integrateDisabled = $state(false);
   let jobStatusText = $state("");
@@ -131,11 +138,13 @@
     const url = siteUrl.trim();
     if (!url) { showToast("Nhập URL web chat trước khi bắt đầu."); return; }
     try { new URL(url); } catch { showToast("URL không hợp lệ."); return; }
+    if (!selectedProfileId) { showToast("Chọn profile trước khi tích hợp."); return; }
+    const profileId = Number(selectedProfileId);
     const operation = ++operationGeneration;
     actionGeneration++; actionInFlightFor = null; resetLoginButtons(); integrateDisabled = true; stopPolling();
     loginActionsVisible = false; jobLog = ""; statusKind = "busy"; currentJobStatus = "running"; jobStatusText = "Đang khởi tạo analyzer…";
     try {
-      const data = await startIntegration($apiKey, url, headedMode);
+      const data = await startIntegration($apiKey, url, profileId, headedMode);
       if (operation !== operationGeneration) return;
       jobStatusText = "Đang chạy job " + data.job_id + "…"; resetLoginButtons(); startPolling(data.job_id);
     } catch (e) {
@@ -156,9 +165,31 @@
     </div>
   </Card.Header>
   <Card.Content class="grid gap-5 p-4 sm:p-6">
+    {#if $profiles.length}
+      <div class="grid gap-1.5">
+        <label for="integrate-profile" class="text-sm font-medium">Profile <span class="text-destructive">*</span></label>
+        <Select.Root type="single" bind:value={selectedProfileId}>
+          <Select.Trigger id="integrate-profile" class="h-10 w-full sm:w-64">
+            {selectedProfileName || "Chọn profile…"}
+          </Select.Trigger>
+          <Select.Content>
+            {#each $profiles as p (p.id)}
+              <Select.Item value={String(p.id)} label={p.name}>{p.name}</Select.Item>
+            {/each}
+          </Select.Content>
+        </Select.Root>
+        <p class="text-xs text-muted-foreground">Nếu site cần đăng nhập, phiên đăng nhập sẽ lưu thẳng vào profile này.</p>
+      </div>
+    {:else}
+      <div class="flex flex-wrap items-center gap-3 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning">
+        <WarningCircle class="shrink-0" />
+        <p class="min-w-0 flex-1">Chưa có profile nào — tạo một profile trước khi tích hợp để tránh đăng nhập rơi vào profile tự sinh.</p>
+        <Button variant="outline" size="sm" onclick={() => onManageProfiles?.()}><Stack /> Tạo profile</Button>
+      </div>
+    {/if}
     <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
       <div class="relative"><Globe class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" size={17} aria-hidden="true" /><Input class="h-10 pl-10 font-data" type="url" inputmode="url" placeholder="https://chat.example.com" aria-label="URL web chat" bind:value={siteUrl} onkeydown={(e) => e.key === "Enter" && startIntegrationJob()} /></div>
-      <Button class="h-10 px-4" disabled={integrateDisabled} onclick={startIntegrationJob}>{#if integrateDisabled}<CircleNotch class="animate-spin" /> Đang bắt đầu{:else}<Browser /> Phân tích site{/if}</Button>
+      <Button class="h-10 px-4" disabled={integrateDisabled || !selectedProfileId} onclick={startIntegrationJob}>{#if integrateDisabled}<CircleNotch class="animate-spin" /> Đang bắt đầu{:else}<Browser /> Phân tích site{/if}</Button>
     </div>
     <label class="flex cursor-pointer items-center justify-between gap-4 rounded-lg border bg-muted/30 px-3 py-2.5 text-sm"><span><strong class="font-medium">Hiện browser khi test</strong><span class="block text-xs text-muted-foreground">Tắt headless để quan sát analyzer thao tác.</span></span><Switch bind:checked={headedMode} aria-label="Hiện browser khi test" /></label>
 

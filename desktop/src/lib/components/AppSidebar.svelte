@@ -43,7 +43,7 @@
 <Sidebar.Root variant="floating" collapsible="icon">
   <Sidebar.Header>
     <div
-      class="flex items-center gap-2.5 px-2 py-1 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0"
+      class="flex items-center gap-2.5 px-3 py-2 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0"
     >
       <div
         class="flex size-8 shrink-0 cursor-default select-none items-center justify-center rounded-lg bg-sidebar-primary text-xs font-bold tracking-tight text-sidebar-primary-foreground"

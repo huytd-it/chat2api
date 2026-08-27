@@ -441,16 +441,90 @@ export async function deleteRecipe(key: string, slug: string): Promise<void> {
   await asJson(r);
 }
 
+export async function renameRecipe(
+  key: string,
+  slug: string,
+  newSlug: string,
+): Promise<{ ok: true; slug: string }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug), {
+    method: "PATCH",
+    headers: headers(key),
+    body: JSON.stringify({ slug: newSlug }),
+  });
+  return asJson(r);
+}
+
+/** Đúng khung recipe.yaml mà form thủ công (`ManualRecipePanel`) tự khai —
+ * không qua analyzer AI, dùng khi site quá lạ hoặc AI đoán sai selector. */
+export interface ManualRecipeSpec {
+  slug: string;
+  url: string;
+  prompt: {
+    input_selector: string;
+    input_mode: "fill" | "type";
+    submit: string; // "Enter" hoặc "click:<css selector>"
+  };
+  response: {
+    last_message_selector: string;
+    done_signal: {
+      type: "stable_text" | "selector_appear" | "selector_disappear" | "copy_button";
+      selector?: string;
+      quiet_ms?: number;
+      timeout_ms?: number;
+      scope?: "after" | "inside" | "page";
+      fallback_quiet_ms?: number;
+    };
+  };
+  models: { id: string }[];
+  new_chat?: { url?: string; selector?: string } | null;
+  timing?: { ready_delay_ms?: number; input_delay_ms?: number; ready_timeout_ms?: number } | null;
+  keep_context: boolean;
+  anon_trial_limit?: number | null;
+}
+
+export async function createRecipe(
+  key: string,
+  spec: ManualRecipeSpec,
+): Promise<{ ok: true; slug: string }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/recipes", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify(spec),
+  });
+  return asJson(r);
+}
+
+/** Gửi thử một prompt cố định qua recipe CHƯA lưu — cho biết selector đúng
+ * hay sai trước khi bấm tạo (form thủ công không có bước AI tự sửa). */
+export async function testRecipe(
+  key: string,
+  spec: ManualRecipeSpec,
+  headed = false,
+): Promise<{ ok: boolean; reply: string; error?: string }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/recipes/test", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify({ ...spec, headed }),
+  });
+  return asJson(r);
+}
+
+/** `profileId` bắt buộc: login trong lúc tích hợp (nếu site cần) gắn thẳng
+ * vào profile này thay vì rơi vào một profile tự sinh sau khi restart. */
 export async function startIntegration(
   key: string,
   url: string,
+  profileId: number,
   headed = false,
 ): Promise<{ job_id: string }> {
   const base = await apiBase();
   const r = await fetch(base + "/admin/integrate", {
     method: "POST",
     headers: headers(key),
-    body: JSON.stringify({ url, headed }),
+    body: JSON.stringify({ url, headed, profile_id: profileId }),
   });
   return asJson(r);
 }

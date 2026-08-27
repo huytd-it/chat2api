@@ -1,12 +1,13 @@
 <script lang="ts">
   import { apiKey, showToast } from "../stores";
   import { profiles, recipes, recipesLoading, refreshAfterRecipeChange, refreshAfterRecipeDelete, refreshProfiles, refreshRecipes } from "../sync";
-  import { closeRecipeBrowser, deleteRecipe, reloadRecipe, type RecipeInfo } from "../api";
+  import { closeRecipeBrowser, deleteRecipe, reloadRecipe, renameRecipe, type RecipeInfo } from "../api";
   import { Button } from "$lib/components/ui/button";
+  import { Input } from "$lib/components/ui/input";
   import { Badge, type BadgeVariant } from "$lib/components/ui/badge";
   import * as Card from "$lib/components/ui/card";
   import * as AlertDialog from "$lib/components/ui/alert-dialog";
-  import { Browser, CaretDown, CaretRight, CircleNotch, Repeat, Stack, Trash, WarningCircle, X } from "phosphor-svelte";
+  import { Browser, CaretDown, CaretRight, Check, CircleNotch, PencilSimple, Repeat, Stack, Trash, WarningCircle, X } from "phosphor-svelte";
 
   interface Props {
     /** Slug cần cuộn tới và làm nổi bật (ví dụ ngay sau khi tích hợp thành công). */
@@ -22,6 +23,9 @@
   let deleteRecipeTarget = $state<string | null>(null);
   let panelError = $state("");
   let refreshing = $state(false);
+  let renamingSlug = $state<string | null>(null);
+  let renameValue = $state("");
+  let renameBusy = $state(false);
 
   /** Profile đang đăng nhập một domain, theo đúng bảng `profile`/`account` mà
    * router dùng để chọn account cho mỗi request. Panel này chỉ ĐỌC: mọi thao
@@ -46,6 +50,22 @@
   async function confirmDeleteRecipe() {
     const slug = deleteRecipeTarget; if (!slug) return; deleteRecipeTarget = null; busySlug = slug; panelError = "";
     try { await deleteRecipe($apiKey, slug); showToast(`Đã xóa recipe ${slug}`); await refreshAfterRecipeDelete(); } catch (e) { fail(e); } finally { busySlug = null; }
+  }
+  function startRename(slug: string) { renamingSlug = slug; renameValue = slug; }
+  function cancelRename() { renamingSlug = null; renameValue = ""; }
+  async function confirmRename() {
+    const slug = renamingSlug; if (!slug) return;
+    const next = renameValue.trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(next)) { showToast("Slug chỉ gồm chữ thường, số và dấu -"); return; }
+    if (next === slug) { cancelRename(); return; }
+    renameBusy = true; panelError = "";
+    try {
+      await renameRecipe($apiKey, slug, next);
+      showToast(`Đã đổi tên ${slug} thành ${next}`);
+      if (expanded[slug]) expanded = { ...expanded, [next]: true };
+      cancelRename();
+      await refreshRecipes();
+    } catch (e) { fail(e); } finally { renameBusy = false; }
   }
 
   function healthOf(rec: RecipeInfo, profileCount: number): { label: string; variant: BadgeVariant } {
@@ -83,7 +103,15 @@
           {#if expanded[rec.slug]}
             <div class="grid gap-4 border-t bg-muted/15 p-4 sm:p-5">
               <dl class="grid gap-2 text-sm sm:grid-cols-[6rem_minmax(0,1fr)]"><dt class="text-muted-foreground">Models</dt><dd class="break-words font-data text-xs">{rec.models.join(", ") || "—"}</dd>{#if rec.url}<dt class="text-muted-foreground">URL</dt><dd class="break-all font-data text-xs">{rec.url}</dd>{/if}</dl>
-              <div class="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => onReload(rec.slug)}><Repeat class={busySlug === rec.slug ? "animate-spin" : ""} /> Reload</Button>{#if isBrowser}<Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => onCloseBrowser(rec.slug)}><X /> Đóng browser</Button>{/if}<Button variant="destructive" size="sm" disabled={busySlug === rec.slug} onclick={() => (deleteRecipeTarget = rec.slug)}><Trash /> Xóa recipe</Button></div>
+              {#if renamingSlug === rec.slug}
+                <form class="flex flex-wrap items-center gap-2" onsubmit={(e) => { e.preventDefault(); confirmRename(); }}>
+                  <Input class="h-8 w-48 font-data" bind:value={renameValue} disabled={renameBusy} aria-label={`Tên mới cho ${rec.slug}`} />
+                  <Button type="submit" size="sm" disabled={renameBusy}>{#if renameBusy}<CircleNotch class="animate-spin" />{:else}<Check />{/if} Lưu</Button>
+                  <Button type="button" variant="ghost" size="sm" disabled={renameBusy} onclick={cancelRename}><X /> Hủy</Button>
+                </form>
+              {:else}
+                <div class="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => onReload(rec.slug)}><Repeat class={busySlug === rec.slug ? "animate-spin" : ""} /> Reload</Button><Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => startRename(rec.slug)}><PencilSimple /> Đổi tên</Button>{#if isBrowser}<Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => onCloseBrowser(rec.slug)}><X /> Đóng browser</Button>{/if}<Button variant="destructive" size="sm" disabled={busySlug === rec.slug} onclick={() => (deleteRecipeTarget = rec.slug)}><Trash /> Xóa recipe</Button></div>
+              {/if}
               {#if isBrowser}
                 <div class="border-t pt-4">
                   <div class="mb-3 flex items-center justify-between gap-3">

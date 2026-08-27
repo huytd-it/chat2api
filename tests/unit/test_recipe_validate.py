@@ -25,6 +25,24 @@ def test_selector_done_signal_needs_selector():
     assert any("selector" in e for e in validate_recipe(d))
 
 
+def test_copy_button_done_signal_selector_is_optional():
+    d = {**MINIMAL, "response": {**MINIMAL["response"],
+         "done_signal": {"type": "copy_button"}}}
+    assert validate_recipe(d) == []
+
+
+def test_copy_button_done_signal_rejects_bad_scope():
+    d = {**MINIMAL, "response": {**MINIMAL["response"],
+         "done_signal": {"type": "copy_button", "scope": "duoi"}}}
+    assert any("scope" in e for e in validate_recipe(d))
+
+
+def test_copy_button_done_signal_rejects_bad_fallback():
+    d = {**MINIMAL, "response": {**MINIMAL["response"],
+         "done_signal": {"type": "copy_button", "fallback_quiet_ms": -1}}}
+    assert any("fallback_quiet_ms" in e for e in validate_recipe(d))
+
+
 def test_invalid_slug_charset():
     d = {**MINIMAL, "slug": "../evil"}
     assert any("slug" in e for e in validate_recipe(d))

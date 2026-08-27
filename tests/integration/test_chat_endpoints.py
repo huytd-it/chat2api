@@ -373,16 +373,20 @@ async def test_integrate_passes_headed_flag_to_job(app_client, monkeypatch):
     captured = {}
 
     def fake_start_integrate(url, cfg, pool, router=None, login_manager=None,
-                             publish_lock=None, headed=False):
+                             publish_lock=None, headed=False, profile=None):
         captured["headed"] = headed
+        captured["profile"] = profile
         return "job-1"
 
     monkeypatch.setattr("chat2api.jobs.start_integrate", fake_start_integrate)
+    monkeypatch.setattr("chat2api.profiles.find", lambda ident: {"id": 1, "name": "main"})
     try:
-        r = await app_client.post("/admin/integrate", json={"url": "https://x.example", "headed": True})
+        r = await app_client.post(
+            "/admin/integrate", json={"url": "https://x.example", "headed": True, "profile_id": 1})
         assert r.status_code == 200
         assert r.json() == {"job_id": "job-1"}
         assert captured["headed"] is True
+        assert captured["profile"] == {"id": 1, "name": "main"}
     finally:
         app.state.cfg.agent_llm_base_url = ""
         app.state.cfg.agent_llm_api_key = ""
@@ -390,7 +394,7 @@ async def test_integrate_passes_headed_flag_to_job(app_client, monkeypatch):
 
 
 async def test_admin_recipes_and_auth_guard(app_client):
-    r = await app_client.post("/admin/integrate", json={"url": "https://x.example"})
+    r = await app_client.post("/admin/integrate", json={"url": "https://x.example", "profile_id": 1})
     # chÆ°a cáº¥u hÃ¬nh LLM â†’ 503 agent_not_configured
     assert r.status_code == 503
     assert r.json()["error"]["code"] == "agent_not_configured"
@@ -402,6 +406,71 @@ async def test_admin_recipes_and_auth_guard(app_client):
 async def test_admin_delete_recipe_guard(app_client):
     r = await app_client.delete("/admin/recipes/gemini")
     assert r.status_code == 400
+
+
+def _manual_recipe_body(**overrides):
+    body = {
+        "slug": "manual-site",
+        "url": "https://chat.manual.test",
+        "prompt": {"input_selector": "#box", "input_mode": "fill", "submit": "Enter"},
+        "response": {
+            "last_message_selector": ".msg",
+            "done_signal": {"type": "stable_text", "quiet_ms": 500, "timeout_ms": 5000},
+        },
+        "models": [{"id": "web"}],
+        "keep_context": True,
+    }
+    body.update(overrides)
+    return body
+
+
+async def test_create_manual_recipe_writes_yaml_and_reloads(app_client):
+    import yaml
+
+    app = app_client._transport.app
+    r = await app_client.post("/admin/recipes", json=_manual_recipe_body())
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "slug": "manual-site"}
+
+    recipe_path = app.state.cfg.recipes_dir / "manual-site" / "recipe.yaml"
+    assert recipe_path.exists()
+    data = yaml.safe_load(recipe_path.read_text(encoding="utf-8"))
+    assert data["url"] == "https://chat.manual.test"
+    assert data["prompt"]["input_selector"] == "#box"
+    assert data["models"] == [{"id": "web"}]
+    assert "manual-site" in app.state.router.providers
+
+
+async def test_create_manual_recipe_rejects_reserved_slug(app_client):
+    r = await app_client.post("/admin/recipes", json=_manual_recipe_body(slug="gemini"))
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_slug"
+
+
+async def test_create_manual_recipe_rejects_duplicate_slug(app_client):
+    first = await app_client.post("/admin/recipes", json=_manual_recipe_body())
+    assert first.status_code == 200
+    second = await app_client.post("/admin/recipes", json=_manual_recipe_body())
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "slug_taken"
+
+
+async def test_create_manual_recipe_rejects_incomplete_done_signal(app_client):
+    body = _manual_recipe_body(
+        response={
+            "last_message_selector": ".msg",
+            "done_signal": {"type": "selector_appear"},  # thiếu selector bắt buộc
+        },
+    )
+    r = await app_client.post("/admin/recipes", json=body)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_recipe"
+
+
+async def test_create_manual_recipe_rejects_bad_slug_pattern(app_client):
+    r = await app_client.post("/admin/recipes", json=_manual_recipe_body(slug="Not Valid!"))
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_slug"
 
 
 async def test_login_actions_inherit_admin_auth(app_client):

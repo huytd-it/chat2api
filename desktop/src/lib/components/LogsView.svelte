@@ -87,6 +87,7 @@
 </script>
 
 <PageShell
+  kicker="Hệ thống"
   title="Logs"
   description="Hoạt động server (request, integrate, đăng nhập, lỗi) và output tiến trình chạy nền."
   width="wide"

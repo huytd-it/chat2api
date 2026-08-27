@@ -8,9 +8,28 @@ import time
 from pathlib import Path
 from typing import AsyncIterator
 
-from .. import accounts, settings, store
+from .. import accounts, applog, settings, store
 from ..prompt import flatten_messages
 from .base import ModelInfo, Provider
+
+DONE_SIGNALS = {"stable_text", "selector_appear", "selector_disappear", "copy_button"}
+COPY_SCOPES = {"after", "inside", "page"}
+# Gần như web chat nào cũng gắn nút "Copy" ngay dưới câu trả lời và CHỈ gắn khi
+# câu trả lời đã viết xong — nên nó là mốc "xong" chính xác hơn hẳn việc đoán
+# qua text đứng yên. Danh sách dưới là mặc định khi recipe không tự khai
+# `selector`, gom các cách đánh dấu nút copy hay gặp (en/vi/zh).
+DEFAULT_COPY_BUTTON_SELECTOR = (
+    'button[aria-label*="copy" i], '
+    'button[title*="copy" i], '
+    '[role="button"][aria-label*="copy" i], '
+    '[data-testid*="copy" i], '
+    '[data-test-id*="copy" i], '
+    'button[aria-label*="sao chép" i], '
+    'button[title*="sao chép" i], '
+    'button[aria-label*="复制"], '
+    'button[title*="复制"], '
+    "copy-button button"
+)
 
 LOGIN_STRATEGIES = {"round_robin", "fill_first"}
 # Cách chọn account khi client không tự chỉ định (API_ACCOUNT_STRATEGY).
@@ -96,10 +115,16 @@ def validate_recipe(d: dict) -> list[str]:
     resp = d.get("response") or {}
     ds = resp.get("done_signal") or {}
     need("response.last_message_selector", bool(resp.get("last_message_selector")))
-    need("response.done_signal.type",
-         ds.get("type") in {"stable_text", "selector_appear", "selector_disappear"})
+    need("response.done_signal.type", ds.get("type") in DONE_SIGNALS)
     if ds.get("type") in {"selector_appear", "selector_disappear"}:
         need("response.done_signal.selector", bool(ds.get("selector")))
+    if ds.get("type") == "copy_button":
+        # `selector` là tùy chọn: bỏ trống thì dùng DEFAULT_COPY_BUTTON_SELECTOR.
+        if ds.get("scope") is not None and ds.get("scope") not in COPY_SCOPES:
+            errs.append("invalid field: response.done_signal.scope (after | inside | page)")
+        fb = ds.get("fallback_quiet_ms")
+        if fb is not None and (not isinstance(fb, int) or fb < 0):
+            errs.append("invalid field: response.done_signal.fallback_quiet_ms (số nguyên >= 0)")
     models = d.get("models")
     need("models", isinstance(models, list) and len(models) > 0 and all(m.get("id") for m in models))
 
@@ -735,6 +760,58 @@ class BrowserRecipe(Provider):
         text, _ = await self._reply(page)
         return text
 
+    async def _copy_button_ready(self, page, selector: str, scope: str,
+                                 exclude: str) -> bool:
+        """Nút Copy của câu trả lời CUỐI đã hiện và bấm được chưa.
+
+        Không dùng `count()` toàn trang như `selector_appear`: hội thoại cũ (và
+        cả tin nhắn của người dùng) cũng có nút copy, đếm cả trang thì vừa gửi
+        prompt đã thấy "xong". Ở đây nút phải nằm TRONG hoặc SAU khối câu trả
+        lời cuối theo thứ tự DOM — đúng chỗ web chat gắn thanh hành động.
+        """
+        try:
+            return bool(await page.evaluate(
+                r"""([msgSel, btnSel, scope, excludeSel]) => {
+                     let btns;
+                     try { btns = Array.from(document.querySelectorAll(btnSel)); }
+                     catch (e) { return false; }
+                     const nameOf = b => [b.getAttribute("aria-label"),
+                                          b.getAttribute("title"),
+                                          b.textContent].join(" ").toLowerCase();
+                     const usable = btns.filter(b => {
+                       if (b.disabled || b.getAttribute("aria-disabled") === "true") return false;
+                       // "Copy code" mọc lên NGAY khi code block bắt đầu stream,
+                       // còn lâu mới xong câu trả lời — không được tính.
+                       if (b.closest("pre")) return false;
+                       if (/code|mã nguồn|代码/.test(nameOf(b))) return false;
+                       if (excludeSel) {
+                         try { if (b.closest(excludeSel)) return false; } catch (e) {}
+                       }
+                       // Nút mới render nhưng chưa chiếm chỗ (display:none) thì
+                       // chưa tính; opacity 0 vì hiệu ứng hover vẫn tính là có.
+                       if (!b.getClientRects().length) return false;
+                       const st = getComputedStyle(b);
+                       return st.visibility !== "hidden" && st.display !== "none";
+                     });
+                     if (!usable.length) return false;
+                     if (scope === "page") return true;
+                     const msgs = document.querySelectorAll(msgSel);
+                     if (!msgs.length) return false;
+                     const msg = msgs[msgs.length - 1];
+                     return usable.some(b => {
+                       if (msg.contains(b)) return true;
+                       if (scope === "inside") return false;
+                       return !!(msg.compareDocumentPosition(b) &
+                                 Node.DOCUMENT_POSITION_FOLLOWING);
+                     });
+                   }""",
+                [self.response_cfg["last_message_selector"], selector, scope, exclude],
+            ))
+        except Exception:
+            # Trang đang điều hướng/đóng tab: coi như chưa xong, vòng poll sau
+            # sẽ hỏi lại, hết giờ thì deadline lo.
+            return False
+
     async def _wait_chat_ready(self, page, box) -> None:
         """Chờ trang chat sẵn sàng nhận prompt, rồi mở phiên chat mới nếu cần.
 
@@ -777,7 +854,18 @@ class BrowserRecipe(Provider):
             assignment.headed = self.resolve_headed(headed, target_profile)
         effective_headed = assignment.headed
         timeout_ms = int(self.ds.get("timeout_ms", 120000))
-        quiet_ms = int(self.ds.get("quiet_ms", 3000))
+        dtype = self.ds.get("type", "stable_text")
+        # copy_button có tín hiệu dứt khoát nên chỉ cần chống nhiễu vài trăm ms,
+        # không phải chờ hết khoảng "im lặng" dài như stable_text.
+        quiet_ms = int(self.ds.get("quiet_ms", 600 if dtype == "copy_button" else 3000))
+        copy_sel = str(self.ds.get("selector") or DEFAULT_COPY_BUTTON_SELECTOR)
+        copy_scope = str(self.ds.get("scope") or "after")
+        copy_exclude = str(self.ds.get("exclude") or "")
+        # Selector nút copy sai (site đổi giao diện) mà không có lối thoát thì
+        # MỌI request đều chạy tới timeout rồi hỏng — mất luôn câu trả lời đã
+        # nhận đủ. Nên vẫn giữ đường lùi: text đứng yên đủ lâu thì chốt và ghi
+        # log cảnh báo. Đặt `fallback_quiet_ms: 0` để tắt hẳn.
+        copy_fallback_ms = int(self.ds.get("fallback_quiet_ms", 15000))
         # Page dùng chung cho mỗi ctx_key nên hai request cùng account phải nối
         # đuôi nhau, không chen ngang vào cùng một ô input.
         async with self._lock_for(ctx_key), contextlib.AsyncExitStack() as stack:
@@ -804,8 +892,9 @@ class BrowserRecipe(Provider):
                 else:
                     await box.press("Enter")
 
-                dtype = self.ds.get("type", "stable_text")
                 stable_since = None
+                # Lần đầu thấy nút copy của câu trả lời cuối (copy_button).
+                copy_since = None
                 last = ""
                 # HTML gốc giữ ở biến cục bộ chứ không phải trên self: hai
                 # request song song (hai account) dùng chung một instance
@@ -824,15 +913,36 @@ class BrowserRecipe(Provider):
                             yield text[len(last):]
                         last = text
                         stable_since = time.monotonic()
+                    has_reply = bool(last.strip()) and last.strip() != prompt.strip()
+                    quiet_for = ((time.monotonic() - stable_since) * 1000
+                                 if stable_since is not None else 0)
                     if dtype == "stable_text":
-                        done = (bool(last.strip()) and last.strip() != prompt.strip()
-                                and stable_since is not None
-                                and (time.monotonic() - stable_since) * 1000 >= quiet_ms)
+                        done = has_reply and stable_since is not None and quiet_for >= quiet_ms
+                    elif dtype == "copy_button":
+                        seen = has_reply and await self._copy_button_ready(
+                            page, copy_sel, copy_scope, copy_exclude)
+                        if not seen:
+                            copy_since = None
+                        elif copy_since is None:
+                            copy_since = time.monotonic()
+                        # Đòi cả nút VÀ text đứng yên: vài site dựng sẵn thanh
+                        # hành động (ẩn mờ) ngay khi bắt đầu trả lời.
+                        done = (copy_since is not None
+                                and (time.monotonic() - copy_since) * 1000 >= quiet_ms
+                                and quiet_for >= quiet_ms)
+                        if (not done and copy_fallback_ms and has_reply
+                                and quiet_for >= copy_fallback_ms):
+                            applog.log(
+                                f"recipe: '{self.slug}' không thấy nút copy sau "
+                                f"{copy_fallback_ms}ms text đứng yên — chốt theo "
+                                f"stable_text, nên kiểm tra lại done_signal.selector",
+                                level="warn")
+                            done = True
                     else:
                         count = await page.locator(self.ds["selector"]).count()
                         appear = dtype == "selector_appear"
-                        done = ((count > 0) == appear) and stable_since is not None \
-                            and (time.monotonic() - stable_since) * 1000 >= min(quiet_ms, 1000)
+                        done = (((count > 0) == appear) and stable_since is not None
+                                and quiet_for >= min(quiet_ms, 1000))
                     if done:
                         assignment.html = captured_html
                         assignment.conversation_url = _page_url(page)

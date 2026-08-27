@@ -163,7 +163,7 @@ profile "main"  ──► 1 tiến trình Chromium (persistent context)
 - `lease(profile, recipe_slug) -> Page` — một tab dài hạn cho mỗi `(profile, recipe)`, cùng một khoá thì xếp hàng qua `asyncio.Lock` (giữ hành vi hiện tại: hai request cùng recipe không chen vào cùng ô input).
 - **Recipe khác nhau trong cùng profile chạy song song** — mỗi tab một lock riêng. Đây là phần "chia tab dùng nhiều web chat một lúc".
 - `profile.max_tabs` chặn trên; vượt thì đóng tab LRU **đang rảnh** (không đóng browser, không đóng tab vừa mở). `pool.hold(profile, tab_key)` ghim tab/profile trong lúc một request chạy — bàn test Sessions mở song song nhiều profile nên chạm trần là chuyện thường, và trần không được phép cắt phiên đang stream. Mọi ứng viên đều bận thì pool tạm vượt trần và ghi cảnh báo.
-- Khớp `--disable-*-backgrounding` ở trên: nếu thiếu, tab nền bị throttle và vòng poll `stable_text` trong `browser_recipe.stream()` sẽ chậm/timeout.
+- Khớp `--disable-*-backgrounding` ở trên: nếu thiếu, tab nền bị throttle và vòng poll `done_signal` trong `browser_recipe.stream()` sẽ chậm/timeout.
 
 **Khoá tiến trình.** Một `user_data_dir` chỉ được một tiến trình Chromium mở. `profile.lock_pid`/`lock_at` phát hiện server cũ còn treo và báo lỗi rõ ràng, thay vì để Chromium fail với thông báo khó hiểu. Khi start: nếu `lock_pid` còn sống và khác pid hiện tại → từ chối; nếu chết → thu hồi khoá.
 

@@ -23,8 +23,13 @@ prompt:
 response:
   last_message_selector: "<css selector khối tin nhắn AI; tool luôn lấy phần tử CUỐI cùng>"
   done_signal:
-    type: stable_text       # stable_text khi không có tín hiệu khác rõ ràng
-    quiet_ms: 3000          # text không đổi trong khoảng này là coi như xong
+    # copy_button: ƯU TIÊN dùng — hầu hết web chat gắn nút "Copy" ngay dưới câu
+    # trả lời và chỉ khi nó viết xong, nên đây là mốc "xong" chính xác nhất.
+    # stable_text: chỉ dùng khi trang KHÔNG có nút copy.
+    type: copy_button
+    # selector: chỉ thêm khi nhìn thấy rõ nút copy trong DOM; KHÔNG chắc thì bỏ
+    # hẳn dòng này — tool có sẵn bộ dò nút copy theo aria-label/title/data-testid.
+    quiet_ms: 600           # chống nhiễu sau khi nút hiện
     timeout_ms: 120000
 new_chat:                   # tùy chọn, bỏ hẳn nếu trang luôn mở sẵn chat trống
   selector: "<css selector nút tạo chat mới>"   # hoặc: url: <url mở chat mới>

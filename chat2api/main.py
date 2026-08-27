@@ -494,7 +494,8 @@ def register_admin(app: FastAPI, admin) -> None:
     from . import jobs, settings
     from .schemas import (AccountLoginRequest, AddAccountRequest, ApiKeyCreateRequest,
                           IntegrateRequest, ProfileAccountRequest, ProfileCreateRequest,
-                          ProfileOpenRequest, ProfileUpdateRequest, SaveAccountRequest,
+                          ProfileOpenRequest, ProfileUpdateRequest, RecipeManualSpec,
+                          RecipeRenameRequest, RecipeTestRequest, SaveAccountRequest,
                           SessionForkRequest, SessionUpdateRequest, SettingsRequest,
                           TestTargetOpenRequest)
 
@@ -621,14 +622,22 @@ def register_admin(app: FastAPI, admin) -> None:
             raise OpenAIError(503, "agent_not_configured",
                               "Đặt AGENT_LLM_BASE_URL, AGENT_LLM_API_KEY, AGENT_LLM_MODEL "
                               "để dùng tính năng tích hợp tự động.")
+        # Bắt buộc có profile hợp lệ trước khi mở job: nếu site cần đăng nhập,
+        # login lưu thẳng vào profile này thay vì rơi vào một profile tự sinh.
+        profile_row = await asyncio.to_thread(profiles.find, str(body.profile_id))
+        if profile_row is None:
+            raise OpenAIError(400, "invalid_profile",
+                              "Chọn một profile hợp lệ trước khi tích hợp.")
         job_id = jobs.start_integrate(
             body.url, cfg, request.app.state.pool,
             router=request.app.state.router,
             login_manager=request.app.state.login_manager,
             publish_lock=request.app.state.recipe_publish_lock,
             headed=body.headed,
+            profile={"id": profile_row["id"], "name": profile_row["name"]},
         )
-        applog.log(f"integrate: bắt đầu {body.url} (job={job_id}, headed={body.headed})")
+        applog.log(f"integrate: bắt đầu {body.url} (job={job_id}, headed={body.headed}, "
+                   f"profile={profile_row['name']})")
         return {"job_id": job_id}
 
     @admin.get("/integrate/{job_id}")
@@ -744,8 +753,12 @@ def register_admin(app: FastAPI, admin) -> None:
         # khỏi phiên đang chạy thì tệ hơn là không làm gì cả.
         used = await asyncio.to_thread(profiles.blockers, row["id"])
         if used:
-            raise OpenAIError(409, "profile_in_use",
-                              f"Profile '{row['name']}' còn được recipe dùng: {', '.join(used)}")
+            raise OpenAIError(
+                409, "profile_in_use",
+                f"Xoá profile '{row['name']}' sẽ làm hỏng recipe: {', '.join(used)} — "
+                "recipe ghim thẳng profile này, hoặc đây là account cuối cùng còn bật "
+                "của domain nó dùng. Bỏ ghim, hoặc thêm account khác cho domain đó, "
+                "rồi xoá lại.")
         await request.app.state.pool.drop_profile(row["name"])
         try:
             await asyncio.to_thread(profiles.delete, row["id"], remove_dir=purge)
@@ -957,6 +970,68 @@ def register_admin(app: FastAPI, admin) -> None:
             out.append(entry)
         return out
 
+    @admin.post("/recipes")
+    async def create_recipe(body: RecipeManualSpec, request: Request):
+        """Tạo recipe thủ công (không qua analyzer AI) — người dùng tự khai CSS
+        selector, dùng khi site quá lạ hoặc analyzer đoán selector sai."""
+        import yaml
+
+        from .providers.browser_recipe import validate_recipe as _validate_recipe
+
+        slug = body.slug.strip().lower()
+        if not re.fullmatch(r"[a-z0-9-]+", slug) or slug in {"gemini", "openai"}:
+            raise OpenAIError(400, "invalid_slug",
+                              "Slug chỉ gồm chữ thường, số và dấu -, không trùng tên hệ thống")
+        cfg = request.app.state.cfg
+        target = cfg.recipes_dir / slug
+        if target.exists():
+            raise OpenAIError(409, "slug_taken", f"Slug '{slug}' đã tồn tại")
+        recipe = body.to_recipe_dict()
+        recipe["slug"] = slug
+        errs = _validate_recipe(recipe)
+        if errs:
+            raise OpenAIError(400, "invalid_recipe", "; ".join(errs))
+        async with request.app.state.recipe_publish_lock:
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "recipe.yaml").write_text(
+                yaml.safe_dump(recipe, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            request.app.state.router.reload()
+        applog.log(f"recipe: tạo thủ công {slug}")
+        return {"ok": True, "slug": slug}
+
+    @admin.post("/recipes/test")
+    async def test_recipe(body: RecipeTestRequest, request: Request):
+        """Chạy thử một prompt cố định qua recipe CHƯA lưu, để người dùng biết
+        selector đúng hay sai trước khi bấm tạo (form thủ công không có bước
+        round-trip tự sửa như analyzer AI)."""
+        from .providers.browser_recipe import BrowserRecipe, validate_recipe as _validate_recipe
+
+        recipe = body.to_recipe_dict()
+        errs = _validate_recipe({**recipe, "slug": recipe.get("slug") or "test"})
+        if errs:
+            raise OpenAIError(400, "invalid_recipe", "; ".join(errs))
+        cfg = request.app.state.cfg
+        pool = request.app.state.pool
+        trial_slug = f"manual-test-{uuid.uuid4().hex[:10]}"
+        trial_recipe = {**recipe, "slug": trial_slug}
+        trial_dir = cfg.recipes_dir / ".manual-test" / trial_slug
+        runner = BrowserRecipe(trial_recipe, trial_dir, pool, headed=body.headed,
+                               accounts_root=cfg.recipes_dir)
+        try:
+            parts = []
+            async for delta in runner.stream(
+                [{"role": "user", "content": "Reply with exactly: OK"}],
+                trial_recipe["models"][0]["id"],
+            ):
+                parts.append(delta)
+            reply = "".join(parts).strip()
+        except Exception as error:
+            return {"ok": False, "reply": "", "error": str(error)}
+        finally:
+            await pool.drop(trial_slug)
+        ok = bool(reply) and reply.lower() != "reply with exactly: ok"
+        return {"ok": ok, "reply": reply}
+
     @admin.post("/recipes/{slug}/reload")
     async def reload_recipes(slug: str, request: Request):
         request.app.state.router.reload()
@@ -973,6 +1048,36 @@ def register_admin(app: FastAPI, admin) -> None:
         request.app.state.router.reload()
         applog.log(f"recipe: xóa {slug}", "warn")
         return {"ok": True}
+
+    @admin.patch("/recipes/{slug}")
+    async def rename_recipe(slug: str, body: RecipeRenameRequest, request: Request):
+        import yaml
+
+        new_slug = (body.slug or "").strip().lower()
+        if slug in {"gemini", "openai"}:
+            raise OpenAIError(400, "invalid_slug", "Không thể đổi tên recipe hệ thống")
+        if not re.fullmatch(r"[a-z0-9-]+", new_slug) or new_slug in {"gemini", "openai"}:
+            raise OpenAIError(400, "invalid_slug",
+                              "Slug chỉ gồm chữ thường, số và dấu -, không trùng tên hệ thống")
+        cfg = request.app.state.cfg
+        src = cfg.recipes_dir / slug
+        recipe_file = src / "recipe.yaml"
+        if not recipe_file.exists():
+            raise OpenAIError(404, "not_found", "Recipe không tồn tại")
+        if new_slug == slug:
+            return {"ok": True, "slug": slug}
+        dst = cfg.recipes_dir / new_slug
+        if dst.exists():
+            raise OpenAIError(409, "slug_taken", f"Slug '{new_slug}' đã tồn tại")
+        async with request.app.state.recipe_publish_lock:
+            data = yaml.safe_load(recipe_file.read_text(encoding="utf-8")) or {}
+            data["slug"] = new_slug
+            recipe_file.write_text(
+                yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            shutil.move(str(src), str(dst))
+            request.app.state.router.reload()
+        applog.log(f"recipe: đổi tên {slug} -> {new_slug}")
+        return {"ok": True, "slug": new_slug}
 
     def _browser_recipe_or_404(request: Request, slug: str):
         from .providers.browser_recipe import BrowserRecipe as BR

@@ -3,7 +3,12 @@ import time
 import pytest
 
 from chat2api.browserpool import BrowserPool
-from chat2api.providers.browser_recipe import BrowserRecipe, TrialLimitExceeded, validate_recipe
+from chat2api.providers.browser_recipe import (
+    DEFAULT_COPY_BUTTON_SELECTOR,
+    BrowserRecipe,
+    TrialLimitExceeded,
+    validate_recipe,
+)
 
 pytest.importorskip("playwright.async_api")
 
@@ -54,6 +59,98 @@ async def test_reply_preserves_markdown_block_structure(fixture_recipe, tmp_path
             "- 秦老板: Chủ tiệm họ Tần\n- 警服: đồng phục cảnh sát"
         )
         assert html is None
+    finally:
+        await pool.aclose()
+
+
+def _copy_button_recipe(fixture_recipe, **ds):
+    return {**fixture_recipe, "response": {
+        **fixture_recipe["response"],
+        "done_signal": {"type": "copy_button", "quiet_ms": 300, "timeout_ms": 8000, **ds},
+    }}
+
+
+async def test_copy_button_done_signal_waits_for_the_button(fixture_recipe, tmp_path):
+    recipe = _copy_button_recipe(fixture_recipe)
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(recipe, tmp_path, pool)
+        out = []
+        async for delta in provider.stream([{"role": "user", "content": "hi"}], "fixture-web"):
+            out.append(delta)
+        # Nút copy chỉ gắn vào khi fixture viết xong câu cuối, nên chốt sớm là
+        # sẽ thiếu chữ.
+        assert "".join(out).strip() == "This is the reply."
+    finally:
+        await pool.aclose()
+
+
+async def test_copy_button_falls_back_to_stable_text_when_selector_never_matches(
+        fixture_recipe, tmp_path):
+    recipe = _copy_button_recipe(
+        fixture_recipe, selector="button.khong-bao-gio-co", fallback_quiet_ms=400)
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(recipe, tmp_path, pool)
+        out = []
+        async for delta in provider.stream([{"role": "user", "content": "hi"}], "fixture-web"):
+            out.append(delta)
+        assert "".join(out).strip() == "This is the reply."
+    finally:
+        await pool.aclose()
+
+
+async def test_copy_button_ignores_button_of_earlier_message(fixture_recipe, tmp_path):
+    """Nút copy của lượt TRƯỚC không được tính là lượt này đã xong."""
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(fixture_recipe, tmp_path, pool)
+        context = await pool.context_for("copy-scope")
+        page = await context.new_page()
+        await page.set_content("""
+          <div class="msg">Câu trả lời cũ.</div>
+          <div><button aria-label="Copy">Copy</button></div>
+          <div class="msg">Câu trả lời đang</div>
+        """)
+        sel = DEFAULT_COPY_BUTTON_SELECTOR
+        assert await provider._copy_button_ready(page, sel, "after", "") is False
+
+        await page.evaluate("""() => {
+          const bar = document.createElement("div");
+          bar.innerHTML = '<button aria-label="Copy">Copy</button>';
+          document.querySelectorAll(".msg")[1].after(bar);
+        }""")
+        assert await provider._copy_button_ready(page, sel, "after", "") is True
+    finally:
+        await pool.aclose()
+
+
+async def test_copy_button_ignores_code_block_copy_button(fixture_recipe, tmp_path):
+    """Nút "Copy code" mọc lên ngay khi code block bắt đầu stream, chưa phải xong."""
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(fixture_recipe, tmp_path, pool)
+        context = await pool.context_for("copy-code")
+        page = await context.new_page()
+        await page.set_content("""
+          <div class="msg">
+            <div><button aria-label="Copy code">Copy code</button></div>
+            <pre><code>print("dang stream")</code></pre>
+          </div>
+        """)
+        sel = DEFAULT_COPY_BUTTON_SELECTOR
+        assert await provider._copy_button_ready(page, sel, "after", "") is False
+
+        await page.evaluate("""() => {
+          const bar = document.createElement("div");
+          bar.innerHTML = '<button aria-label="Copy">Copy</button>';
+          document.querySelector(".msg").after(bar);
+        }""")
+        assert await provider._copy_button_ready(page, sel, "after", "") is True
     finally:
         await pool.aclose()
 

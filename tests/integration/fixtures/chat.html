@@ -19,7 +19,17 @@ document.getElementById("send").onclick = () => {
   const t = setInterval(() => {
     i += 2;
     m.textContent = full.slice(0, i);
-    if (i >= full.length) clearInterval(t);
+    if (i >= full.length) {
+      clearInterval(t);
+      // Giống web chat thật: thanh hành động (nút Copy) chỉ gắn vào NGAY SAU
+      // câu trả lời khi nó đã viết xong.
+      const bar = document.createElement("div");
+      const copy = document.createElement("button");
+      copy.setAttribute("aria-label", "Copy");
+      copy.textContent = "Copy";
+      bar.appendChild(copy);
+      m.after(bar);
+    }
   }, 100);
 };
 </script>

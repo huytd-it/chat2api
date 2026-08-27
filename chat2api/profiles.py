@@ -303,7 +303,16 @@ def accounts_of(profile_id: int) -> list[dict]:
 
 
 def blockers(profile_id: int) -> list[str]:
-    """Recipe sẽ hỏng nếu xoá profile này: ghim thẳng, hoặc dùng chung domain."""
+    """Recipe THẬT SỰ hỏng nếu xoá profile này. Đúng hai trường hợp:
+
+    * recipe ghim thẳng `profile_id` — mất profile là mất chỗ chạy;
+    * profile này giữ account CUỐI CÙNG còn bật của domain mà recipe dùng.
+
+    Domain còn account ở profile khác thì recipe vẫn xoay vòng qua chúng và chạy
+    bình thường, nên không được chặn. Trước đây chỉ cần "chung domain" là chặn,
+    làm người dùng không xoá nổi profile thừa — một máy hay có 2-3 profile cùng
+    đăng nhập một site, tình huống mà multi-account sinh ra để phục vụ.
+    """
     db = store.default()
     if db is None:
         return []
@@ -312,7 +321,13 @@ def blockers(profile_id: int) -> list[str]:
         "UNION "
         "SELECT DISTINCT r.slug FROM recipe r "
         " JOIN account a ON a.domain_id = r.domain_id "
-        "WHERE a.profile_id = ? AND a.disabled = 0", (int(profile_id), int(profile_id)))
+        "WHERE a.profile_id = ? AND a.disabled = 0 "
+        # Không còn account nào khác phục vụ domain đó: account rời (profile_id
+        # NULL, seed từ storage_state) cũng tính là "khác".
+        "  AND NOT EXISTS (SELECT 1 FROM account o WHERE o.domain_id = r.domain_id "
+        "                    AND o.disabled = 0 "
+        "                    AND (o.profile_id IS NULL OR o.profile_id <> ?))",
+        (int(profile_id), int(profile_id), int(profile_id)))
     return sorted(row["slug"] for row in rows)
 
 
@@ -399,7 +414,8 @@ def delete(profile_id: int, *, remove_dir: bool = False) -> bool:
     used = blockers(profile_id)
     if used:
         raise ProfileInUse(
-            f"profile '{row['name']}' còn được recipe dùng: {', '.join(used)}")
+            f"xoá profile '{row['name']}' sẽ làm hỏng recipe: {', '.join(used)} "
+            "(recipe ghim profile này, hoặc đây là account cuối cùng của domain nó dùng)")
     if row["lock_pid"] and _pid_alive(int(row["lock_pid"])):
         raise ProfileLocked(
             f"profile '{row['name']}' đang mở ở tiến trình {row['lock_pid']}. Đóng nó trước.")
@@ -432,6 +448,34 @@ def add_account(profile_id: int, host: str, label: str) -> dict | None:
             "INSERT INTO account(profile_id, domain_id, label, created_at) VALUES (?, ?, ?, ?)"
             " ON CONFLICT(profile_id, domain_id, label) DO UPDATE SET disabled = 0",
             (int(profile_id), domain_id, label, now))
+        row = conn.execute(
+            "SELECT a.id, a.label, d.host FROM account a JOIN domain d ON d.id = a.domain_id"
+            " WHERE a.profile_id = ? AND a.domain_id = ? AND a.label = ?",
+            (int(profile_id), domain_id, label)).fetchone()
+    return dict(row) if row else None
+
+
+def add_account_with_state(profile_id: int, host: str, label: str,
+                           storage_state_path: str) -> dict | None:
+    """Như `add_account`, nhưng kèm sẵn `storage_state_path` để lần mở đầu
+    profile tự seed cookie từ đó (§3.4). Dùng khi tích hợp mới lưu login thẳng
+    vào profile người dùng đã chọn, thay vì để nó trôi vào recipe rồi tới lúc
+    restart mới bị `importer` gom vào một profile tự sinh.
+    """
+    db = store.default()
+    if db is None:
+        return None
+    conn = db.connection()
+    now = store.now_ms()
+    with conn:
+        conn.execute("INSERT OR IGNORE INTO domain(host, created_at) VALUES (?, ?)", (host, now))
+        domain_id = conn.execute("SELECT id FROM domain WHERE host = ?", (host,)).fetchone()["id"]
+        conn.execute(
+            "INSERT INTO account(profile_id, domain_id, label, storage_state_path, created_at)"
+            " VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(profile_id, domain_id, label)"
+            " DO UPDATE SET storage_state_path = excluded.storage_state_path, disabled = 0",
+            (int(profile_id), domain_id, label, storage_state_path, now))
         row = conn.execute(
             "SELECT a.id, a.label, d.host FROM account a JOIN domain d ON d.id = a.domain_id"
             " WHERE a.profile_id = ? AND a.domain_id = ? AND a.label = ?",

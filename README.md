@@ -233,6 +233,57 @@ keep_context: false       # tùy chọn: dựng context sạch mỗi request (ch
 Không khai báo `timing` thì lấy mặc định từ env `RECIPE_READY_DELAY_MS` (1200),
 `RECIPE_INPUT_DELAY_MS` (400), `RECIPE_READY_TIMEOUT_MS` (20000).
 
+## Biết lúc nào câu trả lời đã xong (`response.done_signal`)
+
+Đây là thứ quyết định recipe trả về đủ hay cụt. Bốn kiểu:
+
+| `type` | Chốt khi | Dùng khi |
+|---|---|---|
+| `copy_button` | Nút **Copy** hiện ra dưới câu trả lời cuối | Mặc định nên dùng — gần như web chat nào cũng có |
+| `stable_text` | Text đứng yên `quiet_ms` | Trang không có nút copy |
+| `selector_appear` | Selector xuất hiện | Có dấu hiệu riêng khác |
+| `selector_disappear` | Selector biến mất | Ví dụ nút "Dừng tạo" tắt đi |
+
+```yaml
+response:
+  last_message_selector: "model-response .model-response-text"
+  done_signal:
+    type: copy_button
+    # selector: 'button[data-test-id="copy-button"]'  # bỏ trống = dùng bộ dò sẵn
+    # scope: after           # after (mặc định) | inside | page
+    # exclude: ".code-toolbar"  # nút nằm trong đây thì không tính
+    quiet_ms: 600            # chống nhiễu sau khi nút hiện (mặc định 600)
+    fallback_quiet_ms: 15000 # không thấy nút mà text đứng yên chừng này thì vẫn chốt
+    timeout_ms: 120000
+```
+
+`copy_button` hơn `stable_text` ở hai điểm: xong là chốt ngay thay vì phải chờ
+hết khoảng im lặng, và **không bị lừa bởi khoảng dừng giữa chừng** — kiểu Qwen
+ngắt vài giây giữa đoạn "thinking" và câu trả lời thật (vì vậy `recipes/chat`
+phải đặt `quiet_ms: 10000`).
+
+Chi tiết:
+
+- **Bỏ trống `selector`** thì dùng bộ dò sẵn, khớp các cách đánh dấu nút copy
+  hay gặp: `aria-label`/`title` chứa *copy* / *sao chép* / *复制*,
+  `data-testid`/`data-test-id` chứa *copy*, và `copy-button button`.
+- **`scope`** quyết định nút phải nằm ở đâu so với khối trả lời cuối
+  (`last_message_selector`): `after` = trong hoặc **sau** nó theo thứ tự DOM
+  (đúng chỗ thanh hành động hay nằm), `inside` = phải nằm bên trong, `page` =
+  bất kỳ đâu. Không dùng `selector_appear` cho việc này được: nó đếm cả trang
+  nên nút copy của lượt trước làm request chốt ngay khi vừa gửi.
+- Nút bị `disabled`/`aria-disabled`/`display:none` không tính. Nút mờ vì hiệu
+  ứng hover vẫn tính, nhưng phải kèm điều kiện text đứng yên `quiet_ms` nên
+  thanh hành động dựng sẵn lúc mới bắt đầu trả lời không làm chốt sớm.
+- **Nút "Copy code" của code block không bao giờ được tính** — nó mọc lên ngay
+  khi code block bắt đầu stream, còn lâu mới xong. Bỏ qua nút nằm trong `<pre>`
+  và nút có nhãn chứa *code* / *mã nguồn* / *代码*; site nào để nút copy-code ở
+  chỗ khác thì thêm `exclude: "<css selector>"`.
+- **`fallback_quiet_ms`** (mặc định 15000, đặt `0` để tắt) là đường lùi khi site
+  đổi giao diện: không có nút copy mà text đã đứng yên chừng đó thì vẫn chốt
+  theo kiểu `stable_text` và ghi log `warn` ở tab **Logs** — mất câu trả lời vì
+  timeout còn tệ hơn chốt hơi muộn.
+
 ## Fallback khi recipe hỏng
 
     ENABLE_AGENT_FALLBACK=true

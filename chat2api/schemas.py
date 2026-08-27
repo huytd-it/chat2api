@@ -18,6 +18,77 @@ class ChatRequest(BaseModel):
 class IntegrateRequest(BaseModel):
     url: str
     headed: bool = False
+    # Bắt buộc chọn trước: đăng nhập lúc tích hợp gắn thẳng vào profile này
+    # thay vì rơi vào một profile tự sinh ngoài ý muốn ở lần khởi động sau.
+    profile_id: int
+
+
+class RecipeRenameRequest(BaseModel):
+    slug: str
+
+
+class RecipePromptSpec(BaseModel):
+    input_selector: str
+    input_mode: str = "fill"      # fill | type
+    submit: str = "Enter"         # "Enter" hoặc "click:<css selector nút gửi>"
+
+
+class RecipeDoneSignalSpec(BaseModel):
+    type: str = "stable_text"     # stable_text | selector_appear | selector_disappear | copy_button
+    selector: str | None = None
+    quiet_ms: int | None = None
+    timeout_ms: int | None = None
+    scope: str | None = None                # copy_button: after | inside | page
+    fallback_quiet_ms: int | None = None    # copy_button: đường lùi về stable_text
+
+
+class RecipeResponseSpec(BaseModel):
+    last_message_selector: str
+    done_signal: RecipeDoneSignalSpec = RecipeDoneSignalSpec()
+
+
+class RecipeNewChatSpec(BaseModel):
+    url: str | None = None
+    selector: str | None = None
+
+
+class RecipeTimingSpec(BaseModel):
+    ready_delay_ms: int | None = None
+    input_delay_ms: int | None = None
+    ready_timeout_ms: int | None = None
+
+
+class RecipeModelSpec(BaseModel):
+    id: str
+
+
+class RecipeManualSpec(BaseModel):
+    """Recipe tự nhập tay (không qua analyzer AI) — người dùng tự khai CSS
+    selector, thường là khi site quá lạ hoặc analyzer đoán selector sai."""
+
+    slug: str
+    url: str
+    prompt: RecipePromptSpec
+    response: RecipeResponseSpec
+    models: list[RecipeModelSpec]
+    new_chat: RecipeNewChatSpec | None = None
+    timing: RecipeTimingSpec | None = None
+    keep_context: bool = True
+    # Số lượt chạy ẩn danh cho phép trước khi bắt buộc thêm account đăng nhập.
+    # Để trống = không giới hạn (site không cần đăng nhập, hoặc thêm account sau).
+    anon_trial_limit: int | None = None
+
+    def to_recipe_dict(self) -> dict:
+        data = self.model_dump(exclude={"anon_trial_limit"}, exclude_none=True)
+        if self.anon_trial_limit is not None:
+            data.setdefault("login", {})["anon_trial_limit"] = self.anon_trial_limit
+        return data
+
+
+class RecipeTestRequest(RecipeManualSpec):
+    # Hiện browser để người dùng quan sát lúc kiểm tra selector — recipe lưu
+    # xuống đĩa vẫn luôn chạy headless, cờ này chỉ áp dụng cho lượt test.
+    headed: bool = False
 
 
 class AddAccountRequest(BaseModel):

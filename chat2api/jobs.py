@@ -5,7 +5,9 @@ import uuid
 from contextlib import suppress
 from pathlib import Path
 
-from . import applog, store
+import yaml
+
+from . import accounts, applog, profiles as profiles_mod, store
 from .agents.analyzer import integrate
 
 LOGIN_TIMEOUT_SECONDS = 600
@@ -179,6 +181,48 @@ async def _open_login(job: dict, expected_status: str, cfg, login_manager) -> No
         await login_manager.cancel(job["id"])
 
 
+def _attach_login_to_profile(job: dict, cfg) -> None:
+    """Chuyển login vừa lưu (nếu có) từ recipe mới sang profile đã chọn.
+
+    Không có bước này, `auth/state.json` gắn thẳng trong recipe sẽ nằm im cho
+    tới lần restart sau, lúc đó `accounts.migrate_legacy` + import mirror nó
+    thành một profile TỰ SINH (tên ghép domain+label) hoàn toàn ngoài tầm kiểm
+    soát của tab Profiles — đúng thứ người dùng chọn profile trước để tránh.
+    Chạy ngay sau khi integrate xong thì account đi thẳng vào profile đã chọn,
+    không còn gì để migrate_legacy nhặt lên nữa.
+    """
+    profile = job.get("profile")
+    slug = job.get("slug")
+    if not profile or not slug:
+        return
+    recipe_path = cfg.recipes_dir / slug / "recipe.yaml"
+    if not recipe_path.exists():
+        return
+    try:
+        data = yaml.safe_load(recipe_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return
+    login = data.get("login")
+    if not isinstance(login, dict) or not login.get("storage_state"):
+        return  # site không cần đăng nhập (dùng thử ẩn danh) — không có gì để gắn
+    state_path = cfg.recipes_dir / slug / login["storage_state"]
+    if not state_path.exists():
+        return
+    domain = accounts.domain_of(data.get("url", ""))
+    if not accounts.valid_domain(domain):
+        return
+    target = accounts.account_path(cfg.recipes_dir, domain, profile["name"])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(state_path.read_bytes())
+    state_path.unlink(missing_ok=True)
+    login.pop("storage_state", None)
+    if not login:
+        data.pop("login", None)
+    recipe_path.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    profiles_mod.add_account_with_state(profile["id"], domain, profile["name"], str(target))
+
+
 async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, login_manager,
                         storage_state: Path | None = None) -> None:
     try:
@@ -209,6 +253,12 @@ async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, logi
         async with job["lock"]:
             if job["status"] != expected_status or job.get("cancel_claimed", False):
                 return
+            if result.get("status") == "ok" and job.get("profile"):
+                try:
+                    async with job["publish_lock"]:
+                        await asyncio.to_thread(_attach_login_to_profile, job, cfg)
+                except Exception as error:
+                    job["log"].append(f"Cảnh báo: không gắn được đăng nhập vào profile: {error}")
             if result.get("status") == "ok" and router is not None:
                 try:
                     router.reload()
@@ -249,7 +299,10 @@ async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, logi
 
 
 def start_integrate(url: str, cfg, pool, router=None, login_manager=None,
-                    publish_lock=None, headed: bool = False) -> str:
+                    publish_lock=None, headed: bool = False,
+                    profile: dict | None = None) -> str:
+    """`profile` (khi có) là {"id", "name"} của profile người dùng đã chọn
+    trước khi bấm tích hợp — xem `_attach_login_to_profile`."""
     job_id = uuid.uuid4().hex[:12]
     job = {
         "id": job_id,
@@ -266,6 +319,7 @@ def start_integrate(url: str, cfg, pool, router=None, login_manager=None,
         "publish_lock": publish_lock or asyncio.Lock(),
         "staging_dir": cfg.recipes_dir / ".login" / job_id,
         "headed": headed,
+        "profile": profile,
         "lock": asyncio.Lock(),
     }
     JOBS[job_id] = job
