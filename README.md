@@ -71,12 +71,15 @@ khiển việc này:
 | `API_MAX_CONCURRENT_PER_ACCOUNT` | `1` | Số request chạy song song trên **một** account — mỗi slot là một tab riêng trong cùng profile. Vượt thì xếp hàng. |
 | `API_MAX_CONCURRENT_REQUESTS` | `0` | Trần request chat song song toàn server (0 = không giới hạn). Vượt trần thì chờ, không bị từ chối. |
 | `API_SESSION_MODE` | `per_request` | `per_request`: request không kèm `X-Chat2api-Session-Id` là một session riêng. `client_window`: gom theo client + model trong cửa sổ 30 phút. |
-| `API_HEADED` | `auto` | `always`: mọi request API mở cửa sổ Chromium nhìn thấy được. `never`: luôn chạy ẩn. `auto`: theo ô "Chạy ẩn" của từng profile. |
+| `API_HEADED` | `always` | `always`: mọi request API mở cửa sổ Chromium nhìn thấy được. `never`: luôn chạy ẩn. `auto`: theo ô "Chạy ẩn" của từng profile. |
 
-Site chặn headless (Cloudflare, bot-detect) thì đặt `API_HEADED=always` —
-request API sẽ đi đúng đường mà nút **Gửi** ở bàn test Sessions đang dùng.
-Client gửi `X-Chat2api-Headed: true|false` thì header thắng cả cài đặt lẫn
-profile; không gửi header nghĩa là "tuỳ server".
+Mặc định `always`: gửi một request qua API là thấy ngay cửa sổ Chromium chạy
+recipe, đúng đường mà nút **Gửi** ở bàn test Sessions đang dùng — cũng là cách
+duy nhất để biết recipe kẹt ở bước nào. Đây cũng là thứ cần cho site chặn
+headless (Cloudflare, bot-detect). Chạy trên máy chủ không có màn hình thì đặt
+`API_HEADED=never`; muốn quyết định theo từng profile thì đặt `auto` rồi dùng ô
+"Chạy ẩn" ở tab Profiles. Client gửi `X-Chat2api-Headed: true|false` thì header
+thắng cả cài đặt lẫn profile; không gửi header nghĩa là "tuỳ server".
 
 Chỉ có bấy nhiêu account thì request thứ N+1 xếp hàng sau chúng — thêm account
 cho domain đó (trang Browser profiles) là cách duy nhất để chạy song song hơn.

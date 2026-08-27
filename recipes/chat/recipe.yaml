@@ -9,8 +9,17 @@ response:
   capture_html: true
   done_signal:
     type: stable_text
-    quiet_ms: 3000
-    timeout_ms: 120000
+    # Qwen ở chế độ "thinking" thường dừng vài giây giữa đoạn tóm tắt suy nghĩ
+    # và câu trả lời thật — 3000ms từng đủ ngắn để bị nhầm là "đã xong" ngay
+    # giữa lúc đó, trả về mỗi câu tóm tắt ý định thay vì bản dịch thật (xem
+    # request_log id 26/47: completion_chars chỉ 105/125, toàn tiếng Trung mô
+    # tả cách dịch chứ không phải bản dịch). Nới lên 10s để chịu được khoảng
+    # dừng đó.
+    quiet_ms: 10000
+    # Prompt dịch dài (8000+ ký tự) đo được cần tới ~64s khi trót lọt; nới
+    # trần lên gấp đôi timeout cũ để không cắt ngang những lần chạy chậm nhưng
+    # vẫn đang tiến triển.
+    timeout_ms: 240000
 new_chat:
   selector: div[role='button'][aria-label='New Chat']
 timing:

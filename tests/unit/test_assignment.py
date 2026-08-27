@@ -221,6 +221,12 @@ def test_client_header_beats_every_setting(db, recipe, monkeypatch):
     assert recipe.resolve_headed(False, profile) is False
 
 
+def test_api_headed_defaults_to_showing_a_window(db, recipe, monkeypatch):
+    """Không cấu hình gì thì request API vẫn mở cửa sổ — đó là mặc định."""
+    monkeypatch.delenv("API_HEADED", raising=False)
+    assert recipe.resolve_headed(None, _profile(db, "mac-dinh", headless=True)) is True
+
+
 def test_api_headed_always_shows_a_window(db, recipe, monkeypatch):
     monkeypatch.setenv("API_HEADED", "always")
     # Profile khai "chạy ẩn" nhưng người dùng bảo mọi request API phải hiện cửa sổ.
