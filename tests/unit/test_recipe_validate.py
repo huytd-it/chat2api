@@ -90,3 +90,53 @@ def test_multi_account_login_rejects_bad_quota():
 def test_single_account_login_unaffected():
     d = {**MINIMAL, "login": {"storage_state": "auth/state.json"}}
     assert validate_recipe(d) == []
+
+
+def test_merge_recipe_keeps_keys_outside_the_form():
+    from chat2api.main import merge_recipe
+
+    base = {
+        "url": "https://x.example",
+        "response": {"last_message_selector": ".m", "format": "markdown",
+                     "capture_html": True, "done_signal": {"type": "stable_text"}},
+        "login": {"anon_trial_limit": 20, "accounts": [{"name": "a", "storage_state": "s"}]},
+    }
+    patch = {"response": {"last_message_selector": ".n",
+                          "done_signal": {"type": "copy_button", "scope": "after"}},
+             "login": {"anon_trial_limit": 5}}
+    out = merge_recipe(base, patch)
+
+    assert out["response"]["last_message_selector"] == ".n"
+    assert out["response"]["format"] == "markdown"
+    assert out["response"]["capture_html"] is True
+    assert out["response"]["done_signal"] == {"type": "copy_button", "scope": "after"}
+    assert out["login"]["accounts"] == [{"name": "a", "storage_state": "s"}]
+    assert out["login"]["anon_trial_limit"] == 5
+    assert base["response"]["last_message_selector"] == ".m"  # không sửa bản gốc
+
+
+def test_merge_recipe_none_removes_key():
+    from chat2api.main import merge_recipe
+
+    base = {"url": "https://x.example", "new_chat": {"selector": "#new"}}
+    assert merge_recipe(base, {"new_chat": None}) == {"url": "https://x.example"}
+
+
+def test_merge_recipe_replaces_lists_wholesale():
+    from chat2api.main import merge_recipe
+
+    base = {"models": [{"id": "a"}, {"id": "b"}]}
+    assert merge_recipe(base, {"models": [{"id": "c"}]}) == {"models": [{"id": "c"}]}
+
+
+def test_merge_recipe_drops_a_block_that_becomes_empty():
+    from chat2api.main import merge_recipe
+
+    # Biểu mẫu xóa trắng cả ba ô timing: kết quả phải là KHÔNG có khóa
+    # `timing`, chứ không phải một mapping toàn null.
+    base = {"url": "https://x.example", "timing": {"ready_delay_ms": 2000}}
+    patch = {"timing": {"ready_delay_ms": None, "input_delay_ms": None,
+                        "ready_timeout_ms": None}}
+    assert merge_recipe(base, patch) == {"url": "https://x.example"}
+    # Recipe chưa từng có khối đó thì cũng không được sinh ra khối rỗng.
+    assert merge_recipe({"url": "https://x.example"}, patch) == {"url": "https://x.example"}

@@ -5,11 +5,13 @@
   let {
     message,
     session,
+    artifactId = null,
     onclose,
     onopen,
   }: {
     message: SessionMessage;
     session: SessionDetail;
+    artifactId?: number | null;
     onclose: () => void;
     /** Mở lại hội thoại trong đúng profile đã chạy request này. */
     onopen?: () => void;
@@ -24,11 +26,12 @@
   ].filter(Boolean).join(" · "));
   const conversationUrl = $derived(message.request?.conversation_url ?? "");
 
-  type Tab = "pretty" | "markdown" | "html" | "json";
+  type Tab = "pretty" | "markdown" | "html" | "json" | "artifact";
   let tab = $state<Tab>("pretty");
   let copied = $state(false);
 
   const markdown = $derived(message.content_markdown ?? message.content);
+  const artifact = $derived(message.artifacts.find((item) => item.id === artifactId) ?? message.artifacts[0]);
   const responseJson = $derived(JSON.stringify({
     id: `chatcmpl-session-${message.id}`,
     object: "chat.completion",
@@ -49,12 +52,16 @@
 
   async function copyCurrent() {
     const value = tab === "json" ? responseJson : tab === "html"
-      ? (message.content_html ?? "") : markdown;
+      ? (message.content_html ?? "") : tab === "artifact" ? (artifact?.body ?? "") : markdown;
     if (!value) return;
     await navigator.clipboard.writeText(value);
     copied = true;
     setTimeout(() => (copied = false), 1400);
   }
+
+  $effect(() => {
+    if (artifactId != null && message.artifacts.some((item) => item.id === artifactId)) tab = "artifact";
+  });
 </script>
 
 <aside class="message-inspector" aria-label="Trình xem message">
@@ -69,7 +76,7 @@
   </header>
 
   <div class="inspector-tabs" role="tablist" aria-label="Biểu diễn message">
-    {#each ["pretty", "markdown", "html", "json"] as name}
+    {#each ["pretty", "markdown", "html", "json", ...(message.artifacts.length ? ["artifact"] : [])] as name}
       <button
         role="tab"
         aria-selected={tab === name}
@@ -97,8 +104,16 @@
           Recipe này chưa bật <code>response.capture_html</code> khi message được tạo.
         </div>
       {/if}
-    {:else}
+    {:else if tab === "json"}
       <pre class="inspector-source">{responseJson}</pre>
+    {:else if artifact}
+      <section class="inspector-artifact">
+        <header>
+          <strong>{artifact.title || artifact.language || `Artifact ${artifact.idx + 1}`}</strong>
+          <span>{artifact.kind}{artifact.language ? ` · ${artifact.language}` : ""}</span>
+        </header>
+        <pre class="inspector-source"><code>{artifact.body}</code></pre>
+      </section>
     {/if}
   </div>
 

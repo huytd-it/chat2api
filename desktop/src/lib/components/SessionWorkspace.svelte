@@ -22,13 +22,14 @@
     type TestTarget,
     type TestTargetList,
   } from "../api";
-  import { renderMarkdown } from "../markdown";
   import MessageInspector from "./MessageInspector.svelte";
+  import SessionMessageCard from "./SessionMessageCard.svelte";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
 
   let sessions = $state<SessionSummary[]>([]);
   let active = $state<SessionDetail | null>(null);
   let inspected = $state<SessionMessage | null>(null);
+  let inspectedArtifactId = $state<number | null>(null);
   let query = $state("");
   let modelFilter = $state("");
   let archived = $state(false);
@@ -64,6 +65,7 @@
    * có delta đầu tiên, tức là "đang gửi tới đâu" hiện được trong lúc còn chờ. */
   let liveTarget = $state<ChatTarget | null>(null);
   let openingConversation = $state(false);
+  let composing = $state(false);
 
   type BatchJob = {
     promptIndex: number;
@@ -180,20 +182,14 @@
 
   function inspect(message: SessionMessage) {
     inspected = message;
+    inspectedArtifactId = null;
     benchOpen = false;
   }
 
-  /** 'profile · host · account' cho một request đã lưu. '' khi request không
-   * chạy trên browser recipe (Gemini/passthrough) hoặc agent fallback đã thay. */
-  function targetOf(message: SessionMessage): string {
-    const request = message.request;
-    if (!request?.profile_name) return "";
-    return [request.profile_name, request.account_host, request.account_label]
-      .filter(Boolean).join(" · ");
-  }
-
-  function conversationUrlOf(message: SessionMessage): string {
-    return message.request?.conversation_url ?? "";
+  function inspectArtifact(message: SessionMessage, artifactId: number) {
+    inspected = message;
+    inspectedArtifactId = artifactId;
+    benchOpen = false;
   }
 
   async function openConversation(sessionId: string) {
@@ -546,7 +542,7 @@
   }
 
   function onComposerKeydown(event: KeyboardEvent) {
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !composing) {
       event.preventDefault();
       send();
     }
@@ -790,52 +786,18 @@
       <div class="session-trace" bind:this={traceEl} aria-live="polite">
         <div class="trace-start"><span>SESSION START</span><time>{new Date(active.created_at).toLocaleString()}</time></div>
         {#each visibleMessages as message (message.id)}
-          <article class="recorded-message {message.role}" class:fault={Boolean(message.error)}>
-            <header>
-              <span class="role-badge">{message.role === "user" ? "IN" : message.role === "assistant" ? "OUT" : message.role.toUpperCase()}</span>
-              <span>{message.role === "user" ? "Bạn" : message.role === "assistant" ? active.model_public_id : message.role}</span>
-              <time>{formatDate(message.created_at)}</time>
-              {#if message.ttfb_ms != null}<code>TTFB {message.ttfb_ms} ms</code>{/if}
-            </header>
-            <!-- Reply lỗi trước byte đầu tiên có content rỗng: bỏ hẳn khung
-                 thay vì để lại một hộp trống phía trên dòng lỗi. -->
-            {#if message.content || (message.id < 0 && sending)}
-              <div class="recorded-content">
-                {#if message.role === "assistant"}
-                  {#if markdownMode === "raw"}
-                    <pre class="raw-markdown">{message.content_markdown ?? message.content}</pre>
-                  {:else}
-                    {@html renderMarkdown(message.content_markdown ?? message.content)}
-                  {/if}
-                {:else}
-                  {message.content}
-                {/if}
-                {#if message.id < 0 && sending}<span class="cursor"></span>{/if}
-              </div>
-            {/if}
-            {#if message.error}<p class="message-error">{message.error}</p>{/if}
-            <footer>
-              <button onclick={() => copyMessage(message)}>{copiedId === message.id ? "Đã chép" : "Sao chép"}</button>
-              {#if message.role === "assistant"}
-                <button onclick={() => inspect(message)}>Xem tín hiệu</button>
-              {/if}
-              <button onclick={() => forkAt(message.seq)}>Tạo nhánh tại đây</button>
-              {#if message.artifacts.length}<span>{message.artifacts.length} artifact</span>{/if}
-              {#if targetOf(message)}
-                <span class="message-target" title="Request này chạy trên profile/account nào">
-                  → {targetOf(message)}
-                </span>
-              {/if}
-              {#if conversationUrlOf(message)}
-                <button
-                  class="message-link"
-                  title={`Chép link: ${conversationUrlOf(message)}`}
-                  onclick={() => copyConversationUrl(conversationUrlOf(message))}
-                >Chép link</button>
-              {/if}
-              <code>{message.char_count.toLocaleString()} chars</code>
-            </footer>
-          </article>
+          <SessionMessageCard
+            {message}
+            model={active.model_public_id}
+            {markdownMode}
+            {sending}
+            copied={copiedId === message.id}
+            oncopy={() => copyMessage(message)}
+            oninspect={message.role === "assistant" ? () => inspect(message) : undefined}
+            onfork={() => forkAt(message.seq)}
+            onartifact={(artifactId) => inspectArtifact(message, artifactId)}
+            oncopylink={copyConversationUrl}
+          />
         {/each}
       </div>
 
@@ -859,6 +821,8 @@
         bind:this={promptEl}
         oninput={autoGrow}
         onkeydown={onComposerKeydown}
+        oncompositionstart={() => (composing = true)}
+        oncompositionend={() => (composing = false)}
       ></textarea>
 
       {#each extraPrompts as item, index (index)}
@@ -1148,6 +1112,7 @@
     <MessageInspector
       message={inspected}
       session={active}
+      artifactId={inspectedArtifactId}
       onclose={() => (inspected = null)}
       onopen={() => active && openConversation(active.id)}
     />

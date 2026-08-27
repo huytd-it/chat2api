@@ -45,6 +45,11 @@ class RecipeDoneSignalSpec(BaseModel):
 class RecipeResponseSpec(BaseModel):
     last_message_selector: str
     done_signal: RecipeDoneSignalSpec = RecipeDoneSignalSpec()
+    # "markdown" giữ lại cấu trúc khối (heading, list, code) khi đọc câu trả
+    # lời; bỏ trống là lấy text thuần.
+    format: str | None = None
+    # Kèm HTML gốc của câu trả lời trong bản ghi session, để soi lại sau.
+    capture_html: bool | None = None
 
 
 class RecipeNewChatSpec(BaseModel):
@@ -88,6 +93,27 @@ class RecipeManualSpec(BaseModel):
 class RecipeTestRequest(RecipeManualSpec):
     # Hiện browser để người dùng quan sát lúc kiểm tra selector — recipe lưu
     # xuống đĩa vẫn luôn chạy headless, cờ này chỉ áp dụng cho lượt test.
+    headed: bool = False
+
+
+class RecipeEditRequest(BaseModel):
+    """Sửa một recipe ĐÃ có, theo một trong hai đường.
+
+    `yaml`: toàn văn recipe.yaml do người dùng tự gõ — đường mạnh nhất, giữ
+    được cả những khóa mà biểu mẫu không mô hình hóa (`response.format`,
+    `login.accounts`...).
+
+    `patch`: mảnh recipe do biểu mẫu dựng, server deep-merge vào file đang có
+    nên các khóa ngoài biểu mẫu KHÔNG bị mất. Giá trị `null` trong patch nghĩa
+    là xóa khóa đó (ví dụ bỏ `new_chat`).
+    """
+
+    yaml: str | None = None
+    patch: dict | None = None
+
+
+class RecipeEditTestRequest(RecipeEditRequest):
+    # Chạy thử bản đang sửa mà chưa ghi xuống đĩa.
     headed: bool = False
 
 

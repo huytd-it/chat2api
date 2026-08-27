@@ -473,6 +473,157 @@ async def test_create_manual_recipe_rejects_bad_slug_pattern(app_client):
     assert r.json()["error"]["code"] == "invalid_slug"
 
 
+async def test_recipe_source_returns_yaml_and_parsed_data(app_client):
+    await app_client.post("/admin/recipes", json=_manual_recipe_body())
+    r = await app_client.get("/admin/recipes/manual-site/source")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["slug"] == "manual-site"
+    assert "input_selector" in body["yaml"]
+    assert body["data"]["prompt"]["input_selector"] == "#box"
+    assert body["parse_error"] is None
+
+
+async def test_recipe_source_404_for_unknown_slug(app_client):
+    r = await app_client.get("/admin/recipes/khong-co/source")
+    assert r.status_code == 404
+
+
+async def test_recipe_source_rejects_system_slug(app_client):
+    r = await app_client.get("/admin/recipes/gemini/source")
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_slug"
+
+
+async def test_update_recipe_by_patch_keeps_unknown_keys(app_client):
+    import yaml
+
+    app = app_client._transport.app
+    await app_client.post("/admin/recipes", json=_manual_recipe_body())
+    recipe_path = app.state.cfg.recipes_dir / "manual-site" / "recipe.yaml"
+    data = yaml.safe_load(recipe_path.read_text(encoding="utf-8"))
+    # Khóa mà biểu mẫu không mô hình hóa — phải sống sót qua một lần Lưu.
+    data["response"]["format"] = "markdown"
+    recipe_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+    r = await app_client.put("/admin/recipes/manual-site",
+                             json={"patch": {"response": {"last_message_selector": ".moi"}}})
+    assert r.status_code == 200
+    saved = yaml.safe_load(recipe_path.read_text(encoding="utf-8"))
+    assert saved["response"]["last_message_selector"] == ".moi"
+    assert saved["response"]["format"] == "markdown"
+    provider = app.state.router.providers["manual-site"]
+    assert provider.response_cfg["last_message_selector"] == ".moi"
+
+
+async def test_update_recipe_by_yaml_replaces_file(app_client):
+    import yaml
+
+    app = app_client._transport.app
+    await app_client.post("/admin/recipes", json=_manual_recipe_body())
+    text = yaml.safe_dump({
+        "url": "https://chat.manual.test/v2",
+        "prompt": {"input_selector": "#box2", "input_mode": "type", "submit": "Enter"},
+        "response": {"last_message_selector": ".msg2",
+                     "done_signal": {"type": "copy_button"}},
+        "models": [{"id": "web"}, {"id": "web-pro"}],
+    })
+    r = await app_client.put("/admin/recipes/manual-site", json={"yaml": text})
+    assert r.status_code == 200
+    provider = app.state.router.providers["manual-site"]
+    assert provider.url == "https://chat.manual.test/v2"
+    assert {m.id for m in provider.models()} == {"manual-site/web", "manual-site/web-pro"}
+
+
+async def test_update_recipe_rejects_invalid_yaml(app_client):
+    await app_client.post("/admin/recipes", json=_manual_recipe_body())
+    r = await app_client.put("/admin/recipes/manual-site", json={"yaml": "prompt: [unclosed"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_yaml"
+
+
+async def test_update_recipe_rejects_invalid_recipe(app_client):
+    await app_client.post("/admin/recipes", json=_manual_recipe_body())
+    r = await app_client.put("/admin/recipes/manual-site",
+                             json={"patch": {"models": []}})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_recipe"
+
+
+async def test_update_recipe_rejects_slug_change_in_yaml(app_client):
+    import yaml
+
+    app = app_client._transport.app
+    await app_client.post("/admin/recipes", json=_manual_recipe_body())
+    recipe_path = app.state.cfg.recipes_dir / "manual-site" / "recipe.yaml"
+    data = yaml.safe_load(recipe_path.read_text(encoding="utf-8"))
+    data["slug"] = "ten-khac"
+    r = await app_client.put("/admin/recipes/manual-site",
+                             json={"yaml": yaml.safe_dump(data, allow_unicode=True)})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "slug_mismatch"
+    assert "manual-site" in app.state.router.providers
+
+
+async def test_preview_recipe_edit_translates_between_form_and_yaml(app_client):
+    await app_client.post("/admin/recipes", json=_manual_recipe_body())
+    r = await app_client.post("/admin/recipes/manual-site/preview",
+                              json={"patch": {"models": [{"id": "web"}, {"id": "pro"}]}})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["data"]["models"] == [{"id": "web"}, {"id": "pro"}]
+    assert "pro" in body["yaml"]
+    # Xem trước KHÔNG được đụng tới recipe đang chạy.
+    app = app_client._transport.app
+    assert [m.id for m in app.state.router.providers["manual-site"].models()]         == ["manual-site/web"]
+
+
+async def test_preview_recipe_edit_rejects_invalid_draft(app_client):
+    await app_client.post("/admin/recipes", json=_manual_recipe_body())
+    r = await app_client.post("/admin/recipes/manual-site/preview",
+                              json={"yaml": "url: https://x.example"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_recipe"
+
+
+async def test_test_recipe_edit_runs_the_merged_draft(app_client, monkeypatch):
+    from chat2api import main as main_mod
+
+    seen = {}
+
+    async def fake_trial(cfg, pool, recipe, headed):
+        seen["recipe"] = recipe
+        seen["headed"] = headed
+        return {"ok": True, "reply": "OK"}
+
+    await app_client.post("/admin/recipes", json=_manual_recipe_body())
+    monkeypatch.setattr(main_mod, "run_recipe_trial", fake_trial)
+    r = await app_client.post(
+        "/admin/recipes/manual-site/test",
+        json={"patch": {"prompt": {"input_selector": "#thu"}}, "headed": True})
+
+    assert r.status_code == 200 and r.json()["ok"] is True
+    # Bản chạy thử là recipe ĐANG có đã áp bản sửa, không phải mỗi mảnh patch.
+    assert seen["recipe"]["prompt"]["input_selector"] == "#thu"
+    assert seen["recipe"]["prompt"]["submit"] == "Enter"
+    assert seen["headed"] is True
+
+
+async def test_test_recipe_edit_rejects_invalid_draft(app_client):
+    await app_client.post("/admin/recipes", json=_manual_recipe_body())
+    r = await app_client.post("/admin/recipes/manual-site/test",
+                              json={"patch": {"url": None}})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_recipe"
+
+
+async def test_update_recipe_requires_a_payload(app_client):
+    await app_client.post("/admin/recipes", json=_manual_recipe_body())
+    r = await app_client.put("/admin/recipes/manual-site", json={})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "empty_edit"
+
+
 async def test_login_actions_inherit_admin_auth(app_client):
     app = app_client._transport.app
     app.state.cfg.api_keys = ["secret"]

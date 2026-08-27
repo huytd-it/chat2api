@@ -284,6 +284,29 @@ Chi tiết:
   theo kiểu `stable_text` và ghi log `warn` ở tab **Logs** — mất câu trả lời vì
   timeout còn tệ hơn chốt hơi muộn.
 
+## Sửa recipe đã tích hợp
+
+Site đổi giao diện là selector chết theo. Trang **Integrations → Sites**, mở
+hàng recipe rồi bấm **Chỉnh sửa** — không cần mở file, không cần restart:
+
+- **Biểu mẫu**: URL, selector gửi/nhận, `done_signal`, models, timing,
+  `keep_context`, `format: markdown`, `capture_html`, lượt dùng thử ẩn danh.
+- **YAML**: toàn văn `recipe.yaml`. Cần khi đụng tới khóa biểu mẫu không có
+  (`login.accounts`, `response.exclude`…), hoặc khi file hỏng cú pháp — lúc đó
+  app mở thẳng tab này và tạm khóa tab biểu mẫu.
+
+Đổi qua lại giữa hai tab không mất chỗ vừa sửa: bản sửa được server dịch sang
+dạng kia (`POST /admin/recipes/<slug>/preview`). Sửa bằng biểu mẫu **không xóa**
+khóa nào nó không quản — server merge vào file đang có.
+
+- **Kiểm tra** chạy thử một prompt qua bản đang sửa mà chưa ghi đè recipe đang
+  chạy (`POST /admin/recipes/<slug>/test`); bật *Hiện browser* để xem tận mắt.
+- **Lưu** ghi `recipe.yaml` rồi nạp lại router ngay (`PUT /admin/recipes/<slug>`).
+  Recipe được thử lại từ đầu, cờ "lỗi sức khỏe" xóa theo.
+- **Đọc lại** vứt bản đang sửa, lấy lại file trên đĩa.
+- Đổi slug vẫn đi đường **Đổi tên** (phải chuyển cả thư mục), không sửa trong
+  YAML — server từ chối để tránh sửa xong mà recipe vẫn nạp dưới tên cũ.
+
 ## Fallback khi recipe hỏng
 
     ENABLE_AGENT_FALLBACK=true

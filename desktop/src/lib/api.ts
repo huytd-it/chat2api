@@ -496,6 +496,74 @@ export async function createRecipe(
   return asJson(r);
 }
 
+/** recipe.yaml nguyên văn + bản đã parse. `data` là null khi file hỏng cú
+ * pháp — lúc đó chỉ tab YAML sửa được, và `parse_error` nói hỏng ở đâu. */
+export interface RecipeSource {
+  slug: string;
+  yaml: string;
+  data: Record<string, unknown> | null;
+  parse_error: string | null;
+}
+
+export async function fetchRecipeSource(key: string, slug: string): Promise<RecipeSource> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug) + "/source", {
+    headers: headers(key),
+  });
+  return asJson(r);
+}
+
+/** Một bản sửa recipe đã có, theo đúng hai đường server nhận:
+ * `yaml` = toàn văn file (giữ được mọi khóa), `patch` = mảnh do biểu mẫu dựng
+ * (server deep-merge, `null` nghĩa là xóa khóa). Chỉ gửi MỘT trong hai. */
+export type RecipeEdit = { yaml: string } | { patch: Record<string, unknown> };
+
+export async function updateRecipe(
+  key: string,
+  slug: string,
+  edit: RecipeEdit,
+): Promise<{ ok: true; slug: string }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug), {
+    method: "PUT",
+    headers: headers(key),
+    body: JSON.stringify(edit),
+  });
+  return asJson(r);
+}
+
+/** Bản sửa sau khi áp, chưa ghi đĩa. Là cầu nối duy nhất giữa tab biểu mẫu
+ * và tab YAML của màn sửa — client không có bộ parse/serialize YAML. */
+export async function previewRecipeEdit(
+  key: string,
+  slug: string,
+  edit: RecipeEdit,
+): Promise<{ slug: string; yaml: string; data: Record<string, unknown> }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug) + "/preview", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify(edit),
+  });
+  return asJson(r);
+}
+
+/** Chạy thử bản đang sửa mà chưa ghi đè recipe đang chạy. */
+export async function testRecipeEdit(
+  key: string,
+  slug: string,
+  edit: RecipeEdit,
+  headed = false,
+): Promise<{ ok: boolean; reply: string; error?: string }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug) + "/test", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify({ ...edit, headed }),
+  });
+  return asJson(r);
+}
+
 /** Gửi thử một prompt cố định qua recipe CHƯA lưu — cho biết selector đúng
  * hay sai trước khi bấm tạo (form thủ công không có bước AI tự sửa). */
 export async function testRecipe(

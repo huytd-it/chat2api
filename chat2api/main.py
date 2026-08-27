@@ -96,6 +96,64 @@ class _ConcurrencyGate:
             yield
 
 
+def merge_recipe(base: dict, patch: dict) -> dict:
+    """Ghép mảnh `patch` vào recipe `base`, giữ nguyên khóa ngoài patch.
+
+    Biểu mẫu sửa recipe chỉ mô hình hóa được một phần recipe.yaml; những khóa
+    nó không biết (`response.format`, `response.capture_html`, `login.accounts`,
+    …) phải sống sót qua một lần Lưu. Quy ước:
+
+    - mapping lồng nhau → merge đệ quy; rỗng sau khi merge → bỏ luôn khóa, để
+      biểu mẫu xóa trắng cả cụm `timing` mà không để lại một mớ khóa `null`;
+    - `None` → xóa hẳn khóa đó (biểu mẫu bỏ chọn `new_chat` chẳng hạn);
+    - giá trị khác (kể cả list `models`) → thay thế nguyên khối.
+    """
+    out = dict(base)
+    for key, value in patch.items():
+        if value is None:
+            out.pop(key, None)
+        elif isinstance(value, dict):
+            current = out.get(key)
+            merged = merge_recipe(current if isinstance(current, dict) else {}, value)
+            if merged:
+                out[key] = merged
+            else:
+                out.pop(key, None)
+        else:
+            out[key] = value
+    return out
+
+
+async def run_recipe_trial(cfg: Config, pool, recipe: dict, headed: bool) -> dict:
+    """Chạy đúng một prompt cố định qua `recipe` mà KHÔNG ghi nó xuống đĩa.
+
+    Dùng chung cho cả recipe tạo mới lẫn bản đang sửa: người dùng biết selector
+    đúng hay sai trước khi bấm lưu (form thủ công không có bước round-trip tự
+    sửa như analyzer AI).
+    """
+    from .providers.browser_recipe import BrowserRecipe
+
+    trial_slug = f"manual-test-{uuid.uuid4().hex[:10]}"
+    trial_recipe = {**recipe, "slug": trial_slug}
+    trial_dir = cfg.recipes_dir / ".manual-test" / trial_slug
+    runner = BrowserRecipe(trial_recipe, trial_dir, pool, headed=headed,
+                           accounts_root=cfg.recipes_dir)
+    try:
+        parts = []
+        async for delta in runner.stream(
+            [{"role": "user", "content": "Reply with exactly: OK"}],
+            trial_recipe["models"][0]["id"],
+        ):
+            parts.append(delta)
+        reply = "".join(parts).strip()
+    except Exception as error:
+        return {"ok": False, "reply": "", "error": str(error)}
+    finally:
+        await pool.drop(trial_slug)
+    ok = bool(reply) and reply.lower() != "reply with exactly: ok"
+    return {"ok": ok, "reply": reply}
+
+
 def create_app(cfg: Config) -> FastAPI:
     from . import router as router_mod  # trigger LOADERS registration
     from .browserpool import BrowserPool
@@ -495,7 +553,8 @@ def register_admin(app: FastAPI, admin) -> None:
     from .schemas import (AccountLoginRequest, AddAccountRequest, ApiKeyCreateRequest,
                           IntegrateRequest, ProfileAccountRequest, ProfileCreateRequest,
                           ProfileOpenRequest, ProfileUpdateRequest, RecipeManualSpec,
-                          RecipeRenameRequest, RecipeTestRequest, SaveAccountRequest,
+                          RecipeEditRequest, RecipeEditTestRequest, RecipeRenameRequest,
+                          RecipeTestRequest, SaveAccountRequest,
                           SessionForkRequest, SessionUpdateRequest, SettingsRequest,
                           TestTargetOpenRequest)
 
@@ -1004,33 +1063,14 @@ def register_admin(app: FastAPI, admin) -> None:
         """Chạy thử một prompt cố định qua recipe CHƯA lưu, để người dùng biết
         selector đúng hay sai trước khi bấm tạo (form thủ công không có bước
         round-trip tự sửa như analyzer AI)."""
-        from .providers.browser_recipe import BrowserRecipe, validate_recipe as _validate_recipe
+        from .providers.browser_recipe import validate_recipe as _validate_recipe
 
         recipe = body.to_recipe_dict()
         errs = _validate_recipe({**recipe, "slug": recipe.get("slug") or "test"})
         if errs:
             raise OpenAIError(400, "invalid_recipe", "; ".join(errs))
-        cfg = request.app.state.cfg
-        pool = request.app.state.pool
-        trial_slug = f"manual-test-{uuid.uuid4().hex[:10]}"
-        trial_recipe = {**recipe, "slug": trial_slug}
-        trial_dir = cfg.recipes_dir / ".manual-test" / trial_slug
-        runner = BrowserRecipe(trial_recipe, trial_dir, pool, headed=body.headed,
-                               accounts_root=cfg.recipes_dir)
-        try:
-            parts = []
-            async for delta in runner.stream(
-                [{"role": "user", "content": "Reply with exactly: OK"}],
-                trial_recipe["models"][0]["id"],
-            ):
-                parts.append(delta)
-            reply = "".join(parts).strip()
-        except Exception as error:
-            return {"ok": False, "reply": "", "error": str(error)}
-        finally:
-            await pool.drop(trial_slug)
-        ok = bool(reply) and reply.lower() != "reply with exactly: ok"
-        return {"ok": ok, "reply": reply}
+        return await run_recipe_trial(request.app.state.cfg, request.app.state.pool,
+                                      recipe, body.headed)
 
     @admin.post("/recipes/{slug}/reload")
     async def reload_recipes(slug: str, request: Request):
@@ -1078,6 +1118,111 @@ def register_admin(app: FastAPI, admin) -> None:
             request.app.state.router.reload()
         applog.log(f"recipe: đổi tên {slug} -> {new_slug}")
         return {"ok": True, "slug": new_slug}
+
+    def _recipe_file(request: Request, slug: str):
+        """Đường tới recipe.yaml của một slug do người dùng sở hữu.
+
+        Chặn ngay ở đây cả slug bậy (path traversal) lẫn provider hệ thống
+        (`gemini`, `openai`) — chúng không chạy bằng recipe.yaml nên không có
+        gì để sửa ở màn này.
+        """
+        if not re.fullmatch(r"[a-z0-9-]+", slug or "") or slug in {"gemini", "openai"}:
+            raise OpenAIError(400, "invalid_slug", "Recipe này không sửa được")
+        path = request.app.state.cfg.recipes_dir / slug / "recipe.yaml"
+        if not path.exists():
+            raise OpenAIError(404, "not_found", "Recipe không tồn tại")
+        return path
+
+    def _edited_recipe(request: Request, slug: str, body) -> dict:
+        """Recipe sau khi áp bản sửa — chưa ghi đĩa, đã qua validate.
+
+        Hai đường vào (`yaml` toàn văn / `patch` từ biểu mẫu) hội tụ ở đây để
+        nút "Kiểm tra" và nút "Lưu" luôn nhìn thấy đúng cùng một recipe.
+        """
+        import yaml as yaml_mod
+
+        from .providers.browser_recipe import validate_recipe as _validate_recipe
+
+        recipe_file = _recipe_file(request, slug)
+        if body.yaml is not None:
+            try:
+                data = yaml_mod.safe_load(body.yaml)
+            except yaml_mod.YAMLError as error:
+                raise OpenAIError(400, "invalid_yaml", f"YAML sai cú pháp: {error}") from None
+            if not isinstance(data, dict):
+                raise OpenAIError(400, "invalid_yaml", "YAML phải là một mapping")
+        elif body.patch is not None:
+            base = yaml_mod.safe_load(recipe_file.read_text(encoding="utf-8")) or {}
+            data = merge_recipe(base if isinstance(base, dict) else {}, body.patch)
+        else:
+            raise OpenAIError(400, "empty_edit", "Không có gì để sửa")
+        # Slug gắn với TÊN THƯ MỤC; đổi nó phải đi qua đường rename (có move
+        # thư mục), nếu không recipe sẽ nạp lại dưới slug cũ và người dùng
+        # tưởng mình vừa đổi tên thành công.
+        edited_slug = data.get("slug")
+        if edited_slug is not None and str(edited_slug) != slug:
+            raise OpenAIError(400, "slug_mismatch",
+                              "Đổi slug phải dùng nút Đổi tên, không sửa trong YAML")
+        data["slug"] = slug
+        errs = _validate_recipe(data)
+        if errs:
+            raise OpenAIError(400, "invalid_recipe", "; ".join(errs))
+        return data
+
+    @admin.get("/recipes/{slug}/source")
+    async def recipe_source(slug: str, request: Request):
+        """recipe.yaml nguyên văn + bản đã parse, cho màn sửa nâng cao."""
+        import yaml as yaml_mod
+
+        recipe_file = _recipe_file(request, slug)
+        text = recipe_file.read_text(encoding="utf-8")
+        try:
+            data = yaml_mod.safe_load(text) or {}
+        except yaml_mod.YAMLError as error:
+            # File hỏng vẫn phải mở được ở tab YAML — đó chính là lúc cần sửa.
+            return {"slug": slug, "yaml": text, "data": None, "parse_error": str(error)}
+        if not isinstance(data, dict):
+            return {"slug": slug, "yaml": text, "data": None,
+                    "parse_error": "YAML phải là một mapping"}
+        data.setdefault("slug", slug)
+        return {"slug": slug, "yaml": text, "data": data, "parse_error": None}
+
+    @admin.put("/recipes/{slug}")
+    async def update_recipe(slug: str, body: RecipeEditRequest, request: Request):
+        """Ghi đè recipe.yaml rồi nạp lại router ngay."""
+        import yaml as yaml_mod
+
+        # Đọc–ghép–ghi nằm trọn trong lock: một lượt đổi tên chen vào giữa sẽ
+        # dời thư mục recipe, và bản ghi sẽ rơi vào đường dẫn không còn tồn tại.
+        async with request.app.state.recipe_publish_lock:
+            data = _edited_recipe(request, slug, body)
+            _recipe_file(request, slug).write_text(
+                yaml_mod.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            request.app.state.router.reload()
+        mode = "yaml" if body.yaml is not None else "biểu mẫu"
+        applog.log(f"recipe: sửa {slug} ({mode})")
+        return {"ok": True, "slug": slug}
+
+    @admin.post("/recipes/{slug}/preview")
+    async def preview_recipe_edit(slug: str, body: RecipeEditRequest, request: Request):
+        """Bản sửa sau khi áp, KHÔNG ghi đĩa — trả về cả YAML lẫn dict.
+
+        Màn sửa dùng nó để đổi qua lại giữa tab biểu mẫu và tab YAML mà hai bên
+        luôn nói cùng một recipe: đây là chỗ duy nhất biết dịch giữa hai dạng
+        (client không có bộ parse YAML).
+        """
+        import yaml as yaml_mod
+
+        data = _edited_recipe(request, slug, body)
+        text = yaml_mod.safe_dump(data, allow_unicode=True, sort_keys=False)
+        return {"slug": slug, "yaml": text, "data": data}
+
+    @admin.post("/recipes/{slug}/test")
+    async def test_recipe_edit(slug: str, body: RecipeEditTestRequest, request: Request):
+        """Chạy thử bản đang sửa mà chưa ghi đè recipe đang chạy."""
+        data = _edited_recipe(request, slug, body)
+        return await run_recipe_trial(request.app.state.cfg, request.app.state.pool,
+                                      data, body.headed)
 
     def _browser_recipe_or_404(request: Request, slug: str):
         from .providers.browser_recipe import BrowserRecipe as BR

@@ -2,12 +2,13 @@
   import { apiKey, showToast } from "../stores";
   import { profiles, recipes, recipesLoading, refreshAfterRecipeChange, refreshAfterRecipeDelete, refreshProfiles, refreshRecipes } from "../sync";
   import { closeRecipeBrowser, deleteRecipe, reloadRecipe, renameRecipe, type RecipeInfo } from "../api";
+  import RecipeEditorSheet from "./RecipeEditorSheet.svelte";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Badge, type BadgeVariant } from "$lib/components/ui/badge";
   import * as Card from "$lib/components/ui/card";
   import * as AlertDialog from "$lib/components/ui/alert-dialog";
-  import { Browser, CaretDown, CaretRight, Check, CircleNotch, PencilSimple, Repeat, Stack, Trash, WarningCircle, X } from "phosphor-svelte";
+  import { Browser, CaretDown, CaretRight, Check, CircleNotch, PencilSimple, Repeat, Sliders, Stack, Trash, WarningCircle, X } from "phosphor-svelte";
 
   interface Props {
     /** Slug cần cuộn tới và làm nổi bật (ví dụ ngay sau khi tích hợp thành công). */
@@ -26,6 +27,8 @@
   let renamingSlug = $state<string | null>(null);
   let renameValue = $state("");
   let renameBusy = $state(false);
+  /** Recipe đang mở ở màn sửa nâng cao; `null` là đóng. */
+  let editingSlug = $state<string | null>(null);
 
   /** Profile đang đăng nhập một domain, theo đúng bảng `profile`/`account` mà
    * router dùng để chọn account cho mỗi request. Panel này chỉ ĐỌC: mọi thao
@@ -110,7 +113,7 @@
                   <Button type="button" variant="ghost" size="sm" disabled={renameBusy} onclick={cancelRename}><X /> Hủy</Button>
                 </form>
               {:else}
-                <div class="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => onReload(rec.slug)}><Repeat class={busySlug === rec.slug ? "animate-spin" : ""} /> Reload</Button><Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => startRename(rec.slug)}><PencilSimple /> Đổi tên</Button>{#if isBrowser}<Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => onCloseBrowser(rec.slug)}><X /> Đóng browser</Button>{/if}<Button variant="destructive" size="sm" disabled={busySlug === rec.slug} onclick={() => (deleteRecipeTarget = rec.slug)}><Trash /> Xóa recipe</Button></div>
+                <div class="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => onReload(rec.slug)}><Repeat class={busySlug === rec.slug ? "animate-spin" : ""} /> Reload</Button>{#if isBrowser}<Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => (editingSlug = rec.slug)}><Sliders /> Chỉnh sửa</Button>{/if}<Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => startRename(rec.slug)}><PencilSimple /> Đổi tên</Button>{#if isBrowser}<Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => onCloseBrowser(rec.slug)}><X /> Đóng browser</Button>{/if}<Button variant="destructive" size="sm" disabled={busySlug === rec.slug} onclick={() => (deleteRecipeTarget = rec.slug)}><Trash /> Xóa recipe</Button></div>
               {/if}
               {#if isBrowser}
                 <div class="border-t pt-4">
@@ -145,5 +148,7 @@
     </div>
   </Card.Content>
 </Card.Root>
+
+<RecipeEditorSheet slug={editingSlug} onClose={() => (editingSlug = null)} />
 
 <AlertDialog.Root open={deleteRecipeTarget !== null} onOpenChange={(open) => { if (!open) deleteRecipeTarget = null; }}><AlertDialog.Content><AlertDialog.Header><AlertDialog.Title>Xóa recipe {deleteRecipeTarget}?</AlertDialog.Title><AlertDialog.Description>Recipe sẽ bị gỡ khỏi router. Các model của recipe này sẽ không còn khả dụng. Profile và đăng nhập không bị đụng tới.</AlertDialog.Description></AlertDialog.Header><AlertDialog.Footer><AlertDialog.Cancel>Hủy</AlertDialog.Cancel><AlertDialog.Action variant="destructive" onclick={confirmDeleteRecipe}>Xóa recipe</AlertDialog.Action></AlertDialog.Footer></AlertDialog.Content></AlertDialog.Root>
