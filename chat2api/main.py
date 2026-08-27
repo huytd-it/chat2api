@@ -1096,6 +1096,8 @@ def register_admin(app: FastAPI, admin) -> None:
             await page.goto(body.url, wait_until="domcontentloaded", timeout=45000)
             await page.wait_for_timeout(1200)
             found = await discover_models(page)
+            method = "dom"
+            before_action = ""
             # Nhiều site chỉ render options sau khi mở nút Model.
             if not found:
                 trigger = page.get_by_role("button", name=re.compile(
@@ -1109,8 +1111,17 @@ def register_admin(app: FastAPI, admin) -> None:
                           : '').find(Boolean) || 'button'""")
                     await trigger.click()
                     await page.wait_for_timeout(300)
-                    found = await discover_models(page, f"click:{trigger_selector}")
-            return {"models": found}
+                    before_action = f"click:{trigger_selector}"
+                    found = await discover_models(page, before_action)
+            # Site dùng tên nút lạ hoặc custom control thường thoát khỏi heuristic.
+            # Khi đã cấu hình Agent LLM, nhờ agent đọc DOM và mở picker có kiểm soát.
+            if not found and llm.configured(request.app.state.cfg):
+                from .agents import model_discovery
+
+                found = await model_discovery.discover(
+                    page, request.app.state.cfg, before_action=before_action)
+                method = "agent" if found else method
+            return {"models": found, "method": method}
         finally:
             await page.close()
             await request.app.state.pool.drop(key)

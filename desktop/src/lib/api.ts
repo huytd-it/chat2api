@@ -547,7 +547,7 @@ export async function discoverRecipeModels(
   key: string,
   url: string,
   headed = false,
-): Promise<{ models: DiscoveredRecipeModel[] }> {
+): Promise<{ models: DiscoveredRecipeModel[]; method?: "dom" | "agent" }> {
   const base = await apiBase();
   const r = await fetch(base + "/admin/recipes/discover-models", {
     method: "POST",
