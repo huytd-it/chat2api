@@ -596,8 +596,8 @@
       : [...selectedSessions, id];
   }
 
-  function toggleAllSessions() {
-    selectedSessions = allSessionsSelected ? [] : sessions.map((item) => item.id);
+  function setAllSessions(checked: boolean) {
+    selectedSessions = checked ? sessions.map((item) => item.id) : [];
   }
 
   function confirmDelete(scope: "active" | "selected" | "all") {
@@ -712,7 +712,7 @@
           checked={allSessionsSelected}
           indeterminate={selectedSessions.length > 0 && !allSessionsSelected}
           disabled={!sessions.length}
-          onchange={toggleAllSessions}
+          onchange={(event) => setAllSessions(event.currentTarget.checked)}
         />
         <span>{selectedSessions.length ? `${selectedSessions.length} đã chọn` : "Chọn tất cả"}</span>
       </label>

@@ -34,7 +34,7 @@
 </script>
 
 <section class="flex h-full flex-col" aria-labelledby="integrations-title">
-  <div class="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-4 overflow-hidden p-4 sm:p-6 lg:p-8">
+  <div class="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-4 overflow-hidden p-4 sm:p-6 lg:p-8">
     <header class="border-b border-foreground/20 pb-5">
       <div class="mb-2 flex items-center gap-2 font-data text-[10px] font-medium tracking-[0.1em] text-primary">
         <span class="h-px w-5 bg-primary" aria-hidden="true"></span>

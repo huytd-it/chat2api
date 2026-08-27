@@ -21,3 +21,4 @@ models:
 slug: qwen-web
 login:
   anon_trial_limit: 20
+keep_context: true
