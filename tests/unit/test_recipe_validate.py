@@ -13,6 +13,16 @@ def test_valid_minimal():
     assert validate_recipe(MINIMAL) == []
 
 
+def test_model_action_is_optional_and_validated():
+    assert validate_recipe({**MINIMAL, "models": [
+        {"id": "fast"},
+        {"id": "max", "action": "click:#menu;click:[data-model=max]"},
+        {"id": "pro", "action": "select:#model", "value": "pro-v2"},
+    ]}) == []
+    assert any("models[0].action" in error for error in validate_recipe(
+        {**MINIMAL, "models": [{"id": "bad", "action": "hover:#model"}]}))
+
+
 def test_missing_fields():
     errs = validate_recipe({})
     for frag in ("slug", "url", "input_selector", "last_message_selector", "done_signal", "models"):
@@ -41,6 +51,12 @@ def test_copy_button_done_signal_rejects_bad_fallback():
     d = {**MINIMAL, "response": {**MINIMAL["response"],
          "done_signal": {"type": "copy_button", "fallback_quiet_ms": -1}}}
     assert any("fallback_quiet_ms" in e for e in validate_recipe(d))
+
+
+def test_copy_button_done_signal_rejects_non_boolean_copy_result():
+    d = {**MINIMAL, "response": {**MINIMAL["response"],
+         "done_signal": {"type": "copy_button", "use_copy_result": "yes"}}}
+    assert any("use_copy_result" in e for e in validate_recipe(d))
 
 
 def test_invalid_slug_charset():
@@ -90,6 +106,16 @@ def test_multi_account_login_rejects_bad_quota():
 def test_single_account_login_unaffected():
     d = {**MINIMAL, "login": {"storage_state": "auth/state.json"}}
     assert validate_recipe(d) == []
+
+
+def test_login_strategy_and_quota_validate_without_inline_accounts():
+    assert validate_recipe({**MINIMAL, "login": {
+        "strategy": "fill_first", "quota": 10,
+    }}) == []
+    assert any("login.strategy" in error for error in validate_recipe(
+        {**MINIMAL, "login": {"strategy": "random"}}))
+    assert any("login.quota" in error for error in validate_recipe(
+        {**MINIMAL, "login": {"quota": 0}}))
 
 
 def test_merge_recipe_keeps_keys_outside_the_form():

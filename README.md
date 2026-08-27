@@ -1,353 +1,557 @@
-# chat2api
+<div align="center">
+  <img src="desktop/src-tauri/icons/128x128@2x.png" width="112" alt="chat2api logo">
 
-Biến web chat AI bất kỳ thành API OpenAI-compatible. Thay việc copy/paste thủ công.
+  # chat2api
 
-## Cài đặt
+  **Biến web chat AI thành API tương thích OpenAI — có desktop app, quản lý account/profile và lịch sử hội thoại.**
 
-    python 3.11+
-    pip install -e ".[dev]"
-    playwright install chromium
+  [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
+  [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)](pyproject.toml)
+  [![Playwright](https://img.shields.io/badge/Playwright-Chromium-2EAD33?logo=playwright&logoColor=white)](pyproject.toml)
+  [![Svelte](https://img.shields.io/badge/Svelte-5-FF3E00?logo=svelte&logoColor=white)](desktop/package.json)
+  [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](desktop/package.json)
 
-## Chạy
+  [Bắt đầu nhanh](#bắt-đầu-nhanh) · [Desktop app](#desktop-app-windows) · [Gọi API](#gọi-api) · [Tích hợp website](#tích-hợp-web-chat-mới) · [Kiến trúc](#kiến-trúc)
+</div>
 
-    python -m chat2api serve --port 8100
+---
+
+## Tổng quan
+
+`chat2api` tự động thao tác trên các web chat bằng Chromium, thu câu trả lời và trả dữ liệu theo giao thức OpenAI. Ứng dụng phù hợp khi bạn cần dùng một web chat trong Open WebUI, LobeChat, ChatBox, OpenAI SDK hoặc hệ thống nội bộ mà không muốn copy/paste thủ công.
+
+### Điểm nổi bật
+
+- **OpenAI-compatible:** hỗ trợ `GET /v1/models`, `POST /v1/chat/completions` và streaming SSE.
+- **Browser automation:** recipe YAML mô tả URL, selector, tín hiệu hoàn tất và timing của từng website.
+- **Desktop control center:** dashboard, sessions, integrations, profiles, logs, settings và API key trong một ứng dụng Tauri.
+- **Điều phối song song:** phân request qua nhiều account/profile, giới hạn slot và xếp hàng khi quá tải.
+- **Đăng nhập dùng chung theo domain:** một phiên đăng nhập có thể phục vụ nhiều recipe cùng domain.
+- **Lưu vết đầy đủ:** SQLite lưu session, message, request log, account/profile đích và URL hội thoại gốc.
+- **Tích hợp bằng agent:** agent phân tích DOM, tạo recipe và chạy thử website mới.
+- **Fallback tùy chọn:** khi recipe liên tục lỗi, agent có thể điều khiển browser trực tiếp.
+
+> [!IMPORTANT]
+> Dự án tự động hóa giao diện website. Selector có thể cần cập nhật khi website thay đổi. Hãy tuân thủ điều khoản sử dụng, giới hạn truy cập và chính sách dữ liệu của từng dịch vụ.
+
+## Ảnh chụp màn hình
+
+### Request routing dashboard
+
+Theo dõi request đang chạy, model, recipe, profile/account được chọn, độ trễ và phân bố session.
+
+![Request routing dashboard](docs/assets/dashboard.png)
+
+<details>
+<summary><strong>Xem thêm giao diện</strong></summary>
+
+### Sessions workspace
+
+Chat thử, tìm kiếm lịch sử, xem Markdown/HTML/JSON, fork hội thoại và mở lại cuộc trò chuyện trên website gốc.
+
+![Sessions workspace](docs/assets/sessions.png)
+
+### Integrations & browser profiles
+
+Thêm website bằng agent, quản lý recipe/account và vận hành Chromium profile.
+
+![Integrations and browser profiles](docs/assets/integrations.png)
+
+</details>
+
+## Bắt đầu nhanh
+
+### Yêu cầu
+
+| Thành phần | Phiên bản / mục đích |
+|---|---|
+| Python | `3.11+` |
+| Chromium | Cài qua Playwright |
+| Git | Clone và cập nhật mã nguồn |
+| Node.js + Rust + MSVC + WebView2 | Chỉ cần khi chạy desktop app trên Windows |
+
+### 1. Cài backend
+
+```bash
+git clone <repository-url>
+cd chat2api
+python -m venv .venv
+```
+
+Kích hoạt virtual environment:
+
+```powershell
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+```
+
+```bash
+# macOS / Linux
+source .venv/bin/activate
+```
+
+Cài package và Chromium:
+
+```bash
+python -m pip install --upgrade pip
+pip install -e ".[dev]"
+playwright install chromium
+```
+
+### 2. Chạy server
+
+```bash
+python -m chat2api serve --host 127.0.0.1 --port 8100
+```
+
+Kiểm tra trạng thái:
+
+```bash
+curl http://127.0.0.1:8100/health
+```
+
+Kết quả mẫu:
+
+```json
+{
+  "status": "ok",
+  "engine": "playwright",
+  "contexts": 0,
+  "models": 2
+}
+```
+
+Các địa chỉ hữu ích:
+
+| Địa chỉ | Nội dung |
+|---|---|
+| `http://127.0.0.1:8100/docs` | Swagger UI |
+| `http://127.0.0.1:8100/health` | Health check |
+| `http://127.0.0.1:8100/v1/models` | Danh sách model |
+
+> [!NOTE]
+> CLI mặc định bind `0.0.0.0`. Ví dụ trên dùng `127.0.0.1` để chỉ mở API trên máy cục bộ.
 
 ## Desktop app (Windows)
 
-Desktop app cần thêm Node.js, Rust + MSVC C++ build tools và WebView2. Script
-dưới đây kiểm tra từng thứ, chỉ cài cái nào còn thiếu, rồi chạy `npm run tauri
-dev` — chạy lại bao nhiêu lần cũng được:
+Desktop app tự khởi động Python backend dạng sidecar, chọn cổng loopback rảnh và hiển thị log ngay trong giao diện.
 
-    powershell -ExecutionPolicy Bypass -File .\desktop\scripts\setup-and-run.ps1
+Chạy script thiết lập từ thư mục gốc:
 
-- `-NoRun`: chỉ cài đặt, không mở app.
-- `-Port <số>`: ghim cổng backend (mặc định: hỏi, bỏ trống = tự chọn cổng rảnh).
-  Windows giữ riêng vài dải cổng TCP mà bind vào là hỏng im lặng — **8100 và
-  8200 nằm trong dải đó trên nhiều máy** — nên cổng nằm trong dải bị loại sẽ bị
-  từ chối và script quay về tự chọn. Xem dải của máy bạn bằng
-  `netsh interface ipv4 show excludedportrange protocol=tcp`.
+```powershell
+powershell -ExecutionPolicy Bypass -File .\desktop\scripts\setup-and-run.ps1
+```
 
-Vài bước cài máy-rộng (MSVC Build Tools, WebView2, Python) đi qua winget và có
-thể cần PowerShell chạy Administrator.
+Script kiểm tra và chỉ cài thành phần còn thiếu, sau đó chạy `npm run tauri dev`.
 
-## Dùng như API chuẩn OpenAI
-
-    POST /v1/chat/completions  {model, messages, stream}
-    GET  /v1/models
-
-Model id: `<provider>/<model>`, ví dụ `gemini/gemini-flash`, `qwen/qwen-max`.
-
-### Request đi tới Account/Profile nào
-
-Với recipe chạy bằng browser, server tự chọn một account (và profile Chromium
-của nó) cho **từng** request rồi nói ra ngay trong header response — không cần
-client gửi gì thêm:
-
-    X-Chat2api-Session-Id        phiên đã ghi request này
-    X-Chat2api-Account-Id        id account trong kho
-    X-Chat2api-Account-Label     nhãn account, vd "main"
-    X-Chat2api-Profile-Name      profile Chromium đã chạy
-    X-Chat2api-Target            "profile/host/account" gộp sẵn một dòng
-    X-Chat2api-Headed            request này có mở cửa sổ nhìn thấy được không
-    X-Chat2api-Conversation-Url  link hội thoại thật trên site (chỉ ở chế độ non-stream)
-
-Header có ngay từ byte đầu, kể cả khi `stream: true` và chưa có delta nào.
-Cùng thông tin đó được lưu vào `request_log` và `session`, nên trang Sessions
-hiện được "→ profile · host · account" dưới từng message và có nút **Xem trực
-tiếp** mở lại hội thoại trong đúng profile đã tạo ra nó.
-
-Muốn ghim một request vào đúng một account thì gửi
-`X-Chat2api-Account-Id: <id>` — chỉ định tường minh luôn thắng mọi chiến lược.
-
-### Nhiều request cùng lúc
-
-Hai request đến cùng lúc được chia sang **hai account/profile khác nhau**, và
-mỗi cái là một session riêng. Bốn khoá ở nhóm **API** của trang Settings điều
-khiển việc này:
-
-| Khoá | Mặc định | Ý nghĩa |
-| --- | --- | --- |
-| `API_ACCOUNT_STRATEGY` | `least_busy` | `least_busy` chọn account rảnh nhất; `round_robin` xoay vòng đều; `sticky_session` ghim một session vào một account; `off` giữ cách cũ (storage_state, request không gắn profile). |
-| `API_MAX_CONCURRENT_PER_ACCOUNT` | `1` | Số request chạy song song trên **một** account — mỗi slot là một tab riêng trong cùng profile. Vượt thì xếp hàng. |
-| `API_MAX_CONCURRENT_REQUESTS` | `0` | Trần request chat song song toàn server (0 = không giới hạn). Vượt trần thì chờ, không bị từ chối. |
-| `API_SESSION_MODE` | `per_request` | `per_request`: request không kèm `X-Chat2api-Session-Id` là một session riêng. `client_window`: gom theo client + model trong cửa sổ 30 phút. |
-| `API_HEADED` | `always` | `always`: mọi request API mở cửa sổ Chromium nhìn thấy được. `never`: luôn chạy ẩn. `auto`: theo ô "Chạy ẩn" của từng profile. |
-
-Mặc định `always`: gửi một request qua API là thấy ngay cửa sổ Chromium chạy
-recipe, đúng đường mà nút **Gửi** ở bàn test Sessions đang dùng — cũng là cách
-duy nhất để biết recipe kẹt ở bước nào. Đây cũng là thứ cần cho site chặn
-headless (Cloudflare, bot-detect). Chạy trên máy chủ không có màn hình thì đặt
-`API_HEADED=never`; muốn quyết định theo từng profile thì đặt `auto` rồi dùng ô
-"Chạy ẩn" ở tab Profiles. Client gửi `X-Chat2api-Headed: true|false` thì header
-thắng cả cài đặt lẫn profile; không gửi header nghĩa là "tuỳ server".
-
-Chỉ có bấy nhiêu account thì request thứ N+1 xếp hàng sau chúng — thêm account
-cho domain đó (trang Browser profiles) là cách duy nhất để chạy song song hơn.
-
-## Tích hợp sẵn (không cần agent)
-
-- **Gemini**: dán cookie từ trình duyệt vào `recipes/secrets/gemini-cookies.txt`
-  (JSON `{"cookie": "...", "sapisid": "..."}` hoặc chuỗi cookie thô).
-- **Qwen / upstream OpenAI bất kỳ**: sửa `recipes/openai/qwen.yaml` (base_url + key env).
-
-## Tích hợp web chat mới bằng agent
-
-Đặt env:
-
-    AGENT_LLM_BASE_URL=https://api.openai.com/v1   # hoặc Claude/Gemini/Ollama...
-    AGENT_LLM_API_KEY=sk-...
-    AGENT_LLM_MODEL=gpt-4o
-
-Rồi bấm **Phân tích** ở trang **Integrations** của desktop app, hoặc:
-
-    python -m chat2api integrate https://chat.example.com
-
-Tick ô **"Hiện browser khi test (không headless)"** dưới ô URL để xem
-Chromium thao tác trực tiếp trên trang web song song với app. Đây là cửa sổ
-Chromium thật trên máy chạy server; nếu nó không hiện ra (remote desktop,
-sandbox...) thì đọc nhật ký job thay vì trông vào cửa sổ.
-
-> Bản trước có "live view" — ảnh màn hình tự refresh 700ms/lần. Đã bỏ: mỗi
-> lần chụp làm cửa sổ Chromium chớp một cái, nhìn nhiều tab cùng lúc thì
-> nháy liên tục. `GET /admin/watch/{id}/screenshot` cũng không còn.
-
-Site cần đăng nhập: chạy `python -m chat2api login <slug>`, đăng nhập tay,
-chạy lại integrate.
-
-Site KHÔNG bắt buộc đăng nhập (chat được ngay ở chế độ ẩn danh) vẫn được
-publish, nhưng chỉ cho dùng thử `ANON_TRIAL_LIMIT` lượt (mặc định 20) —
-hết lượt thì `/v1/chat/completions` trả lỗi `trial_limit_exceeded` (403) cho
-tới khi có tài khoản đăng nhập. Thêm tài khoản bất cứ lúc nào ở trang
-**Integrations** — mở hàng của recipe rồi bấm **+ Thêm account** (hoặc
-`python -m chat2api login <slug> --account <tên>`); Chrome sẽ mở để đăng nhập,
-sau đó model dùng account đó thay vì giới hạn ẩn danh.
-
-## Account dùng chung theo domain
-
-Account thuộc về **domain**, không thuộc recipe. State đăng nhập nằm ở
-`recipes/.accounts/<domain>/<tên>.json`, nên đăng nhập `chat.qwen.ai` một lần
-là **mọi recipe trỏ vào chat.qwen.ai tự động dùng lại được** — kể cả recipe
-tạo sau, và cả lúc Integrate đang thử recipe mới.
-
-- Khai báo `login.accounts` trong recipe.yaml vẫn chạy và **thắng khi trùng
-  tên**, để recipe ghim được file state riêng nếu cần.
-- Account kiểu cũ (`recipes/<slug>/auth/*.json`) được **chép** vào kho chung
-  một lần lúc khởi động; file gốc giữ nguyên.
-- Quản lý ở trang **Integrations**: account nằm ngay trong hàng recipe (gom
-  theo domain của recipe) — thêm, đăng nhập lại khi hết hạn, xóa.
-- Không biết domain? Để trống ô Domain trong dialog: browser mở trang trắng,
-  bạn tự vào site và đăng nhập, server đọc cookie phiên để suy ra domain và tạo
-  mới nếu chưa có. Domain khác còn đăng nhập trong cùng phiên được gợi ý luôn.
-
-## Các trang trong app
-
-| Trang | Dùng để |
+| Tùy chọn | Ý nghĩa |
 |---|---|
-| `/` Tổng quan | Trạng thái server, cảnh báo recipe hỏng / domain chưa có account |
-| `/sessions` | Chat + xem lại mọi hội thoại: pretty / markdown / HTML gốc / JSON, tìm toàn văn, fork, xuất file |
-| `/integrations` | Ba panel: thêm site bằng agent · site đã tích hợp (recipe + account) · profile trình duyệt |
-| `/logs` | Log hoạt động server + output tiến trình nền |
-| `/settings` | Sửa delay/timeout/engine... ghi thẳng vào `.env` |
+| `-NoRun` | Chỉ thiết lập môi trường, không mở app |
+| `-Port <số>` | Ghim cổng backend; bỏ trống để tự chọn cổng rảnh |
 
-## Profile trình duyệt (tuỳ chọn)
+> [!TIP]
+> Windows có thể dành riêng một số dải TCP cho Hyper-V/WSL. Nếu một cổng bind thất bại, xem danh sách bằng `netsh interface ipv4 show excludedportrange protocol=tcp` hoặc để app tự chọn cổng.
 
-Mặc định mỗi recipe chạy trong một browser context riêng, khôi phục từ
-`storage_state` (chỉ cookie + localStorage). Đặt `BROWSER_PROFILE_MODE=profile`
-để chuyển sang Chromium profile thật:
+Chạy thủ công khi máy đã đủ toolchain:
 
-```
-BROWSER_PROFILE_MODE=profile   # storage_state (mặc định) | profile
-POOL_MAX_PROFILES=6            # số tiến trình Chromium giữ mở
-PROFILE_MAX_TABS=8             # tab tối đa trong một profile
+```powershell
+cd desktop
+npm install
+npm run tauri dev
 ```
 
-Hai trần này chỉ dọn profile/tab **đang rảnh**: request đang chạy không bao giờ
-bị đóng giữa chừng, kể cả khi bàn test Sessions mở nhiều profile hơn trần (lúc
-đó pool tạm vượt trần và ghi cảnh báo vào log).
+## Gọi API
 
-Một profile = một thư mục `data/profiles/<tên>/` giữ cookie + localStorage +
-IndexedDB + service worker của **mọi** domain cùng lúc, nên:
+Model ID có dạng `<provider>/<model>`, ví dụ `gemini-web/gemini-web` hoặc `qwen-web/qwen-web` với các recipe mẫu hiện tại. Luôn lấy ID thực tế từ `/v1/models`.
 
-- Một lần đăng nhập Google dùng được cho nhiều site trong cùng profile.
-- Nhiều recipe chạy **song song**, mỗi recipe một tab, chung một tiến trình.
-- Recipe tự chọn profile theo thứ tự: `recipe.profile_id` đã ghim → profile của
-  account trên domain của recipe → profile mặc định.
-- Account cũ (`recipes/.accounts/*.json`) được đổ vào profile ở lần mở đầu tiên
-  rồi thôi; file JSON giữ nguyên làm bản sao lưu.
+### cURL
 
-Một `user_data_dir` chỉ được một tiến trình Chromium mở, nên profile có khoá
-pid. Khi bị tiến trình khác giữ — hoặc bất kỳ lỗi nào khác — request **vẫn chạy**
-bằng đường `storage_state` cũ. Chế độ profile không áp dụng cho engine `cloak`
-và cho request bật "hiện browser".
+```bash
+curl http://127.0.0.1:8100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <YOUR_API_KEY>" \
+  -d '{
+    "model": "<provider>/<model>",
+    "messages": [
+      {"role": "user", "content": "Viết một lời chào ngắn bằng tiếng Việt"}
+    ]
+  }'
+```
 
-Panel **Profile trình duyệt** ở trang `/integrations` quản lý phần này: tạo,
-sửa số tab / headless, đặt mặc định, mở cửa sổ để đăng nhập tay, **dò** xem
-profile còn đăng nhập domain nào chưa khai báo, đóng, xóa. Tương đương
-`GET/POST/PATCH/DELETE /admin/profiles` và `POST /admin/profiles/{id}/detect`.
+### Python SDK
 
-## Lưu hội thoại
+```python
+from openai import OpenAI
 
-Mọi request qua `/v1/chat/completions` được ghi vào `session` + `message` +
-`request_log`, kể cả request từ client API ngoài. Đúng hai transaction cho mỗi
-request (mở và đóng) — không ghi từng SSE delta.
+client = OpenAI(
+    base_url="http://127.0.0.1:8100/v1",
+    api_key="<YOUR_API_KEY>",
+)
 
-- Header `X-Chat2api-Session-Id` (tùy chọn) nối nhiều lượt vào cùng một phiên;
-  server luôn trả lại header này để client biết mình vừa ghi vào đâu.
-- Không gửi header thì được lưu dưới `kind='api'`, mỗi request một session
-  (`API_SESSION_MODE=per_request`). Đặt `client_window` để quay lại cách gom
-  theo model + hash của `Authorization` và `User-Agent` trong cửa sổ 30 phút.
-- `request_log` ghi luôn `account_id`, `profile_id` và `conversation_url` của
-  từng request, nên một session trải qua nhiều account vẫn truy được từng lượt.
-- Reply lỗi / timeout / hết lượt / client ngắt giữa chừng đều được lưu kèm phần
-  text đã nhận được, không mất trắng.
-- Recipe khai báo `response.capture_html: true` thì lưu thêm outerHTML gốc của
-  site, trang Sessions render nó trong `<iframe sandbox>` để xem bảng/công thức
-  đúng như trên site. Mặc định tắt.
+response = client.chat.completions.create(
+    model="<provider>/<model>",
+    messages=[{"role": "user", "content": "Xin chào"}],
+)
 
-Kho rỗng (chưa mở được SQLite) chỉ làm mất phần lịch sử — API chat vẫn chạy.
+print(response.choices[0].message.content)
+```
 
-## Duy trì browser & delay khi chạy recipe
+### Node.js SDK
 
-Browser context **không bao giờ tự đóng**: trả lời xong cửa sổ vẫn còn nguyên,
-mỗi recipe dùng lại đúng một tab cho mọi request (không mở tab mới, không đóng
-tab cũ). Chỉ 3 cách tắt, đều do người dùng chủ động:
+```javascript
+import OpenAI from "openai";
 
-- tự đóng cửa sổ browser bằng tay (request sau tự mở lại);
-- bấm **Tắt browser** ở bảng recipes (`POST /admin/recipes/<slug>/browser/close`);
-- tắt server.
+const client = new OpenAI({
+  baseURL: "http://127.0.0.1:8100/v1",
+  apiKey: "<YOUR_API_KEY>",
+});
 
-Vì tab được dùng lại, site nào khôi phục hội thoại cũ khi mở lại thì khai báo
-`new_chat` để mỗi request bắt đầu một phiên chat mới:
+const response = await client.chat.completions.create({
+  model: "<provider>/<model>",
+  messages: [{ role: "user", content: "Xin chào" }],
+  stream: true,
+});
+
+for await (const chunk of response) {
+  process.stdout.write(chunk.choices[0]?.delta?.content ?? "");
+}
+```
+
+### Header điều khiển và truy vết
+
+| Header request | Công dụng |
+|---|---|
+| `X-Chat2api-Session-Id` | Nối nhiều lượt vào cùng một session |
+| `X-Chat2api-Account-Id` | Ghim request vào một account cụ thể |
+| `X-Chat2api-Headed: true\|false` | Buộc request mở browser hiển thị hoặc chạy ẩn |
+
+Server trả các header sau ngay từ đầu response, kể cả với stream:
+
+| Header response | Nội dung |
+|---|---|
+| `X-Chat2api-Session-Id` | Session đã ghi request |
+| `X-Chat2api-Account-Id` / `X-Chat2api-Account-Label` | Account được chọn |
+| `X-Chat2api-Profile-Name` | Chromium profile thực thi |
+| `X-Chat2api-Target` | Chuỗi đích `profile/host/account` |
+| `X-Chat2api-Headed` | Browser có hiển thị hay không |
+| `X-Chat2api-Conversation-Url` | URL hội thoại gốc; có ở response non-stream khi website cung cấp |
+
+## Tích hợp web chat mới
+
+### Cách 1 — dùng desktop app
+
+1. Mở **Integrations**.
+2. Nhập URL website.
+3. Bật **Hiện browser khi test** nếu muốn quan sát Chromium thao tác.
+4. Chọn **Phân tích**.
+5. Xem log, kiểm tra recipe, đăng nhập nếu cần rồi publish.
+
+### Cách 2 — dùng CLI
+
+Cấu hình LLM dùng cho agent trong biến môi trường hoặc `.env`:
+
+```dotenv
+AGENT_LLM_BASE_URL=https://api.openai.com/v1
+AGENT_LLM_API_KEY=<YOUR_AGENT_KEY>
+AGENT_LLM_MODEL=<YOUR_MODEL>
+```
+
+Chạy phân tích:
+
+```bash
+python -m chat2api integrate https://chat.example.com
+```
+
+Nếu website yêu cầu đăng nhập:
+
+```bash
+python -m chat2api login <recipe-slug>
+```
+
+Thêm account khác cho cùng recipe:
+
+```bash
+python -m chat2api login <recipe-slug> --account secondary
+```
+
+> [!WARNING]
+> Các thư mục `auth/`, `secrets/`, `.accounts/`, `data/` và file `.env` có thể chứa cookie hoặc secret và đã được `.gitignore`. Không commit hoặc chia sẻ các tệp này.
+
+## Recipe hoạt động như thế nào?
+
+Recipe nằm tại `recipes/<slug>/recipe.yaml` và mô tả cách điều khiển một website. Hai recipe mẫu hiện có là [`gemini-web`](recipes/gemini-web/recipe.yaml) và [`qwen-web`](recipes/qwen-web/recipe.yaml).
+
+Ví dụ tối giản:
 
 ```yaml
-new_chat:
-  selector: "button[aria-label='New chat']"   # bấm nút tạo chat mới sau khi load
-  # url: https://example.com/chat/new         # hoặc mở thẳng URL chat mới
-timing:
-  ready_delay_ms: 2000    # chờ sau khi ô input hiện ra, để web thật sự sẵn sàng
-  input_delay_ms: 600     # chờ trước khi đổ prompt vào ô input
-  ready_timeout_ms: 20000 # hạn chờ ô input xuất hiện
-keep_context: false       # tùy chọn: dựng context sạch mỗi request (chậm hơn)
-```
+slug: example-web
+url: https://chat.example.com
+models:
+  - id: example-model
 
-Không khai báo `timing` thì lấy mặc định từ env `RECIPE_READY_DELAY_MS` (1200),
-`RECIPE_INPUT_DELAY_MS` (400), `RECIPE_READY_TIMEOUT_MS` (20000).
+input:
+  selector: "textarea"
+  submit: enter
 
-## Biết lúc nào câu trả lời đã xong (`response.done_signal`)
-
-Đây là thứ quyết định recipe trả về đủ hay cụt. Bốn kiểu:
-
-| `type` | Chốt khi | Dùng khi |
-|---|---|---|
-| `copy_button` | Nút **Copy** hiện ra dưới câu trả lời cuối | Mặc định nên dùng — gần như web chat nào cũng có |
-| `stable_text` | Text đứng yên `quiet_ms` | Trang không có nút copy |
-| `selector_appear` | Selector xuất hiện | Có dấu hiệu riêng khác |
-| `selector_disappear` | Selector biến mất | Ví dụ nút "Dừng tạo" tắt đi |
-
-```yaml
 response:
-  last_message_selector: "model-response .model-response-text"
+  last_message_selector: ".assistant-message"
   done_signal:
     type: copy_button
-    # selector: 'button[data-test-id="copy-button"]'  # bỏ trống = dùng bộ dò sẵn
-    # scope: after           # after (mặc định) | inside | page
-    # exclude: ".code-toolbar"  # nút nằm trong đây thì không tính
-    quiet_ms: 600            # chống nhiễu sau khi nút hiện (mặc định 600)
-    fallback_quiet_ms: 15000 # không thấy nút mà text đứng yên chừng này thì vẫn chốt
+    quiet_ms: 600
+    fallback_quiet_ms: 15000
     timeout_ms: 120000
+
+timing:
+  ready_delay_ms: 1200
+  input_delay_ms: 400
+  ready_timeout_ms: 20000
 ```
 
-`copy_button` hơn `stable_text` ở hai điểm: xong là chốt ngay thay vì phải chờ
-hết khoảng im lặng, và **không bị lừa bởi khoảng dừng giữa chừng** — kiểu Qwen
-ngắt vài giây giữa đoạn "thinking" và câu trả lời thật (vì vậy `recipes/chat`
-phải đặt `quiet_ms: 10000`).
+### Tín hiệu hoàn tất
 
-Chi tiết:
+| `response.done_signal.type` | Khi nào dùng |
+|---|---|
+| `copy_button` | Khuyến nghị; chốt khi nút Copy của reply cuối xuất hiện |
+| `stable_text` | Website không có dấu hiệu hoàn tất rõ ràng |
+| `selector_appear` | Có selector riêng xuất hiện khi hoàn tất |
+| `selector_disappear` | Nút Stop/loading biến mất khi hoàn tất |
 
-- **Bỏ trống `selector`** thì dùng bộ dò sẵn, khớp các cách đánh dấu nút copy
-  hay gặp: `aria-label`/`title` chứa *copy* / *sao chép* / *复制*,
-  `data-testid`/`data-test-id` chứa *copy*, và `copy-button button`.
-- **`scope`** quyết định nút phải nằm ở đâu so với khối trả lời cuối
-  (`last_message_selector`): `after` = trong hoặc **sau** nó theo thứ tự DOM
-  (đúng chỗ thanh hành động hay nằm), `inside` = phải nằm bên trong, `page` =
-  bất kỳ đâu. Không dùng `selector_appear` cho việc này được: nó đếm cả trang
-  nên nút copy của lượt trước làm request chốt ngay khi vừa gửi.
-- Nút bị `disabled`/`aria-disabled`/`display:none` không tính. Nút mờ vì hiệu
-  ứng hover vẫn tính, nhưng phải kèm điều kiện text đứng yên `quiet_ms` nên
-  thanh hành động dựng sẵn lúc mới bắt đầu trả lời không làm chốt sớm.
-- **Nút "Copy code" của code block không bao giờ được tính** — nó mọc lên ngay
-  khi code block bắt đầu stream, còn lâu mới xong. Bỏ qua nút nằm trong `<pre>`
-  và nút có nhãn chứa *code* / *mã nguồn* / *代码*; site nào để nút copy-code ở
-  chỗ khác thì thêm `exclude: "<css selector>"`.
-- **`fallback_quiet_ms`** (mặc định 15000, đặt `0` để tắt) là đường lùi khi site
-  đổi giao diện: không có nút copy mà text đã đứng yên chừng đó thì vẫn chốt
-  theo kiểu `stable_text` và ghi log `warn` ở tab **Logs** — mất câu trả lời vì
-  timeout còn tệ hơn chốt hơi muộn.
+Trong desktop app, mở **Integrations → Sites → Chỉnh sửa** để sửa bằng form hoặc YAML, chạy thử trước khi lưu và reload router mà không cần restart server.
 
-## Sửa recipe đã tích hợp
+## Account, profile và xử lý song song
 
-Site đổi giao diện là selector chết theo. Trang **Integrations → Sites**, mở
-hàng recipe rồi bấm **Chỉnh sửa** — không cần mở file, không cần restart:
+Account thuộc về **domain**, không thuộc riêng recipe. State đăng nhập dùng chung nằm dưới `recipes/.accounts/<domain>/`, vì vậy các recipe cùng domain có thể dùng lại một lần đăng nhập.
 
-- **Biểu mẫu**: URL, selector gửi/nhận, `done_signal`, models, timing,
-  `keep_context`, `format: markdown`, `capture_html`, lượt dùng thử ẩn danh.
-- **YAML**: toàn văn `recipe.yaml`. Cần khi đụng tới khóa biểu mẫu không có
-  (`login.accounts`, `response.exclude`…), hoặc khi file hỏng cú pháp — lúc đó
-  app mở thẳng tab này và tạm khóa tab biểu mẫu.
+```mermaid
+flowchart LR
+    C[OpenAI client] -->|POST /v1/chat/completions| API[FastAPI]
+    API --> R[Model router]
+    R --> A[Account rotator]
+    A -->|least busy / round robin / sticky| P[Browser profile + tab]
+    P --> W[Web chat]
+    W -->|DOM reply / stream| API
+    API -->|OpenAI response + X-Chat2api-*| C
+    API -. session, log, target .-> DB[(SQLite)]
+```
 
-Đổi qua lại giữa hai tab không mất chỗ vừa sửa: bản sửa được server dịch sang
-dạng kia (`POST /admin/recipes/<slug>/preview`). Sửa bằng biểu mẫu **không xóa**
-khóa nào nó không quản — server merge vào file đang có.
+Các thiết lập chính:
 
-- **Kiểm tra** chạy thử một prompt qua bản đang sửa mà chưa ghi đè recipe đang
-  chạy (`POST /admin/recipes/<slug>/test`); bật *Hiện browser* để xem tận mắt.
-- **Lưu** ghi `recipe.yaml` rồi nạp lại router ngay (`PUT /admin/recipes/<slug>`).
-  Recipe được thử lại từ đầu, cờ "lỗi sức khỏe" xóa theo.
-- **Đọc lại** vứt bản đang sửa, lấy lại file trên đĩa.
-- Đổi slug vẫn đi đường **Đổi tên** (phải chuyển cả thư mục), không sửa trong
-  YAML — server từ chối để tránh sửa xong mà recipe vẫn nạp dưới tên cũ.
+| Khóa | Mặc định | Ý nghĩa |
+|---|---:|---|
+| `API_ACCOUNT_STRATEGY` | `least_busy` | `least_busy`, `round_robin`, `sticky_session` hoặc `off` |
+| `API_MAX_CONCURRENT_PER_ACCOUNT` | `1` | Số request song song trên mỗi account |
+| `API_MAX_CONCURRENT_REQUESTS` | `0` | Trần toàn server; `0` là không giới hạn |
+| `API_SESSION_MODE` | `per_request` | Tách session theo request hoặc gom theo client window |
+| `API_HEADED` | `always` | `always`, `never` hoặc `auto` |
+| `BROWSER_PROFILE_MODE` | `storage_state` | Dùng state nhẹ hoặc Chromium profile đầy đủ |
+| `POOL_MAX_PROFILES` | `6` | Số tiến trình profile được giữ mở |
+| `PROFILE_MAX_TABS` | `8` | Số tab tối đa mỗi profile |
 
-## Fallback khi recipe hỏng
+Khi mọi slot đều bận, request mới **chờ trong hàng đợi** thay vì bị từ chối. Request đang chạy không bị đóng để ép pool về giới hạn.
 
-    ENABLE_AGENT_FALLBACK=true
-    # recipe lỗi ≥ 3 lần → agent điều khiển browser trực tiếp, vẫn trả lời được
+## Kiến trúc
 
-## Env chính
+```mermaid
+flowchart TB
+    subgraph Clients[Clients]
+      SDK[OpenAI SDK / cURL]
+      UI[Tauri + Svelte desktop]
+    end
 
-CHAT2API_KEYS · RECIPES_DIR · CHAT2API_DATA_DIR (mặc định `./data`) · AGENT_LLM_* ·
-ENABLE_AGENT_FALLBACK · POOL_MAX_CONTEXTS · BROWSER_ENGINE=playwright|cloak ·
-BROWSER_PROFILE_MODE=storage_state|profile · POOL_MAX_PROFILES · PROFILE_MAX_TABS ·
-RECIPE_TIMEOUT_MS · INTEGRATE_MAX_ROUNDS ·
-ANON_TRIAL_LIMIT (0 = không giới hạn dùng thử ẩn danh) ·
-RECIPE_READY_DELAY_MS · RECIPE_INPUT_DELAY_MS · RECIPE_READY_TIMEOUT_MS ·
-API_ACCOUNT_STRATEGY · API_MAX_CONCURRENT_PER_ACCOUNT ·
-API_MAX_CONCURRENT_REQUESTS · API_SESSION_MODE · API_HEADED
+    subgraph Core[chat2api backend]
+      APP[FastAPI application]
+      ROUTER[Provider router]
+      RECIPES[Browser recipes]
+      NATIVE[Native / OpenAI passthrough]
+      AGENT[Analyzer + fallback agent]
+      POOL[BrowserPool]
+      STORE[(SQLite store)]
+    end
 
-Các khoá trên giờ lưu trong bảng `setting` của kho SQLite và sửa được từ trang
-Settings. Đặt trong môi trường thật hay `.env` vẫn **thắng** hàng trong kho —
-đó là đường bootstrap cho CI và cho container; trang Settings hiện rõ khoá nào
-đang bị `.env` ghim.
+    SDK --> APP
+    UI -->|Admin API| APP
+    APP --> ROUTER
+    APP --> STORE
+    ROUTER --> RECIPES
+    ROUTER --> NATIVE
+    RECIPES --> POOL
+    AGENT --> POOL
+    POOL --> CHROME[Chromium contexts / profiles / tabs]
+    CHROME --> SITES[AI web chats]
+```
 
-## API key
+### Thành phần chính
 
-Trang Settings tạo và thu hồi được từng key một (nhãn + scope `chat` cho
-`/v1/*`, `admin` cho `/admin/*`). Kho chỉ giữ sha256 của key, nên key thô chỉ
-đọc được đúng một lần lúc tạo — chép ngay, mất là phải tạo cái khác.
-`request_log` ghi lại key nào đã gọi request nào.
+| Đường dẫn | Trách nhiệm |
+|---|---|
+| `chat2api/main.py` | FastAPI lifecycle, OpenAI API và admin API |
+| `chat2api/router.py` | Nạp provider và resolve model ID |
+| `chat2api/providers/browser_recipe.py` | Chạy recipe, chọn account/profile, thu reply |
+| `chat2api/browserpool.py` | Quản lý Chromium context/profile/tab |
+| `chat2api/agents/` | Phân tích website và fallback |
+| `chat2api/store/` | SQLite, migration và writer theo batch |
+| `desktop/src/routes/` | Các màn hình SvelteKit |
+| `desktop/src-tauri/` | Tauri shell và Python sidecar |
+| `recipes/` | Recipe YAML và state cục bộ đã ignore |
+| `tests/` | Unit và integration tests |
 
-`CHAT2API_KEYS` (CSV) vẫn dùng được song song làm key bootstrap cho CI và cho
-lần chạy đầu khi chưa có kho; key kiểu này không có hàng trong DB nên không
-liệt kê và không thu hồi từ UI được. Không đặt key ở cả hai nơi ⇒ server mở.
+## Cấu hình
 
-## Kho dữ liệu
+Cấu hình có thể đến từ môi trường thật, `.env`, SQLite settings hoặc default. Thứ tự ưu tiên:
 
-`CHAT2API_DATA_DIR` (mặc định `./data`) chứa `chat2api.db` — kho SQLite của log,
-job và (từ pha sau) session/recipe/account. Thư mục chỉ được tạo khi server chạy,
-và nằm trong `.gitignore`. DB hỏng hay không mở được thì server vẫn chat bình
-thường, chỉ mất phần lưu lịch sử.
+```text
+Environment / .env  >  SQLite setting  >  default
+```
 
-`GET /admin/logs` đọc ring buffer trong RAM (poll theo cursor);
-`GET /admin/logs/history?level=&source=&q=&before=` đọc từ DB nên thấy được cả
-log trước lần restart gần nhất.
+Các khóa thường dùng:
 
-Thiết kế đầy đủ cho các pha còn lại: [`docs/design-v2.md`](docs/design-v2.md).
+```dotenv
+# Security
+CHAT2API_KEYS=
+
+# Storage
+RECIPES_DIR=./recipes
+CHAT2API_DATA_DIR=./data
+
+# Browser
+BROWSER_ENGINE=playwright
+BROWSER_PROFILE_MODE=storage_state
+POOL_MAX_CONTEXTS=4
+POOL_MAX_PROFILES=6
+PROFILE_MAX_TABS=8
+
+# Recipe timing
+RECIPE_TIMEOUT_MS=120000
+RECIPE_READY_DELAY_MS=1200
+RECIPE_INPUT_DELAY_MS=400
+RECIPE_READY_TIMEOUT_MS=20000
+
+# API routing
+API_ACCOUNT_STRATEGY=least_busy
+API_MAX_CONCURRENT_PER_ACCOUNT=1
+API_MAX_CONCURRENT_REQUESTS=0
+API_SESSION_MODE=per_request
+API_HEADED=always
+
+# Agent integration / fallback
+AGENT_LLM_BASE_URL=
+AGENT_LLM_API_KEY=
+AGENT_LLM_MODEL=
+ENABLE_AGENT_FALLBACK=false
+ANON_TRIAL_LIMIT=20
+```
+
+Phần lớn khóa có thể chỉnh trong **Settings**. Giá trị từ environment hoặc `.env` sẽ khóa giá trị đang chạy và thắng cấu hình lưu trong SQLite.
+
+## API key và bảo mật
+
+- Tạo key trong **Settings → API keys**.
+- Scope `chat` bảo vệ `/v1/*`; scope `admin` bảo vệ `/admin/*`.
+- Database chỉ lưu SHA-256 của key.
+- Key thô chỉ hiển thị **một lần** khi tạo.
+- `CHAT2API_KEYS` hỗ trợ bootstrap key dạng CSV cho CI hoặc lần chạy đầu.
+- Nếu không có key ở bất kỳ nguồn nào, server chạy ở chế độ mở.
+
+Khuyến nghị khi triển khai:
+
+1. Luôn tạo API key.
+2. Bind `127.0.0.1` nếu chỉ dùng cục bộ.
+3. Nếu mở ra mạng, đặt sau reverse proxy có TLS và kiểm soát truy cập.
+4. Không đồng bộ `data/`, browser profile hoặc account state lên kho công khai.
+5. Đặt `API_HEADED=never` trên server không có desktop/display.
+
+## Dữ liệu và session
+
+`CHAT2API_DATA_DIR` mặc định là `./data` và chứa `chat2api.db`. Mỗi request được ghi ở đầu và cuối — không ghi từng SSE delta — để giảm lock contention nhưng vẫn giữ được:
+
+- Prompt và reply, kể cả reply lỗi hoặc bị ngắt giữa stream.
+- Model, provider, status, latency và API key đã gọi.
+- Account/profile đích và URL hội thoại gốc.
+- HTML gốc nếu recipe bật `response.capture_html: true`.
+
+SQLite chạy WAL với một writer thread gom lệnh theo batch. Nếu store không mở được, chat API vẫn tiếp tục chạy nhưng phần lịch sử có thể không được lưu.
+
+## Kiểm thử và phát triển
+
+Chạy toàn bộ test:
+
+```bash
+pytest
+```
+
+Chạy theo nhóm:
+
+```bash
+pytest tests/unit
+pytest tests/integration
+```
+
+Kiểm tra frontend:
+
+```bash
+cd desktop
+npm install
+npm run check
+npm run build
+```
+
+Cấu trúc test bao phủ router, config/auth, store, recipe validation, browser pool, account/profile, session, settings và các endpoint chính.
+
+## Xử lý sự cố
+
+<details>
+<summary><strong>Browser không mở hoặc Playwright báo thiếu executable</strong></summary>
+
+```bash
+playwright install chromium
+```
+
+Đảm bảo lệnh được chạy trong đúng virtual environment đã cài `chat2api`.
+</details>
+
+<details>
+<summary><strong>Server chạy nhưng không có model</strong></summary>
+
+- Kiểm tra `RECIPES_DIR` và cú pháp `recipes/*/recipe.yaml`.
+- Mở **Logs** để xem recipe nào không healthy.
+- Với desktop sidecar, bảo đảm working directory trỏ về thư mục gốc dự án.
+</details>
+
+<details>
+<summary><strong>Request bị kẹt hoặc câu trả lời bị cụt</strong></summary>
+
+- Chạy request với `X-Chat2api-Headed: true` để quan sát website.
+- Kiểm tra `last_message_selector` và `done_signal`.
+- Ưu tiên `copy_button`; tăng `fallback_quiet_ms` cho website có khoảng dừng dài.
+- Điều chỉnh `RECIPE_TIMEOUT_MS` và nhóm `timing` của recipe.
+</details>
+
+<details>
+<summary><strong>Website yêu cầu đăng nhập lại</strong></summary>
+
+Mở **Integrations**, chọn account và đăng nhập lại; hoặc dùng:
+
+```bash
+python -m chat2api login <recipe-slug> --account <account-name>
+```
+</details>
+
+<details>
+<summary><strong>Desktop app không bind được cổng trên Windows</strong></summary>
+
+Bỏ tùy chọn `-Port` để app tự chọn cổng rảnh hoặc kiểm tra dải cổng bị loại:
+
+```powershell
+netsh interface ipv4 show excludedportrange protocol=tcp
+```
+</details>
+
+## Tài liệu thiết kế
+
+Thiết kế lưu trữ, session, recipe, account/profile và các pha phát triển chi tiết nằm tại [`docs/design-v2.md`](docs/design-v2.md). Các quyết định và kế hoạch ban đầu nằm trong [`docs/superpowers/specs/`](docs/superpowers/specs/) và [`docs/superpowers/plans/`](docs/superpowers/plans/).
+
+---
+
+<div align="center">
+  <strong>chat2api</strong> — một endpoint OpenAI-compatible cho các web chat bạn đang sử dụng.
+</div>

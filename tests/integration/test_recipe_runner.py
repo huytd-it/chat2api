@@ -7,6 +7,7 @@ from chat2api.providers.browser_recipe import (
     DEFAULT_COPY_BUTTON_SELECTOR,
     BrowserRecipe,
     TrialLimitExceeded,
+    discover_models,
     validate_recipe,
 )
 
@@ -82,6 +83,43 @@ async def test_copy_button_done_signal_waits_for_the_button(fixture_recipe, tmp_
         # Nút copy chỉ gắn vào khi fixture viết xong câu cuối, nên chốt sớm là
         # sẽ thiếu chữ.
         assert "".join(out).strip() == "This is the reply."
+    finally:
+        await pool.aclose()
+
+
+async def test_discover_and_select_model_before_prompt(fixture_recipe, tmp_path):
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe({**fixture_recipe, "models": [
+            {"id": "fast", "action": "select:#model", "value": "fast-v1"},
+            {"id": "max", "action": "select:#model", "value": "max-v2"},
+        ]}, tmp_path, pool)
+        context = await pool.context_for("discover")
+        page = await context.new_page()
+        await page.goto(fixture_recipe["url"])
+        found = await discover_models(page)
+        assert [(item["id"], item["value"]) for item in found] == [
+            ("fast-v1", "fast-v1"), ("max-v2", "max-v2")]
+
+        out = []
+        async for delta in provider.stream([{"role": "user", "content": "hi"}], "max"):
+            out.append(delta)
+        assert "".join(out).strip() == "This is the max reply."
+    finally:
+        await pool.aclose()
+
+
+async def test_copy_button_can_return_the_clipboard_result(fixture_recipe, tmp_path):
+    recipe = _copy_button_recipe(fixture_recipe, use_copy_result=True)
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(recipe, tmp_path, pool)
+        out = []
+        async for delta in provider.stream([{"role": "user", "content": "hi"}], "fixture-web"):
+            out.append(delta)
+        assert "".join(out).strip() == "This is the copied reply."
     finally:
         await pool.aclose()
 

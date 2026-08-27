@@ -39,6 +39,8 @@ class RecipeDoneSignalSpec(BaseModel):
     quiet_ms: int | None = None
     timeout_ms: int | None = None
     scope: str | None = None                # copy_button: after | inside | page
+    use_copy_result: bool | None = None
+    exclude: str | None = None              # loại nút Copy không thuộc reply
     fallback_quiet_ms: int | None = None    # copy_button: đường lùi về stable_text
 
 
@@ -63,8 +65,28 @@ class RecipeTimingSpec(BaseModel):
     ready_timeout_ms: int | None = None
 
 
+class RecipeAccountSpec(BaseModel):
+    name: str
+    storage_state: str
+
+
+class RecipeLoginSpec(BaseModel):
+    strategy: str = "round_robin"
+    quota: int = 50
+    storage_state: str | None = None
+    accounts: list[RecipeAccountSpec] | None = None
+
+
 class RecipeModelSpec(BaseModel):
     id: str
+    # Action chạy trước khi nhập prompt. Bỏ trống để website giữ model mặc định.
+    action: str | None = None       # nhiều bước ngăn bằng ;: click:<selector> | select:<selector>
+    value: str | None = None        # option value, mặc định dùng id
+
+
+class RecipeModelDiscoveryRequest(BaseModel):
+    url: str
+    headed: bool = False
 
 
 class RecipeManualSpec(BaseModel):
@@ -78,6 +100,7 @@ class RecipeManualSpec(BaseModel):
     models: list[RecipeModelSpec]
     new_chat: RecipeNewChatSpec | None = None
     timing: RecipeTimingSpec | None = None
+    login: RecipeLoginSpec | None = None
     keep_context: bool = True
     # Số lượt chạy ẩn danh cho phép trước khi bắt buộc thêm account đăng nhập.
     # Để trống = không giới hạn (site không cần đăng nhập, hoặc thêm account sau).

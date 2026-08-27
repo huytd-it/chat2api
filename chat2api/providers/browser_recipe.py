@@ -7,6 +7,7 @@ import sys
 import time
 from pathlib import Path
 from typing import AsyncIterator
+from urllib.parse import urlsplit
 
 from .. import accounts, applog, settings, store
 from ..prompt import flatten_messages
@@ -125,10 +126,30 @@ def validate_recipe(d: dict) -> list[str]:
         fb = ds.get("fallback_quiet_ms")
         if fb is not None and (not isinstance(fb, int) or fb < 0):
             errs.append("invalid field: response.done_signal.fallback_quiet_ms (số nguyên >= 0)")
+        use_copy = ds.get("use_copy_result")
+        if use_copy is not None and not isinstance(use_copy, bool):
+            errs.append("invalid field: response.done_signal.use_copy_result (boolean)")
     models = d.get("models")
-    need("models", isinstance(models, list) and len(models) > 0 and all(m.get("id") for m in models))
+    need("models", isinstance(models, list) and len(models) > 0
+         and all(isinstance(m, dict) and m.get("id") for m in models))
+    if isinstance(models, list):
+        for i, model in enumerate(models):
+            if not isinstance(model, dict):
+                continue
+            action = model.get("action")
+            steps = action.split(";") if isinstance(action, str) else []
+            if action is not None and not (steps and all(
+                    (step.strip().startswith("click:") or step.strip().startswith("select:"))
+                    and step.strip().split(":", 1)[1].strip() for step in steps)):
+                errs.append(
+                    f"invalid field: models[{i}].action (click:<selector> | select:<selector>)")
 
     login = d.get("login") or {}
+    if login.get("strategy", "round_robin") not in LOGIN_STRATEGIES:
+        errs.append("invalid field: login.strategy (round_robin | fill_first)")
+    quota = login.get("quota", 50)
+    if not isinstance(quota, int) or quota < 1:
+        errs.append("invalid field: login.quota (số nguyên dương)")
     accounts = login.get("accounts")
     if accounts is not None:
         if not isinstance(accounts, list) or not accounts:
@@ -140,11 +161,6 @@ def validate_recipe(d: dict) -> list[str]:
                     errs.append(f"invalid field: login.accounts[{i}] (cần name + storage_state)")
             if len(names) != len(set(names)):
                 errs.append("invalid field: login.accounts (name bị trùng)")
-        if login.get("strategy", "round_robin") not in LOGIN_STRATEGIES:
-            errs.append("invalid field: login.strategy (round_robin | fill_first)")
-        quota = login.get("quota", 1)
-        if not isinstance(quota, int) or quota < 1:
-            errs.append("invalid field: login.quota (số nguyên dương)")
     anon_trial_limit = login.get("anon_trial_limit")
     if anon_trial_limit is not None and (not isinstance(anon_trial_limit, int) or anon_trial_limit < 0):
         errs.append("invalid field: login.anon_trial_limit (số nguyên >= 0)")
@@ -165,6 +181,63 @@ def validate_recipe(d: dict) -> list[str]:
         elif not new_chat.get("url") and not new_chat.get("selector"):
             errs.append("invalid field: new_chat (cần url hoặc selector)")
     return errs
+
+
+async def discover_models(page, before_action: str = "") -> list[dict]:
+    """Dò model control đang hiện trên trang, chỉ chạy khi người dùng yêu cầu."""
+    found = await page.evaluate(
+        r"""() => {
+          const visible = el => {
+            const rect = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            return !!(rect.width && rect.height) && style.display !== 'none'
+              && style.visibility !== 'hidden';
+          };
+          const selector = el => {
+            if (el.id) return '#' + CSS.escape(el.id);
+            for (const attr of ['data-testid', 'data-model', 'data-value', 'aria-label']) {
+              const value = el.getAttribute(attr);
+              if (value) return `${el.tagName.toLowerCase()}[${attr}=${JSON.stringify(value)}]`;
+            }
+            const tag = el.tagName.toLowerCase();
+            const parent = el.parentElement;
+            if (!parent) return tag;
+            const siblings = [...parent.children].filter(item => item.tagName === el.tagName);
+            return `${tag}:nth-of-type(${siblings.indexOf(el) + 1})`;
+          };
+          const clean = value => String(value || '').trim().replace(/\s+/g, ' ');
+          const idOf = (label, value) => {
+            const source = clean(value || label).toLowerCase();
+            return source.replace(/[^a-z0-9._-]+/g, '-').replace(/^-|-$/g, '') || 'model';
+          };
+          const out = [];
+          for (const select of document.querySelectorAll('select')) {
+            const hint = clean([select.name, select.id, select.getAttribute('aria-label')].join(' '));
+            if (!/model|modele|mô hình|模型/i.test(hint) || !visible(select)) continue;
+            for (const option of select.options) {
+              const label = clean(option.textContent);
+              const value = option.value;
+              if (!label || option.disabled || !value) continue;
+              out.push({ id: idOf(label, value), label, action: `select:${selector(select)}`, value });
+            }
+          }
+          const choices = document.querySelectorAll(
+            '[role=option], [role=menuitemradio], [data-model], [data-model-id]');
+          for (const choice of choices) {
+            if (!visible(choice) || choice.getAttribute('aria-disabled') === 'true') continue;
+            const label = clean(choice.getAttribute('aria-label') || choice.textContent);
+            const value = choice.getAttribute('data-model-id') || choice.getAttribute('data-model')
+              || choice.getAttribute('data-value') || '';
+            if (!label || label.length > 100) continue;
+            out.push({ id: idOf(label, value), label, action: `click:${selector(choice)}` });
+          }
+          return out.filter((item, index) => out.findIndex(other => other.id === item.id) === index);
+        }""")
+    if before_action:
+        for item in found:
+            if item["action"].startswith("click:"):
+                item["action"] = f"{before_action};{item['action']}"
+    return found
 
 
 class _AccountRotator:
@@ -812,6 +885,54 @@ class BrowserRecipe(Provider):
             # sẽ hỏi lại, hết giờ thì deadline lo.
             return False
 
+    async def _copy_button_result(self, page, selector: str, scope: str,
+                                  exclude: str) -> str:
+        """Bấm đúng nút Copy của reply cuối và đọc nội dung clipboard."""
+        parsed = urlsplit(page.url)
+        await page.context.grant_permissions(
+            ["clipboard-read", "clipboard-write"], origin=f"{parsed.scheme}://{parsed.netloc}")
+        await page.evaluate("navigator.clipboard.writeText('')")
+        clicked = await page.evaluate(
+            r"""([msgSel, btnSel, scope, excludeSel]) => {
+                 let btns;
+                 try { btns = Array.from(document.querySelectorAll(btnSel)); }
+                 catch (e) { return false; }
+                 const nameOf = b => [b.getAttribute("aria-label"),
+                                      b.getAttribute("title"),
+                                      b.textContent].join(" ").toLowerCase();
+                 const usable = btns.filter(b => {
+                   if (b.disabled || b.getAttribute("aria-disabled") === "true") return false;
+                   if (b.closest("pre") || /code|mã nguồn|代码/.test(nameOf(b))) return false;
+                   if (excludeSel) {
+                     try { if (b.closest(excludeSel)) return false; } catch (e) {}
+                   }
+                   if (!b.getClientRects().length) return false;
+                   const st = getComputedStyle(b);
+                   return st.visibility !== "hidden" && st.display !== "none";
+                 });
+                 const msgs = document.querySelectorAll(msgSel);
+                 if (!usable.length || (scope !== "page" && !msgs.length)) return false;
+                 const msg = msgs[msgs.length - 1];
+                 let target;
+                 if (scope === "page") {
+                   target = usable[usable.length - 1];
+                 } else {
+                   const inside = usable.filter(b => msg.contains(b));
+                   if (inside.length) target = inside[inside.length - 1];
+                   else if (scope === "after") target = usable.find(b =>
+                     msg.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+                 }
+                 if (!target) return false;
+                 target.click();
+                 return true;
+               }""",
+            [self.response_cfg["last_message_selector"], selector, scope, exclude],
+        )
+        if not clicked:
+            return ""
+        await asyncio.sleep(0.1)
+        return str(await page.evaluate("navigator.clipboard.readText()") or "")
+
     async def _wait_chat_ready(self, page, box) -> None:
         """Chờ trang chat sẵn sàng nhận prompt, rồi mở phiên chat mới nếu cần.
 
@@ -837,13 +958,13 @@ class BrowserRecipe(Provider):
         if owned:
             assignment = await self.assign(target_account_id)
         try:
-            async for delta in self._run(prompt, assignment, headed):
+            async for delta in self._run(prompt, model_id, assignment, headed):
                 yield delta
         finally:
             if owned:
                 assignment.release()
 
-    async def _run(self, prompt: str, assignment: "Assignment",
+    async def _run(self, prompt: str, model_id: str, assignment: "Assignment",
                    headed: bool | None) -> AsyncIterator[str]:
         target_profile = assignment.profile
         storage_state = assignment.storage_state
@@ -861,6 +982,7 @@ class BrowserRecipe(Provider):
         copy_sel = str(self.ds.get("selector") or DEFAULT_COPY_BUTTON_SELECTOR)
         copy_scope = str(self.ds.get("scope") or "after")
         copy_exclude = str(self.ds.get("exclude") or "")
+        use_copy_result = bool(self.ds.get("use_copy_result", False))
         # Selector nút copy sai (site đổi giao diện) mà không có lối thoát thì
         # MỌI request đều chạy tới timeout rồi hỏng — mất luôn câu trả lời đã
         # nhận đủ. Nên vẫn giữ đường lùi: text đứng yên đủ lâu thì chốt và ghi
@@ -881,6 +1003,16 @@ class BrowserRecipe(Provider):
                 box = page.locator(self.prompt_cfg["input_selector"]).first
                 await self._wait_chat_ready(page, box)
                 await _sleep_ms(self._input_delay_ms)
+                model = next((item for item in self._recipe["models"]
+                              if item["id"] == model_id), None)
+                if model is not None and model.get("action"):
+                    for step in model["action"].split(";"):
+                        action, selector = step.strip().split(":", 1)
+                        if action == "select":
+                            await page.locator(selector).first.select_option(
+                                value=str(model.get("value") or model["id"]))
+                        else:
+                            await page.locator(selector).first.click()
                 if self.prompt_cfg.get("input_mode", "fill") == "type":
                     await box.click()
                     await box.type(prompt)
@@ -908,7 +1040,7 @@ class BrowserRecipe(Provider):
                         captured_html = reply_html
                         self.last_response_html = reply_html
                     if text != last:
-                        if (not self._structured_markdown and text.startswith(last)
+                        if (not use_copy_result and not self._structured_markdown and text.startswith(last)
                                 and text.strip() != prompt.strip()):
                             yield text[len(last):]
                         last = text
@@ -946,7 +1078,18 @@ class BrowserRecipe(Provider):
                     if done:
                         assignment.html = captured_html
                         assignment.conversation_url = _page_url(page)
-                        if self._structured_markdown:
+                        if use_copy_result:
+                            try:
+                                copied = await self._copy_button_result(
+                                    page, copy_sel, copy_scope, copy_exclude)
+                            except Exception as error:
+                                applog.log(
+                                    f"recipe: '{self.slug}' không đọc được kết quả từ nút Copy: "
+                                    f"{error}; dùng text từ DOM",
+                                    level="warn")
+                                copied = ""
+                            yield copied or last
+                        elif self._structured_markdown:
                             yield last
                         return
                     await asyncio.sleep(0.5)

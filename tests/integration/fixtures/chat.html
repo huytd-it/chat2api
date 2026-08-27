@@ -1,6 +1,11 @@
 <!doctype html>
 <html>
 <body>
+<label for="model">Model</label>
+<select id="model" aria-label="Model">
+  <option value="fast-v1">Fast</option>
+  <option value="max-v2">Max</option>
+</select>
 <textarea id="prompt"></textarea>
 <button id="send">Send</button>
 <button id="new-chat">New chat</button>
@@ -14,7 +19,8 @@ document.getElementById("send").onclick = () => {
   const m = document.createElement("div");
   m.className = "msg";
   document.getElementById("messages").appendChild(m);
-  const full = "This is the reply.";
+  const full = document.getElementById("model").value === "max-v2"
+    ? "This is the max reply." : "This is the reply.";
   let i = 0;
   const t = setInterval(() => {
     i += 2;
@@ -27,6 +33,7 @@ document.getElementById("send").onclick = () => {
       const copy = document.createElement("button");
       copy.setAttribute("aria-label", "Copy");
       copy.textContent = "Copy";
+      copy.onclick = () => navigator.clipboard.writeText("This is the copied reply.");
       bar.appendChild(copy);
       m.after(bar);
     }

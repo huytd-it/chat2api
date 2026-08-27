@@ -38,6 +38,9 @@ timing:                     # tùy chọn, chỉ thêm khi trang load chậm
   input_delay_ms: 600       # chờ trước khi đổ prompt vào ô input
 models:
   - id: <model-id-ngắn>     # ví dụ: chat-web
+    # Tùy chọn: chọn model trước khi nhập/gửi. Không có thì giữ mặc định website.
+    action: "click:<nút model>;click:<option>"  # hoặc select:<selector thẻ select>
+    value: "<option value>"                # chỉ cần cho select, mặc định dùng id
 
 Browser context được tái sử dụng giữa các request, nên nếu trang khôi phục hội
 thoại cũ khi mở lại thì BẮT BUỘC khai báo new_chat.

@@ -11,6 +11,7 @@ response:
     fallback_quiet_ms: 3000
     timeout_ms: 120000
     scope: after
+    use_copy_result: true
   format: markdown
 new_chat:
   url: https://gemini.google.com/app

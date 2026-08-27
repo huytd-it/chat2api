@@ -8,9 +8,11 @@ response:
   format: markdown
   capture_html: true
   done_signal:
-    type: stable_text
+    type: copy_button
     quiet_ms: 10000
     timeout_ms: 240000
+    scope: after
+    use_copy_result: true
 new_chat:
   selector: div[role='button'][aria-label='New Chat']
 timing:

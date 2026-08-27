@@ -552,8 +552,9 @@ def register_admin(app: FastAPI, admin) -> None:
     from . import jobs, settings
     from .schemas import (AccountLoginRequest, AddAccountRequest, ApiKeyCreateRequest,
                           IntegrateRequest, ProfileAccountRequest, ProfileCreateRequest,
-                          ProfileOpenRequest, ProfileUpdateRequest, RecipeManualSpec,
-                          RecipeEditRequest, RecipeEditTestRequest, RecipeRenameRequest,
+                           ProfileOpenRequest, ProfileUpdateRequest, RecipeManualSpec,
+                           RecipeModelDiscoveryRequest,
+                           RecipeEditRequest, RecipeEditTestRequest, RecipeRenameRequest,
                            RecipeTestRequest, SaveAccountRequest,
                            SessionDeleteRequest, SessionForkRequest, SessionUpdateRequest,
                            SettingsRequest, TestTargetOpenRequest)
@@ -1078,6 +1079,42 @@ def register_admin(app: FastAPI, admin) -> None:
         return await run_recipe_trial(request.app.state.cfg, request.app.state.pool,
                                       recipe, body.headed)
 
+    @admin.post("/recipes/discover-models")
+    async def discover_recipe_models(body: RecipeModelDiscoveryRequest, request: Request):
+        """Chủ động mở trang và dò model controls; không chạy trong tải trang nền."""
+        from urllib.parse import urlparse
+
+        from .providers.browser_recipe import discover_models
+
+        parsed = urlparse(body.url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise OpenAIError(400, "invalid_url", "URL không hợp lệ")
+        key = f"__discover_models__{uuid.uuid4().hex}"
+        context = await request.app.state.pool.context_for(key, headed=body.headed)
+        page = await context.new_page()
+        try:
+            await page.goto(body.url, wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(1200)
+            found = await discover_models(page)
+            # Nhiều site chỉ render options sau khi mở nút Model.
+            if not found:
+                trigger = page.get_by_role("button", name=re.compile(
+                    r"model|modèle|mô hình|模型", re.IGNORECASE)).first
+                if await trigger.count() and await trigger.is_visible():
+                    trigger_selector = await trigger.evaluate(
+                        """el => el.id ? '#' + CSS.escape(el.id) : [
+                          'aria-label', 'data-testid'
+                        ].map(name => el.getAttribute(name) ?
+                          `${el.tagName.toLowerCase()}[${name}=${JSON.stringify(el.getAttribute(name))}]`
+                          : '').find(Boolean) || 'button'""")
+                    await trigger.click()
+                    await page.wait_for_timeout(300)
+                    found = await discover_models(page, f"click:{trigger_selector}")
+            return {"models": found}
+        finally:
+            await page.close()
+            await request.app.state.pool.drop(key)
+
     @admin.post("/recipes/{slug}/reload")
     async def reload_recipes(slug: str, request: Request):
         request.app.state.router.reload()
@@ -1479,6 +1516,56 @@ def register_admin(app: FastAPI, admin) -> None:
         account_total = sum(
             len(accounts.list_accounts(cfg.recipes_dir, d))
             for d in accounts.list_domains(cfg.recipes_dir))
+
+        # Snapshot nhỏ cho dashboard: mỗi hàng là đường đi đã được chốt của một
+        # request, từ model/recipe tới account/profile/domain. Polling endpoint này
+        # không đụng vào provider và không thay đổi quyết định phân phối.
+        def recent_routes() -> tuple[list[dict], int, list[dict]]:
+            db = store.default()
+            if db is None:
+                return [], 0, []
+            now = store.now_ms()
+            rows = db.query(
+                "SELECT q.id, q.session_id, q.model_public_id, q.status, q.started_at, "
+                "q.ttfb_ms, q.duration_ms, q.stream, q.fallback_used, q.error_code, "
+                "r.slug AS recipe_slug, a.label AS account_label, d.host AS domain, "
+                "p.name AS profile_name "
+                "FROM request_log q "
+                "LEFT JOIN recipe r ON r.id = q.recipe_id "
+                "LEFT JOIN account a ON a.id = q.account_id "
+                "LEFT JOIN domain d ON d.id = a.domain_id "
+                "LEFT JOIN profile p ON p.id = q.profile_id "
+                "ORDER BY (q.status = 'running') DESC, q.started_at DESC LIMIT 20")
+            last_minute = db.query(
+                "SELECT COUNT(*) AS n FROM request_log WHERE started_at >= ?", (now - 60000,))
+            # Diagram dùng cùng nguồn với trang Sessions: 100 session chưa archive
+            # mới nhất, mỗi session được tính đúng một lần bất kể có bao nhiêu lượt
+            # chat/request bên trong. Subquery LIMIT trước GROUP BY để tập dữ liệu
+            # trên Overview khớp danh sách mặc định của /admin/sessions.
+            distribution = db.query(
+                "SELECT recipe_slug, profile_name, account_label, domain, "
+                "COUNT(*) AS sessions, SUM(active) AS active, SUM(has_error) AS errors "
+                "FROM ("
+                "SELECT s.id, COALESCE(r.slug, 'direct') AS recipe_slug, "
+                "COALESCE(p.name, '') AS profile_name, COALESCE(a.label, '') AS account_label, "
+                "COALESCE(d.host, '') AS domain, "
+                "CASE WHEN EXISTS (SELECT 1 FROM request_log q "
+                "  WHERE q.session_id = s.id AND q.status = 'running') THEN 1 ELSE 0 END AS active, "
+                "CASE WHEN s.error_count > 0 THEN 1 ELSE 0 END AS has_error "
+                "FROM session s "
+                "LEFT JOIN recipe r ON r.id = s.recipe_id "
+                "LEFT JOIN account a ON a.id = s.account_id "
+                "LEFT JOIN domain d ON d.id = a.domain_id "
+                "LEFT JOIN profile p ON p.id = s.profile_id "
+                "WHERE s.archived = 0 ORDER BY s.updated_at DESC LIMIT 100"
+                ") recent_sessions "
+                "GROUP BY recipe_slug, profile_name, account_label, domain "
+                "ORDER BY sessions DESC, recipe_slug LIMIT 8")
+            return ([dict(row) for row in rows],
+                    int(last_minute[0]["n"] if last_minute else 0),
+                    [dict(row) for row in distribution])
+
+        routes, requests_last_minute, session_distribution = await asyncio.to_thread(recent_routes)
         return {
             "engine": cfg.browser_engine,
             "contexts": request.app.state.pool.size,
@@ -1489,6 +1576,10 @@ def register_admin(app: FastAPI, admin) -> None:
             "domains": len(accounts.list_domains(cfg.recipes_dir)),
             "accounts": account_total,
             "open_browsers": sorted(p.slug for p in browser_recipes if p.browser_open),
+            "request_routes": routes,
+            "requests_last_minute": requests_last_minute,
+            "session_distribution": session_distribution,
+            "routes_persisted": store.default() is not None,
         }
 
     # Các endpoint theo recipe dưới đây là lối tắt tiện tay từ trang Recipes:

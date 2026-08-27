@@ -138,13 +138,13 @@
 </script>
 
 <Sheet.Root open={slug !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
-   <Sheet.Content side="right" class="w-full gap-0 p-0 sm:!max-w-6xl xl:!max-w-7xl">
+   <Sheet.Content side="right" class="w-full gap-0 p-0 sm:!max-w-[92vw] xl:!max-w-[88rem]">
     <Sheet.Header class="border-b p-4 sm:p-5">
       <div class="flex items-start gap-3">
         <div class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Sliders size={19} aria-hidden="true" /></div>
         <div class="min-w-0">
           <Sheet.Title class="font-data text-base">{slug ?? ""}</Sheet.Title>
-          <Sheet.Description>Sửa recipe đang chạy. Lưu là nạp lại router ngay; đổi slug dùng nút Đổi tên.</Sheet.Description>
+          <Sheet.Description>Workbench đầy đủ cho browser automation. Lưu sẽ validate và nạp lại router ngay.</Sheet.Description>
         </div>
       </div>
     </Sheet.Header>

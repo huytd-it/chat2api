@@ -92,6 +92,33 @@ export interface ApiKeyList {
   enforced: boolean;
 }
 
+export interface RequestRoute {
+  id: number;
+  session_id: string | null;
+  model_public_id: string;
+  recipe_slug: string | null;
+  account_label: string | null;
+  profile_name: string | null;
+  domain: string | null;
+  status: "running" | "ok" | "error" | "timeout" | "trial_limit" | "cancelled";
+  started_at: number;
+  ttfb_ms: number | null;
+  duration_ms: number | null;
+  stream: number;
+  fallback_used: number;
+  error_code: string | null;
+}
+
+export interface SessionDistribution {
+  recipe_slug: string;
+  profile_name: string;
+  account_label: string;
+  domain: string;
+  sessions: number;
+  active: number;
+  errors: number;
+}
+
 export interface Overview {
   engine: string;
   contexts: number;
@@ -102,6 +129,10 @@ export interface Overview {
   domains: number;
   accounts: number;
   open_browsers: string[];
+  request_routes: RequestRoute[];
+  requests_last_minute: number;
+  session_distribution: SessionDistribution[];
+  routes_persisted: boolean;
 }
 
 const FALLBACK_BASE_URL = "http://127.0.0.1:8100";
@@ -473,12 +504,20 @@ export interface ManualRecipeSpec {
       quiet_ms?: number;
       timeout_ms?: number;
       scope?: "after" | "inside" | "page";
+      use_copy_result?: boolean;
+      exclude?: string;
       fallback_quiet_ms?: number;
     };
   };
-  models: { id: string }[];
+  models: { id: string; action?: string; value?: string }[];
   new_chat?: { url?: string; selector?: string } | null;
   timing?: { ready_delay_ms?: number; input_delay_ms?: number; ready_timeout_ms?: number } | null;
+  login?: {
+    strategy?: "round_robin" | "fill_first";
+    quota?: number;
+    storage_state?: string;
+    accounts?: { name: string; storage_state: string }[];
+  } | null;
   keep_context: boolean;
   anon_trial_limit?: number | null;
 }
@@ -492,6 +531,28 @@ export async function createRecipe(
     method: "POST",
     headers: headers(key),
     body: JSON.stringify(spec),
+  });
+  return asJson(r);
+}
+
+export interface DiscoveredRecipeModel {
+  id: string;
+  label: string;
+  action: string;
+  value?: string;
+}
+
+/** Mở URL và dò model control khi người dùng chủ động yêu cầu. */
+export async function discoverRecipeModels(
+  key: string,
+  url: string,
+  headed = false,
+): Promise<{ models: DiscoveredRecipeModel[] }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/recipes/discover-models", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify({ url, headed }),
   });
   return asJson(r);
 }

@@ -78,12 +78,12 @@
 
 <Card.Root class="overflow-hidden" aria-labelledby="manual-recipe-title">
   <Collapsible.Root bind:open={panelOpen}>
-    <Collapsible.Trigger class="flex w-full items-center justify-between gap-3 border-b px-4 py-3.5 text-left hover:bg-muted/40 sm:px-6">
+    <Collapsible.Trigger class="flex w-full items-center justify-between gap-3 border-b px-4 py-4 text-left hover:bg-muted/40 sm:px-6">
       <div class="flex items-start gap-3">
         <div class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Wrench size={19} aria-hidden="true" /></div>
         <div>
-          <p id="manual-recipe-title" class="font-semibold">Nâng cao: tạo recipe thủ công</p>
-          <p class="text-sm text-muted-foreground">Không dùng AI — tự khai CSS selector. Dùng khi site quá lạ hoặc phân tích tự động đoán sai.</p>
+          <p id="manual-recipe-title" class="font-semibold">Recipe workbench</p>
+          <p class="text-sm text-muted-foreground">Khai báo đầy đủ luồng browser, models, tín hiệu hoàn tất, session và account routing.</p>
         </div>
       </div>
       <CaretDown class={`shrink-0 transition-transform ${panelOpen ? "" : "-rotate-90"}`} aria-hidden="true" />
@@ -92,9 +92,12 @@
       <Card.Content class="grid gap-5 p-4 sm:p-6">
         {#if form.error}<div class="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive" role="alert">{form.error}</div>{/if}
 
-        <div class="grid gap-1.5">
-          <label for="mr-slug" class="text-sm font-medium">Slug <span class="text-destructive">*</span></label>
-          <Input id="mr-slug" class="font-data" placeholder="my-chat-site" bind:value={slug} />
+        <div class="grid gap-3 rounded-xl border bg-muted/20 p-4 sm:grid-cols-[minmax(0,1fr)_minmax(16rem,.7fr)] sm:items-end">
+          <div>
+            <h2 class="text-base font-semibold">Tạo browser recipe</h2>
+            <p class="mt-1 max-w-2xl text-xs leading-relaxed text-muted-foreground">Mọi cấu hình nằm trên cùng một màn. Bắt đầu bằng slug và URL, sau đó mô tả chính xác thứ tự browser sẽ chọn model, nhập prompt, gửi và thu kết quả.</p>
+          </div>
+          <label for="mr-slug" class="grid gap-1.5 text-sm font-medium">Slug <span class="sr-only">bắt buộc</span><Input id="mr-slug" class="font-data" placeholder="my-chat-site" bind:value={slug} /></label>
         </div>
 
         <RecipeFields {form} idPrefix="mr" bind:advancedOpen />
@@ -106,7 +109,7 @@
           </div>
         {/if}
 
-        <div class="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
+        <div class="sticky bottom-0 -mx-4 flex flex-wrap items-center justify-between gap-3 border-t bg-card/95 px-4 py-4 backdrop-blur sm:-mx-6 sm:px-6">
           <label class="flex items-center gap-2 text-sm"><Switch bind:checked={headedTest} aria-label="Hiện browser khi kiểm tra" /> Hiện browser khi kiểm tra</label>
           <div class="flex flex-wrap gap-2">
             <Button type="button" variant="outline" disabled={testing || creating} onclick={onTest}>{#if testing}<CircleNotch class="animate-spin" /> Đang kiểm tra{:else}<Check /> Kiểm tra kết nối{/if}</Button>
