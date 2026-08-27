@@ -554,9 +554,9 @@ def register_admin(app: FastAPI, admin) -> None:
                           IntegrateRequest, ProfileAccountRequest, ProfileCreateRequest,
                           ProfileOpenRequest, ProfileUpdateRequest, RecipeManualSpec,
                           RecipeEditRequest, RecipeEditTestRequest, RecipeRenameRequest,
-                          RecipeTestRequest, SaveAccountRequest,
-                          SessionForkRequest, SessionUpdateRequest, SettingsRequest,
-                          TestTargetOpenRequest)
+                           RecipeTestRequest, SaveAccountRequest,
+                           SessionDeleteRequest, SessionForkRequest, SessionUpdateRequest,
+                           SettingsRequest, TestTargetOpenRequest)
 
     # Tab do người dùng mở tay trong một profile. Đặt tên như một slug recipe để
     # dùng chung cơ chế một-tab-một-slug của pool, nhưng không recipe nào tên
@@ -912,6 +912,12 @@ def register_admin(app: FastAPI, admin) -> None:
                            limit: int = 100):
         items = await asyncio.to_thread(sessions.list_sessions, q, model, archived, limit)
         return {"sessions": items, "persisted": store.default() is not None}
+
+    @admin.delete("/sessions")
+    async def sessions_delete(body: SessionDeleteRequest):
+        ids = None if body.all else body.ids or []
+        deleted = await asyncio.to_thread(sessions.delete_sessions, ids)
+        return {"ok": True, "deleted": deleted}
 
     @admin.get("/sessions/{session_id}")
     async def session_detail(session_id: str):

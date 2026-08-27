@@ -192,5 +192,11 @@ class SessionUpdateRequest(BaseModel):
     archived: bool | None = None
     tags: list[str] | None = None
 
+
+class SessionDeleteRequest(BaseModel):
+    ids: list[str] | None = None
+    all: bool = False
+
+
 class SessionForkRequest(BaseModel):
     up_to_seq: int

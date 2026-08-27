@@ -341,6 +341,23 @@ def delete_session(session_id: str) -> bool:
     return cursor.rowcount > 0
 
 
+def delete_sessions(session_ids: list[str] | None = None) -> int:
+    db = store.default()
+    if db is None:
+        return 0
+    conn = db.connection()
+    with conn:
+        if session_ids is None:
+            cursor = conn.execute("DELETE FROM session")
+        else:
+            ids = list(dict.fromkeys(session_ids))
+            if not ids:
+                return 0
+            placeholders = ",".join("?" for _ in ids)
+            cursor = conn.execute(f"DELETE FROM session WHERE id IN ({placeholders})", ids)
+    return cursor.rowcount
+
+
 def fork_session(session_id: str, up_to_seq: int) -> dict | None:
     source = get_session(session_id)
     db = store.default()

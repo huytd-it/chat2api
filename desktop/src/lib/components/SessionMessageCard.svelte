@@ -12,7 +12,6 @@
   let {
     message,
     model,
-    markdownMode,
     sending = false,
     copied = false,
     oncopy,
@@ -23,7 +22,6 @@
   }: {
     message: SessionMessage;
     model: string;
-    markdownMode: "rendered" | "raw";
     sending?: boolean;
     copied?: boolean;
     oncopy: () => void;
@@ -65,15 +63,7 @@
 
   {#if message.content || (message.id < 0 && sending)}
     <div class="recorded-content">
-      {#if message.role === "assistant"}
-        {#if markdownMode === "raw"}
-          <pre class="raw-markdown">{message.content_markdown ?? message.content}</pre>
-        {:else}
-          {@html renderMarkdown(message.content_markdown ?? message.content)}
-        {/if}
-      {:else}
-        {message.content}
-      {/if}
+      {@html renderMarkdown(message.content_markdown ?? message.content)}
       {#if message.id < 0 && sending}<span class="cursor"></span>{/if}
     </div>
   {/if}

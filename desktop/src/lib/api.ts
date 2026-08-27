@@ -1023,6 +1023,20 @@ export async function deleteSession(key: string, sessionId: string): Promise<voi
   await asJson(r);
 }
 
+export async function deleteSessions(
+  key: string,
+  values: { ids?: string[]; all?: boolean },
+): Promise<number> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/sessions", {
+    method: "DELETE",
+    headers: headers(key),
+    body: JSON.stringify(values),
+  });
+  const data = await asJson(r);
+  return data.deleted as number;
+}
+
 export async function forkSession(
   key: string,
   sessionId: string,

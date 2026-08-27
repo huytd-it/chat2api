@@ -4,7 +4,7 @@
   import { apiKey, headedBrowser, showToast } from "../stores";
   import { models, selectedModel } from "../sync";
   import {
-    deleteSession,
+    deleteSessions,
     exportSession,
     fetchSession,
     fetchSessions,
@@ -59,8 +59,10 @@
   let openedTargets = $state<number[]>([]);
   let rotationMode = $state<"broadcast" | "round_robin" | "fill_first">("broadcast");
   let maxRequestsPerAccount = $state(1);
-  let markdownMode = $state<"rendered" | "raw">("rendered");
+  let selectedSessions = $state<string[]>([]);
   let deleteDialogOpen = $state(false);
+  let deleteScope = $state<"active" | "selected" | "all">("active");
+  let deleting = $state(false);
   /** Target server chọn cho lượt đang gửi — đọc từ header nên có ngay trước khi
    * có delta đầu tiên, tức là "đang gửi tới đâu" hiện được trong lúc còn chờ. */
   let liveTarget = $state<ChatTarget | null>(null);
@@ -86,6 +88,9 @@
   let promptEl: HTMLTextAreaElement | undefined;
 
   const visibleMessages = $derived(active?.messages ?? []);
+  const allSessionsSelected = $derived(
+    sessions.length > 0 && sessions.every((item) => selectedSessions.includes(item.id)),
+  );
 
   const profileNames = $derived([...new Set(targets.map((item) => item.profile_name))].sort());
   const domainNames = $derived([...new Set(targets.map((item) => item.domain))].sort());
@@ -231,6 +236,8 @@
     loadingList = true;
     try {
       sessions = await fetchSessions($apiKey, query.trim(), modelFilter, archived);
+      const available = new Set(sessions.map((item) => item.id));
+      selectedSessions = selectedSessions.filter((id) => available.has(id));
       if (!preserve || (active && !sessions.some((item) => item.id === active?.id))) {
         active = null;
         inspected = null;
@@ -583,14 +590,47 @@
     await loadList(false);
   }
 
-  async function removeActive() {
-    if (!active) return;
-    await deleteSession($apiKey, active.id);
-    deleteDialogOpen = false;
-    active = null;
-    inspected = null;
-    await loadList(false);
-    showToast("Đã xóa session");
+  function toggleSession(id: string) {
+    selectedSessions = selectedSessions.includes(id)
+      ? selectedSessions.filter((item) => item !== id)
+      : [...selectedSessions, id];
+  }
+
+  function toggleAllSessions() {
+    selectedSessions = allSessionsSelected ? [] : sessions.map((item) => item.id);
+  }
+
+  function confirmDelete(scope: "active" | "selected" | "all") {
+    if (scope === "active" && !active) return;
+    if (scope === "selected" && !selectedSessions.length) return;
+    if (scope === "all" && !sessions.length) return;
+    deleteScope = scope;
+    deleteDialogOpen = true;
+  }
+
+  async function removeSessions() {
+    const ids = deleteScope === "active"
+      ? (active ? [active.id] : [])
+      : deleteScope === "selected"
+        ? selectedSessions
+        : sessions.map((item) => item.id);
+    if (!ids.length || deleting) return;
+    deleting = true;
+    try {
+      const deleted = await deleteSessions($apiKey, deleteScope === "all" ? { all: true } : { ids });
+      selectedSessions = [];
+      if (active && (deleteScope === "all" || ids.includes(active.id))) {
+        active = null;
+        inspected = null;
+      }
+      deleteDialogOpen = false;
+      await loadList(false);
+      showToast(`Đã xóa ${deleted} session.`);
+    } catch (error) {
+      showToast("Không xóa được session: " + (error as Error).message);
+    } finally {
+      deleting = false;
+    }
   }
 
   async function forkAt(seq: number) {
@@ -665,6 +705,21 @@
       </label>
     </div>
 
+    <div class="session-selection-actions">
+      <label>
+        <input
+          type="checkbox"
+          checked={allSessionsSelected}
+          indeterminate={selectedSessions.length > 0 && !allSessionsSelected}
+          disabled={!sessions.length}
+          onchange={toggleAllSessions}
+        />
+        <span>{selectedSessions.length ? `${selectedSessions.length} đã chọn` : "Chọn tất cả"}</span>
+      </label>
+      <button type="button" disabled={!selectedSessions.length} onclick={() => confirmDelete("selected")}>Xóa đã chọn</button>
+      <button type="button" class="danger" disabled={!sessions.length} onclick={() => confirmDelete("all")}>Xóa tất cả</button>
+    </div>
+
     <div class="session-list" aria-live="polite">
       {#if loadingList}
         {#each [1, 2, 3, 4] as row}<div class="session-skeleton" aria-hidden="true"><i></i><i></i><i></i></div>{/each}
@@ -676,31 +731,39 @@
         </div>
       {:else}
         {#each sessions as item (item.id)}
-          <button
+          <div
             class="session-row"
             class:active={active?.id === item.id}
+            class:selected={selectedSessions.includes(item.id)}
             class:fault={item.error_count > 0}
-            onclick={() => openSession(item.id)}
           >
-            <span class="session-lamp" aria-hidden="true"></span>
-            <span class="session-row-body">
-              <span class="session-row-title">{item.title || "Phiên chưa đặt tên"}</span>
-              <span class="session-row-preview">{item.first_prompt || "Không có prompt"}</span>
-              <span class="session-row-meta">
-                <code>{item.model_public_id || "—"}</code>
-                {#if item.profile_name}
-                  <span class="session-row-target" title={`Profile ${item.profile_name} · ${item.account_host ?? ""} · ${item.account_label ?? ""}`}>
-                    {item.profile_name}{item.account_label ? ` · ${item.account_label}` : ""}
-                  </span>
-                {/if}
-                <span>{item.message_count} msg</span>
-                <time>{relativeTime(item.updated_at)}</time>
+            <input
+              type="checkbox"
+              aria-label={`Chọn ${item.title || "session"}`}
+              checked={selectedSessions.includes(item.id)}
+              onchange={() => toggleSession(item.id)}
+            />
+            <button type="button" class="session-row-open" onclick={() => openSession(item.id)}>
+              <span class="session-lamp" aria-hidden="true"></span>
+              <span class="session-row-body">
+                <span class="session-row-title">{item.title || "Phiên chưa đặt tên"}</span>
+                <span class="session-row-preview">{item.first_prompt || "Không có prompt"}</span>
+                <span class="session-row-meta">
+                  <code>{item.model_public_id || "—"}</code>
+                  {#if item.profile_name}
+                    <span class="session-row-target" title={`Profile ${item.profile_name} · ${item.account_host ?? ""} · ${item.account_label ?? ""}`}>
+                      {item.profile_name}{item.account_label ? ` · ${item.account_label}` : ""}
+                    </span>
+                  {/if}
+                  <span>{item.message_count} msg</span>
+                  <time>{relativeTime(item.updated_at)}</time>
+                </span>
               </span>
-            </span>
-            {#if item.pinned}
-              <svg class="pin-mark" viewBox="0 0 24 24" aria-label="Đã ghim"><path d="m9 4 6 0 1 5 3 3H5l3-3 1-5ZM12 12v8" /></svg>
-            {/if}
-          </button>
+              {#if item.pinned}
+                <svg class="pin-mark" viewBox="0 0 24 24" aria-label="Đã ghim"><path d="m9 4 6 0 1 5 3 3H5l3-3 1-5ZM12 12v8" /></svg>
+              {/if}
+            </button>
+          </div>
         {/each}
       {/if}
     </div>
@@ -751,16 +814,6 @@
           </div>
         </div>
         <div class="session-tools">
-          <button
-            class="tool-button"
-            class:active={markdownMode === "raw"}
-            title={markdownMode === "raw" ? "Hiển thị Markdown đã render" : "Hiển thị Markdown thô"}
-            aria-label={markdownMode === "raw" ? "Chuyển sang Markdown đã render" : "Chuyển sang Markdown thô"}
-            aria-pressed={markdownMode === "raw"}
-            onclick={() => (markdownMode = markdownMode === "raw" ? "rendered" : "raw")}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18v12H3V6Zm3 8V9l2.5 3L11 9v5m3-2 2 2 2-2m-2 2V9" /></svg><span>Raw MD</span>
-          </button>
           <button class="tool-button" class:active={Boolean(active.pinned)} title="Ghim session" onclick={togglePin}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 4 6 0 1 5 3 3H5l3-3 1-5ZM12 12v8" /></svg><span>Ghim</span>
           </button>
@@ -777,7 +830,7 @@
               {/each}
             </div>
           </div>
-          <button class="tool-button danger-tool" title="Xóa session" onclick={() => (deleteDialogOpen = true)}>
+          <button class="tool-button danger-tool" title="Xóa session" onclick={() => confirmDelete("active")}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M9 7V4h6v3M8 10v8M12 10v8M16 10v8M6 7l1 14h10l1-14" /></svg><span>Xóa</span>
           </button>
         </div>
@@ -789,7 +842,6 @@
           <SessionMessageCard
             {message}
             model={active.model_public_id}
-            {markdownMode}
             {sending}
             copied={copiedId === message.id}
             oncopy={() => copyMessage(message)}
@@ -1122,15 +1174,24 @@
 <AlertDialog.Root bind:open={deleteDialogOpen}>
   <AlertDialog.Content>
     <AlertDialog.Header>
-      <AlertDialog.Title>Xóa session?</AlertDialog.Title>
+      <AlertDialog.Title>
+        {deleteScope === "all" ? "Xóa tất cả session?" : deleteScope === "selected" ? "Xóa các session đã chọn?" : "Xóa session?"}
+      </AlertDialog.Title>
       <AlertDialog.Description>
-        “{active?.title || "Session"}” và toàn bộ message sẽ bị xóa vĩnh viễn. Thao tác này không thể hoàn tác.
+        {#if deleteScope === "all"}
+          Toàn bộ {sessions.length} session trong bộ lọc hiện tại và các message của chúng sẽ bị xóa vĩnh viễn.
+        {:else if deleteScope === "selected"}
+          {selectedSessions.length} session đã chọn và các message của chúng sẽ bị xóa vĩnh viễn.
+        {:else}
+          “{active?.title || "Session"}” và toàn bộ message sẽ bị xóa vĩnh viễn.
+        {/if}
+        Thao tác này không thể hoàn tác.
       </AlertDialog.Description>
     </AlertDialog.Header>
     <AlertDialog.Footer>
-      <AlertDialog.Cancel>Hủy</AlertDialog.Cancel>
-      <AlertDialog.Action class="bg-destructive text-destructive-foreground hover:bg-destructive/90" onclick={removeActive}>
-        Xóa vĩnh viễn
+      <AlertDialog.Cancel disabled={deleting}>Hủy</AlertDialog.Cancel>
+      <AlertDialog.Action class="bg-destructive text-destructive-foreground hover:bg-destructive/90" disabled={deleting} onclick={removeSessions}>
+        {deleting ? "Đang xóa…" : "Xóa vĩnh viễn"}
       </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>

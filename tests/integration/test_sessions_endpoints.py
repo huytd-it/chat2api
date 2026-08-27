@@ -150,6 +150,27 @@ async def test_list_search_patch_archive_delete(session_client):
     assert (await client.get("/admin/sessions/manage-session")).status_code == 404
 
 
+async def test_bulk_and_all_session_delete(session_client):
+    client, _ = session_client
+    for session_id in ("bulk-session-1", "bulk-session-2", "bulk-session-3"):
+        await _chat(client, session_id, session_id=session_id)
+
+    before = (await client.get("/admin/sessions")).json()["sessions"]
+    assert {item["id"] for item in before} == {
+        "bulk-session-1", "bulk-session-2", "bulk-session-3"}
+
+    response = await client.request(
+        "DELETE", "/admin/sessions", json={"ids": ["bulk-session-1", "bulk-session-3"]},
+    )
+    assert response.json() == {"ok": True, "deleted": 2}
+    assert [item["id"] for item in (await client.get("/admin/sessions")).json()["sessions"]] == [
+        "bulk-session-2"]
+
+    response = await client.request("DELETE", "/admin/sessions", json={"all": True})
+    assert response.json() == {"ok": True, "deleted": 1}
+    assert (await client.get("/admin/sessions")).json()["sessions"] == []
+
+
 async def test_fork_and_all_export_formats(session_client):
     client, _ = session_client
     await _chat(client, "Tạo nhánh", "fork-source")

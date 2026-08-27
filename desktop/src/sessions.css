@@ -71,10 +71,18 @@
 .archive-switch,.mini-toggle { display:flex; align-items:center; gap:8px; color:var(--muted-foreground); font-size:12px; }
 .archive-switch input,.mini-toggle input { width: 15px; height: 15px; min-height: 0; accent-color: var(--primary); }
 
+.session-selection-actions { display:flex; align-items:center; gap:5px; border-bottom:1px solid var(--border); padding:8px 12px; }
+.session-selection-actions label { display:flex; min-width:0; flex:1; align-items:center; gap:7px; color:var(--muted-foreground); font-size:11px; }
+.session-selection-actions input,.session-row>input { width:15px; height:15px; flex:none; accent-color:var(--primary); }
+.session-selection-actions button { min-height:28px; border:1px solid var(--border); border-radius:7px; background:var(--background); padding:0 7px; color:var(--foreground); font-size:10px; }
+.session-selection-actions button.danger { color:var(--destructive); }
+.session-selection-actions button:disabled { cursor:not-allowed; opacity:.45; }
 .session-list { min-height: 0; flex: 1; overflow-y: auto; padding: 6px; }
-.session-row { width: 100%; display:flex; align-items:flex-start; gap:9px; padding:10px; border:0; border-radius:8px; background:transparent; color:var(--foreground); text-align:left; }
+.session-row { width:100%; display:flex; align-items:flex-start; gap:7px; border:0; border-radius:8px; background:transparent; color:var(--foreground); padding:0 6px; }
 .session-row:hover { background:var(--muted); }
-.session-row.active { background:color-mix(in oklab,var(--primary) 11%,transparent); color:var(--foreground); }
+.session-row.active,.session-row.selected { background:color-mix(in oklab,var(--primary) 11%,transparent); color:var(--foreground); }
+.session-row>input { margin-top:15px; }
+.session-row-open { display:flex; min-width:0; flex:1; align-items:flex-start; gap:9px; border:0; background:transparent; color:inherit; padding:10px 4px; text-align:left; }
 .session-lamp { width:7px; height:7px; margin-top:6px; flex:none; border-radius:99px; background:var(--muted-foreground); }
 .session-row.active .session-lamp { background:var(--primary); }
 .session-row.fault .session-lamp { background:var(--destructive); }
