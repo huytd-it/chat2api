@@ -193,6 +193,29 @@ async def test_copy_button_ignores_code_block_copy_button(fixture_recipe, tmp_pa
         await pool.aclose()
 
 
+async def test_copy_button_result_uses_last_button_after_reply(fixture_recipe, tmp_path):
+    """Thanh thao tác có nhiều nút copy thì lấy nút cuối cùng của reply hiện tại."""
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(fixture_recipe, tmp_path, pool)
+        context = await pool.context_for("copy-last")
+        page = await context.new_page()
+        await page.goto(fixture_recipe["url"])
+        await page.set_content("""
+          <div class="msg">Câu trả lời mới.</div>
+          <div>
+            <button aria-label="Copy" onclick="navigator.clipboard.writeText('first')">Copy</button>
+            <button aria-label="Copy" onclick="navigator.clipboard.writeText('last')">Copy</button>
+          </div>
+        """)
+        copied = await provider._copy_button_result(
+            page, DEFAULT_COPY_BUTTON_SELECTOR, "after", "")
+        assert copied == "last"
+    finally:
+        await pool.aclose()
+
+
 async def test_multi_account_round_robin_uses_distinct_contexts(fixture_recipe, tmp_path, monkeypatch):
     for name in ("a1", "a2"):
         (tmp_path / f"{name}.json").write_text('{"cookies": [], "origins": []}', encoding="utf-8")

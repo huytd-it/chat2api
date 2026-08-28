@@ -919,8 +919,11 @@ class BrowserRecipe(Provider):
                  } else {
                    const inside = usable.filter(b => msg.contains(b));
                    if (inside.length) target = inside[inside.length - 1];
-                   else if (scope === "after") target = usable.find(b =>
-                     msg.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+                    else if (scope === "after") {
+                      const after = usable.filter(b =>
+                        msg.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+                      target = after[after.length - 1];
+                    }
                  }
                  if (!target) return false;
                  target.click();
