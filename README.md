@@ -162,20 +162,7 @@ npm run tauri dev
 
 ### Build EXE và chạy nền
 
-Build bản Windows release rồi khởi chạy app ở nền (PowerShell trả về ngay):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\desktop\scripts\build-and-run.ps1 -Background
-```
-
-Các tùy chọn bổ sung:
-
-| Tùy chọn | Ý nghĩa |
-|---|---|
-| `-NoRun` | Chỉ build, không mở app |
-| `-Port <số>` | Ghim cổng loopback cho Python backend |
-
-EXE được tạo tại `desktop\src-tauri\target\release\`. Bản release không hiện cửa sổ console; Python backend được app tự chạy như sidecar nền. Máy chạy EXE vẫn cần Python có `chat2api`/Playwright và Chromium, nên hãy chạy `setup-and-run.ps1` ít nhất một lần trước khi phát hành nội bộ.
+Xem hướng dẫn đầy đủ tại [docs/windows-build-background.md](docs/windows-build-background.md).
 
 ## Gọi API
 
