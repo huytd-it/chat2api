@@ -15,7 +15,7 @@ from .config import Config
 from .errors import OpenAIError
 from .providers.browser_recipe import TrialLimitExceeded
 from .router import ModelNotFound, Router
-from .schemas import ChatRequest
+from .schemas import ChatRequest, ImageGenerateRequest
 
 
 def _sse(cid: str, model: str, delta: str) -> str:
@@ -289,9 +289,171 @@ def create_app(cfg: Config) -> FastAPI:
 
     @v1.get("/models")
     async def models(request: Request):
-        data = [{"id": m.id, "object": "model", "owned_by": m.slug, "ready": m.ready}
+        data = [{"id": m.id, "object": "model", "owned_by": m.slug, "ready": m.ready,
+                 "capability": getattr(m, "capability", "chat")}
                 for m in request.app.state.router.all_models()]
         return {"object": "list", "data": data}
+
+    @v1.post("/images/generations")
+    async def images_generations(body: ImageGenerateRequest, request: Request, response: Response):
+        cfg_ = request.app.state.cfg
+        rt = request.app.state.router
+        try:
+            provider, local = rt.resolve(body.model)
+        except ModelNotFound:
+            applog.log(f"images: model không tồn tại: {body.model}", "error")
+            raise OpenAIError(404, "model_not_found", f"The model '{body.model}' does not exist")
+        # validate response_format
+        if body.response_format not in ("url", "b64_json"):
+            raise OpenAIError(400, "invalid_request_error",
+                              "response_format phải là 'url' hoặc 'b64_json'")
+        if not body.prompt or not body.prompt.strip():
+            raise OpenAIError(400, "invalid_request_error", "prompt không được rỗng")
+        # check provider supports image
+        supports = False
+        try:
+            supports = provider.supports_image()
+        except Exception:
+            supports = False
+        if not supports:
+            raise OpenAIError(400, "model_not_supported",
+                              f"Model '{body.model}' không hỗ trợ tạo ảnh (capability=chat)")
+        from .providers.browser_recipe import BrowserRecipe as BR
+        requested_session = sessions.normalize_session_id(
+            request.headers.get("x-chat2api-session-id"))
+        target_account_id = None
+        raw_target = request.headers.get("x-chat2api-account-id", "").strip()
+        if raw_target:
+            if not isinstance(provider, BR):
+                raise OpenAIError(400, "target_unsupported",
+                                  "Chỉ browser recipe hỗ trợ chọn profile/account")
+            try:
+                target_account_id = int(raw_target)
+            except (TypeError, ValueError):
+                raise OpenAIError(400, "invalid_target",
+                                  f"X-Chat2api-Account-Id không phải số: {raw_target!r}")
+        assignment = None
+        if isinstance(provider, BR):
+            try:
+                assignment = await provider.assign(
+                    target_account_id, sticky_key=requested_session or "")
+            except ValueError as error:
+                raise OpenAIError(400, "invalid_target", str(error))
+            except TrialLimitExceeded as error:
+                applog.log(f"images: hết lượt dùng thử ({provider.slug}): {error}", "warn")
+                raise OpenAIError(403, "trial_limit_exceeded", str(error))
+        raw_headed = request.headers.get("x-chat2api-headed", "").strip().lower()
+        headed = True if raw_headed == "true" else False if raw_headed == "false" else None
+        # log session: prompt stored as messages list for reuse
+        try:
+            recording = await asyncio.to_thread(
+                sessions.begin,
+                requested_session, body.model, provider.slug,
+                [{"role": "user", "content": body.prompt}], False,
+                request.headers.get("authorization", ""),
+                request.headers.get("user-agent", ""),
+                getattr(request.state, "api_key_id", None),
+                assignment.account_id if assignment else None,
+                assignment.profile_id if assignment else None,
+                settings.current("API_SESSION_MODE"),
+            )
+        except Exception:
+            if assignment is not None:
+                assignment.release()
+            raise
+        if assignment is not None:
+            assignment.headed = provider.resolve_headed(headed, assignment.profile)
+        target_headers = _target_headers(recording.session_id, assignment)
+        response.headers.update(target_headers)
+        applog.log(
+            f"images: model={body.model} n={body.n} size={body.size} session={recording.session_id[:8]}"
+            + (f" → {assignment.label}" if assignment and assignment.account_id else "")
+            + (" (cửa sổ)" if assignment and assignment.headed else ""))
+
+        async def _do_generate():
+            sent = {"n": 0}
+            async with request.app.state.chat_gate.slot():
+                try:
+                    kwargs = {"headed": headed, "response_format": body.response_format,
+                              "model_id": local}
+                    if assignment is not None:
+                        kwargs["assignment"] = assignment
+                    # passthrough & gemini need prompt via positional
+                    if isinstance(provider, BR):
+                        data = await provider.generate_images(body.prompt, n=body.n, size=body.size, **kwargs)
+                    else:
+                        # generic provider: prompt, n, size, model_id, response_format
+                        data = await provider.generate_images(body.prompt, n=body.n, size=body.size,
+                                                              model_id=local,
+                                                              response_format=body.response_format)
+                    rt.mark_success(provider.slug)
+                    return data
+                except TrialLimitExceeded as e:
+                    applog.log(f"images: hết lượt dùng thử ({provider.slug}): {e}", "warn")
+                    raise OpenAIError(403, "trial_limit_exceeded", str(e))
+                except TimeoutError:
+                    rt.mark_failure(provider.slug, f"timeout sau {cfg_.recipe_timeout_ms}ms")
+                    applog.log(f"images: timeout ({provider.slug})", "error")
+                    raise OpenAIError(504, "recipe_timeout",
+                                      f"Không nhận được ảnh trong thời hạn ({cfg_.recipe_timeout_ms}ms)",
+                                      "api_error")
+                except OpenAIError:
+                    raise
+                except NotImplementedError as e:
+                    raise OpenAIError(400, "model_not_supported", str(e))
+                except Exception as e:
+                    rt.mark_failure(provider.slug, str(e))
+                    applog.log(f"images: lỗi ({provider.slug}): {e}", "error")
+                    raise OpenAIError(502, "upstream_error", str(e), "api_error")
+
+        try:
+            sessions.first_delta(recording)
+            data = await _do_generate()
+            # normalize data items
+            normed = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                entry: dict = {}
+                if body.response_format == "url":
+                    entry["url"] = item.get("url") or item.get("b64_json") or ""
+                else:
+                    if item.get("b64_json"):
+                        entry["b64_json"] = item["b64_json"]
+                    elif item.get("url"):
+                        entry["url"] = item["url"]
+                    else:
+                        continue
+                if item.get("revised_prompt"):
+                    entry["revised_prompt"] = item["revised_prompt"]
+                normed.append(entry)
+            # finish ok
+            url = assignment.conversation_url if assignment else None
+            html = assignment.html if assignment else None
+            await asyncio.to_thread(
+                sessions.finish, recording, f"[images] {body.prompt}",
+                html=html, conversation_url=url)
+            if assignment is not None:
+                assignment.release()
+            response.headers.update(target_headers)
+            if url:
+                response.headers["X-Chat2api-Conversation-Url"] = url
+            return {"created": int(time.time()), "data": normed}
+        except OpenAIError as error:
+            _, url = _reply_extras(provider, assignment, BR)
+            await asyncio.to_thread(
+                sessions.finish, recording, f"[images] {body.prompt}",
+                status="trial_limit" if error.code == "trial_limit_exceeded" else "error",
+                error_code=error.code, error_message=error.message,
+                http_status=error.status, finish_reason="error",
+                conversation_url=url)
+            if assignment is not None:
+                assignment.release()
+            raise
+        except Exception as error:
+            if assignment is not None:
+                assignment.release()
+            raise
 
     @v1.post("/chat/completions")
     async def chat(body: ChatRequest, request: Request, response: Response):

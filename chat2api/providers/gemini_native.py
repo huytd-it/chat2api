@@ -101,7 +101,16 @@ class GeminiNative(Provider):
 
     def models(self) -> list[ModelInfo]:
         ready = bool(self._load_cookie()[0])
-        return [ModelInfo(id=f"{self.slug}/{m['id']}", slug=self.slug, ready=ready) for m in self._models_cfg]
+        out: list[ModelInfo] = []
+        for m in self._models_cfg:
+            cap = str(m.get("capability", "chat") or "chat")
+            if cap not in ("chat", "image", "both"):
+                cap = "chat"
+            out.append(ModelInfo(id=f"{self.slug}/{m['id']}", slug=self.slug, ready=ready, capability=cap))
+        return out
+
+    async def generate_images(self, prompt: str, n: int = 1, size: str = "1024x1024", **kwargs) -> list[dict]:
+        raise NotImplementedError(f"Provider '{self.slug}' chưa hỗ trợ tạo ảnh")
 
     def _load_cookie(self) -> tuple[str, str]:
         if not self.cookie_file or not self.cookie_file.exists():

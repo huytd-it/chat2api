@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import contextlib
 import hashlib
 import os
@@ -115,7 +116,18 @@ def validate_recipe(d: dict) -> list[str]:
     need("prompt.input_selector", bool((d.get("prompt") or {}).get("input_selector")))
     resp = d.get("response") or {}
     ds = resp.get("done_signal") or {}
-    need("response.last_message_selector", bool(resp.get("last_message_selector")))
+    # image recipe có thể dùng image_selector thay vì last_message_selector
+    has_image = bool(resp.get("image_selector"))
+    if not has_image:
+        need("response.last_message_selector", bool(resp.get("last_message_selector")))
+    # validate image_copy_selector nếu có
+    img_copy_sel = resp.get("image_copy_selector")
+    if img_copy_sel is not None and not isinstance(img_copy_sel, str):
+        errs.append("invalid field: response.image_copy_selector (phải là string)")
+    if resp.get("image_copy_scope") is not None and resp.get("image_copy_scope") not in COPY_SCOPES:
+        errs.append("invalid field: response.image_copy_scope (after | inside | page)")
+    if resp.get("image_copy_exclude") is not None and not isinstance(resp.get("image_copy_exclude"), str):
+        errs.append("invalid field: response.image_copy_exclude (phải là string)")
     need("response.done_signal.type", ds.get("type") in DONE_SIGNALS)
     if ds.get("type") in {"selector_appear", "selector_disappear"}:
         need("response.done_signal.selector", bool(ds.get("selector")))
@@ -129,6 +141,20 @@ def validate_recipe(d: dict) -> list[str]:
         use_copy = ds.get("use_copy_result")
         if use_copy is not None and not isinstance(use_copy, bool):
             errs.append("invalid field: response.done_signal.use_copy_result (boolean)")
+    mode = d.get("mode")
+    if mode is not None:
+        if not isinstance(mode, dict):
+            errs.append("invalid field: mode (phải là mapping)")
+        else:
+            for key in ("selector", "image_action", "chat_action"):
+                v = mode.get(key)
+                if v is not None and not isinstance(v, str):
+                    errs.append(f"invalid field: mode.{key} (phải là string)")
+                if key.endswith("_action") and isinstance(v, str) and v:
+                    steps = v.split(";")
+                    if not all(((s.strip().startswith("click:") or s.strip().startswith("select:")) and s.strip().split(":",1)[1].strip()) for s in steps):
+                        errs.append(f"invalid field: mode.{key} (click:<selector> | select:<selector>)")
+
     models = d.get("models")
     need("models", isinstance(models, list) and len(models) > 0
          and all(isinstance(m, dict) and m.get("id") for m in models))
@@ -136,6 +162,9 @@ def validate_recipe(d: dict) -> list[str]:
         for i, model in enumerate(models):
             if not isinstance(model, dict):
                 continue
+            cap = model.get("capability", "chat")
+            if cap not in ("chat", "image", "both"):
+                errs.append(f"invalid field: models[{i}].capability (chat | image | both)")
             action = model.get("action")
             steps = action.split(";") if isinstance(action, str) else []
             if action is not None and not (steps and all(
@@ -402,6 +431,11 @@ class BrowserRecipe(Provider):
         new_chat = recipe.get("new_chat") or {}
         self._new_chat_url = new_chat.get("url")
         self._new_chat_selector = new_chat.get("selector")
+        mode = recipe.get("mode") or {}
+        self._mode_cfg = mode if isinstance(mode, dict) else {}
+        self._mode_selector = str(self._mode_cfg.get("selector") or "")
+        self._mode_image_action = str(self._mode_cfg.get("image_action") or "")
+        self._mode_chat_action = str(self._mode_cfg.get("chat_action") or "")
         timing = recipe.get("timing") or {}
         self._ready_delay_ms = _timing(timing, "ready_delay_ms")
         self._input_delay_ms = _timing(timing, "input_delay_ms")
@@ -682,6 +716,66 @@ class BrowserRecipe(Provider):
             lock = self._locks[ctx_key] = asyncio.Lock()
         return lock
 
+    async def _exec_action_steps(self, page, action_str: str, value: str | None = None) -> None:
+        """Thực thi chuỗi `click:`/`select:` cho dropdown/chuyển mode."""
+        if not action_str:
+            return
+        for step in action_str.split(";"):
+            step = step.strip()
+            if not step:
+                continue
+            if ":" not in step:
+                continue
+            action, selector = step.split(":", 1)
+            action = action.strip()
+            selector = selector.strip()
+            if not selector:
+                continue
+            try:
+                loc = page.locator(selector).first
+                # chờ selector hiện ra trong 10s (dropdown option thường xuất hiện sau click trước)
+                try:
+                    await loc.wait_for(state="visible", timeout=10000)
+                except Exception:
+                    pass
+                if action == "select":
+                    await loc.select_option(value=str(value or ""))
+                else:
+                    await loc.click(timeout=10000)
+                # chờ UI ổn định giữa các bước dropdown
+                await asyncio.sleep(0.35)
+            except Exception as e:
+                applog.log(f"recipe: '{self.slug}' action '{action}:{selector}' lỗi: {e}", level="warn")
+                raise
+
+    async def _apply_mode(self, page, capability: str) -> None:
+        """Chọn chế độ từ dropdown nếu recipe khai báo `mode`.
+        
+        Nhiều web chat dùng chung URL nhưng dropdown chuyển giữa Chat/Image.
+        Nếu `mode.selector` được đặt thì chờ nó visible trước, rồi chạy
+        `image_action` hoặc `chat_action` tương ứng.
+        """
+        if not self._mode_cfg:
+            return
+        action = ""
+        if capability in ("image", "both") and self._mode_image_action:
+            # _run_images gọi với capability image; _run chat gọi với chat
+            # cả hai đều đi qua đây nên phân biệt theo capability của model
+            # đang chạy. Trường hợp both thì cả hai đều có thể, ưu tiên theo caller.
+            action = self._mode_image_action
+        elif capability == "chat" and self._mode_chat_action:
+            action = self._mode_chat_action
+        elif self._mode_image_action and capability != "chat":
+            action = self._mode_image_action
+        if not action:
+            return
+        if self._mode_selector:
+            try:
+                await page.locator(self._mode_selector).first.wait_for(state="visible", timeout=8000)
+            except Exception:
+                pass
+        await self._exec_action_steps(page, action)
+
     async def _acquire_page(self, ctx_key: str, storage_state, headed: bool):
         """Lấy tab để chạy request, theo chế độ đang bật.
 
@@ -750,7 +844,448 @@ class BrowserRecipe(Provider):
         return {"limit": limit, "used": self._rotator.anon_uses}
 
     def models(self) -> list[ModelInfo]:
-        return [ModelInfo(id=f"{self.slug}/{m['id']}", slug=self.slug) for m in self._recipe["models"]]
+        out: list[ModelInfo] = []
+        for m in self._recipe["models"]:
+            cap = str(m.get("capability", "chat") or "chat")
+            if cap not in ("chat", "image", "both"):
+                cap = "chat"
+            out.append(ModelInfo(id=f"{self.slug}/{m['id']}", slug=self.slug, capability=cap))
+        return out
+
+    def supports_image(self) -> bool:
+        return any(m.capability in ("image", "both") for m in self.models()) or bool(
+            self.response_cfg.get("image_selector"))
+
+    # ------------------------------- image generation -------------------------------
+
+    def _image_selector(self) -> str:
+        return str(self.response_cfg.get("image_selector") or "")
+
+    def _image_copy_selector(self) -> str:
+        return str(self.response_cfg.get("image_copy_selector") or "")
+
+    def _image_copy_scope(self) -> str:
+        return str(self.response_cfg.get("image_copy_scope") or "after")
+
+    def _image_copy_exclude(self) -> str:
+        return str(self.response_cfg.get("image_copy_exclude") or "")
+
+    async def _extract_image_srcs(self, page, limit: int) -> list[str]:
+        sel = self._image_selector()
+        if sel:
+            srcs = await page.evaluate(
+                r"""(sel) => {
+                    const nodes = Array.from(document.querySelectorAll(sel));
+                    const out = [];
+                    for (const n of nodes) {
+                        let src = n.getAttribute('src') || n.getAttribute('data-src') || '';
+                        if (!src && n.tagName.toLowerCase() === 'img') src = n.src || '';
+                        // background-image fallback
+                        if (!src) {
+                            const bg = getComputedStyle(n).backgroundImage;
+                            const m = bg && bg.match(/url\(["']?(.*?)["']?\)/);
+                            if (m) src = m[1];
+                        }
+                        if (src) out.push(src);
+                        // also check nested img
+                        if (n.tagName.toLowerCase() !== 'img') {
+                            for (const img of n.querySelectorAll('img')) {
+                                let s = img.getAttribute('src') || img.src || '';
+                                if (s && !out.includes(s)) out.push(s);
+                            }
+                        }
+                    }
+                    return out;
+                }""",
+                sel,
+            )
+            return [str(s) for s in (srcs or [])][:limit]
+        # fallback: tìm mọi <img> trong last_message_selector
+        fallback = str(self.response_cfg.get("last_message_selector") or "")
+        if not fallback:
+            return []
+        srcs = await page.evaluate(
+            r"""(sel) => {
+                const els = document.querySelectorAll(sel);
+                if (!els.length) return [];
+                const el = els[els.length - 1];
+                const imgs = Array.from(el.querySelectorAll('img'));
+                if (!imgs.length && el.tagName.toLowerCase() === 'img') imgs.push(el);
+                return imgs.map(i => i.src || i.getAttribute('src') || '').filter(Boolean);
+            }""",
+            fallback,
+        )
+        return [str(s) for s in (srcs or [])][:limit]
+
+    async def _wait_for_images(self, page, n: int, deadline: float) -> list[str]:
+        # Poll until at least n <img> with loaded naturalWidth
+        sel = self._image_selector()
+        while True:
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"recipe '{self.slug}' image timeout")
+            srcs = await self._extract_image_srcs(page, n)
+            if len(srcs) >= n:
+                # ensure at least n images are loaded (skip broken)
+                loaded = await page.evaluate(
+                    r"""([sel, fallback]) => {
+                        const check = (nodes) => nodes.filter(img => {
+                            if (img.tagName.toLowerCase() !== 'img') return true;
+                            return img.complete && img.naturalWidth > 0;
+                        }).length;
+                        if (sel) return check(Array.from(document.querySelectorAll(sel)).flatMap(n => {
+                            if (n.tagName.toLowerCase() === 'img') return [n];
+                            return Array.from(n.querySelectorAll('img'));
+                        }));
+                        const els = document.querySelectorAll(fallback);
+                        if (!els.length) return 0;
+                        return check(Array.from(els[els.length-1].querySelectorAll('img')));
+                    }""",
+                    [sel, str(self.response_cfg.get("last_message_selector") or "")],
+                ) if sel else len(srcs)
+                # sel branch returns count, fallback already srcs count
+                # for simplicity accept if count >= n
+                if isinstance(loaded, int) and loaded >= n:
+                    return srcs[:n]
+                if not isinstance(loaded, int):
+                    return srcs[:n]
+            await asyncio.sleep(0.7)
+
+    async def _wait_for_image_copy_buttons(self, page, n: int, deadline: float) -> bool:
+        """Đợi n nút copy ảnh xuất hiện và khả dụng (phân biệt với nút copy response)."""
+        sel = self._image_copy_selector()
+        if not sel:
+            return True
+        scope = self._image_copy_scope()
+        exclude = self._image_copy_exclude()
+        img_sel = self._image_selector()
+        fallback = str(self.response_cfg.get("last_message_selector") or "")
+        while True:
+            if time.monotonic() > deadline:
+                return False
+            try:
+                count = await page.evaluate(
+                    r"""([btnSel, scope, excludeSel, imgSel, fallback]) => {
+                        let btns;
+                        try { btns = Array.from(document.querySelectorAll(btnSel)); } catch(e) { return 0; }
+                        const usable = btns.filter(b => {
+                          if (b.disabled || b.getAttribute('aria-disabled') === 'true') return false;
+                          if (excludeSel) { try { if (b.closest(excludeSel)) return false; } catch(e) {} }
+                          if (!b.getClientRects().length) return false;
+                          const st = getComputedStyle(b);
+                          if (st.visibility === 'hidden' || st.display === 'none') return false;
+                          return true;
+                        });
+                        if (!usable.length) return 0;
+                        if (scope === 'page') return usable.length;
+                        // lọc theo ảnh: nút phải nằm trong hoặc sau container ảnh
+                        let scopeNodes = [];
+                        if (imgSel) scopeNodes = Array.from(document.querySelectorAll(imgSel));
+                        else if (fallback) {
+                          const els = document.querySelectorAll(fallback);
+                          if (els.length) scopeNodes = [els[els.length-1]];
+                        }
+                        if (!scopeNodes.length) return usable.length;
+                        // đếm số nút gắn với scopeNodes
+                        let matched = 0;
+                        for (const b of usable) {
+                          for (const sc of scopeNodes) {
+                            if (sc.contains(b)) { matched++; break; }
+                            if (scope === 'after' && (sc.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)) { matched++; break; }
+                          }
+                        }
+                        return matched;
+                    }""",
+                    [sel, scope, exclude, img_sel, fallback],
+                )
+                if int(count or 0) >= n:
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+
+    async def _copy_single_image(self, page, index: int) -> dict | None:
+        """Bấm nút copy ảnh thứ index và đọc clipboard. Trả về {b64} | {text} | None."""
+        sel = self._image_copy_selector()
+        if not sel:
+            return None
+        parsed = urlsplit(page.url)
+        try:
+            await page.context.grant_permissions(
+                ["clipboard-read", "clipboard-write"], origin=f"{parsed.scheme}://{parsed.netloc}")
+        except Exception:
+            pass
+        # xoá clipboard trước khi bấm để không nhầm ảnh cũ
+        try:
+            await page.evaluate("navigator.clipboard.writeText('')")
+        except Exception:
+            pass
+        clicked = await page.evaluate(
+            r"""([btnSel, idx, scope, excludeSel, imgSel, fallback]) => {
+                let btns;
+                try { btns = Array.from(document.querySelectorAll(btnSel)); } catch(e) { return false; }
+                const usable = btns.filter(b => {
+                  if (b.disabled || b.getAttribute('aria-disabled') === 'true') return false;
+                  if (excludeSel) { try { if (b.closest(excludeSel)) return false; } catch(e) {} }
+                  if (!b.getClientRects().length) return false;
+                  const st = getComputedStyle(b);
+                  return st.visibility !== 'hidden' && st.display !== 'none';
+                });
+                // lọc theo scope nếu có imgSel/fallback
+                let filtered = usable;
+                if (scope !== 'page') {
+                  let scopeNodes = [];
+                  if (imgSel) scopeNodes = Array.from(document.querySelectorAll(imgSel));
+                  else if (fallback) {
+                    const els = document.querySelectorAll(fallback);
+                    if (els.length) scopeNodes = [els[els.length-1]];
+                  }
+                  if (scopeNodes.length) {
+                    filtered = usable.filter(b => scopeNodes.some(sc =>
+                      sc.contains(b) || (scope === 'after' && (sc.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING))
+                    ));
+                  }
+                }
+                const target = filtered[idx];
+                if (!target) return false;
+                target.click();
+                return true;
+            }""",
+            [sel, index, self._image_copy_scope(), self._image_copy_exclude(),
+             self._image_selector(), str(self.response_cfg.get("last_message_selector") or "")],
+        )
+        if not clicked:
+            return None
+        await asyncio.sleep(0.4)
+        # đọc clipboard: ưu tiên image blob, rồi text
+        try:
+            result = await page.evaluate(
+                r"""async () => {
+                    const toB64 = async (blob) => {
+                      const buf = await blob.arrayBuffer();
+                      const bytes = new Uint8Array(buf);
+                      let binary = '';
+                      for (let i=0;i<bytes.length;i++) binary += String.fromCharCode(bytes[i]);
+                      return btoa(binary);
+                    };
+                    try {
+                      // Thử clipboard.read (cần permission, có thể trả image)
+                      if (navigator.clipboard.read) {
+                        try {
+                          const items = await navigator.clipboard.read();
+                          for (const item of items) {
+                            for (const type of item.types) {
+                              if (type.startsWith('image/')) {
+                                const blob = await item.getType(type);
+                                const b64 = await toB64(blob);
+                                return {b64, mime: type};
+                              }
+                            }
+                          }
+                        } catch(e) {}
+                      }
+                      // fallback text (có site copy URL ảnh)
+                      try {
+                        const t = await navigator.clipboard.readText();
+                        if (t && t.trim()) return {text: t.trim()};
+                      } catch(e) {}
+                    } catch(e) { return {error: String(e)}; }
+                    return null;
+                }""",
+            )
+            if not result:
+                return None
+            if result.get("b64"):
+                return {"b64_json": str(result["b64"]), "mime": result.get("mime")}
+            if result.get("text"):
+                txt = str(result["text"]).strip()
+                # nếu clipboard trả URL/data-uri thì giữ nguyên
+                if txt.startswith("data:"):
+                    comma = txt.find(",")
+                    return {"b64_json": txt[comma+1:] if comma != -1 else txt}
+                if txt.startswith("http"):
+                    return {"url": txt}
+                # có thể trả base64 trần
+                if len(txt) > 100 and all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=" for c in txt[:200]):
+                    return {"b64_json": txt}
+                return {"url": txt}
+        except Exception as e:
+            applog.log(f"recipe: '{self.slug}' đọc clipboard ảnh {index} lỗi: {e}", level="warn")
+        return None
+
+    async def _copy_images_via_buttons(self, page, n: int, deadline: float) -> list[dict] | None:
+        """Thử copy n ảnh qua nút copy riêng. Trả None nếu không đủ."""
+        sel = self._image_copy_selector()
+        if not sel:
+            return None
+        # đợi nút xuất hiện
+        ok = await self._wait_for_image_copy_buttons(page, n, deadline)
+        if not ok:
+            applog.log(f"recipe: '{self.slug}' không thấy {n} nút copy ảnh ({sel}) trước deadline", level="warn")
+            return None
+        out: list[dict] = []
+        for i in range(n):
+            # deadline tổng, bỏ qua ảnh lẻ nếu quá hạn
+            if time.monotonic() > deadline:
+                break
+            item = await self._copy_single_image(page, i)
+            if item is None:
+                # thử lại một lần sau khi chờ ngắn
+                await asyncio.sleep(0.6)
+                item = await self._copy_single_image(page, i)
+            if item is None:
+                applog.log(f"recipe: '{self.slug}' không copy được ảnh {i+1}/{n} qua nút {sel}", level="warn")
+                return None
+            out.append(item)
+            await asyncio.sleep(0.2)
+        return out if len(out) == n else None
+
+    async def _image_to_b64(self, page, src: str) -> str:
+        if src.startswith("data:"):
+            # data:image/png;base64,....
+            comma = src.find(",")
+            return src[comma + 1:] if comma != -1 else src
+        # Try to fetch via browser context (has cookies/auth) and encode
+        try:
+            b64 = await page.evaluate(
+                r"""async (url) => {
+                    try {
+                        const r = await fetch(url, {credentials: 'include'});
+                        if (!r.ok) return null;
+                        const buf = await r.arrayBuffer();
+                        const bytes = new Uint8Array(buf);
+                        let binary = '';
+                        for (let i=0;i<bytes.length;i++) binary += String.fromCharCode(bytes[i]);
+                        return btoa(binary);
+                    } catch(e) { return null; }
+                }""",
+                src,
+            )
+            if b64:
+                return str(b64)
+        except Exception:
+            pass
+        # Fallback: httpx (may miss auth)
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                r = await client.get(src)
+                r.raise_for_status()
+                return base64.b64encode(r.content).decode()
+        except Exception:
+            pass
+        # last resort: return url itself, caller will fallback to url mode
+        return ""
+
+    async def generate_images(self, prompt: str, n: int = 1, size: str = "1024x1024",
+                              headed: bool | None = None,
+                              target_account_id: int | None = None,
+                              assignment: "Assignment | None" = None,
+                              response_format: str = "b64_json",
+                              **kwargs) -> list[dict]:
+        owned = assignment is None
+        if owned:
+            assignment = await self.assign(target_account_id)
+        try:
+            return await self._run_images(prompt, n, size, assignment, headed, response_format)
+        finally:
+            if owned:
+                assignment.release()
+
+    async def _run_images(self, prompt: str, n: int, size: str, assignment: "Assignment",
+                          headed: bool | None, response_format: str) -> list[dict]:
+        target_profile = assignment.profile
+        storage_state = assignment.storage_state
+        ctx_key = assignment.ctx_key
+        if assignment.headed is None:
+            assignment.headed = self.resolve_headed(headed, target_profile)
+        effective_headed = assignment.headed
+        timeout_ms = int(self.ds.get("timeout_ms", 120000))
+        async with self._lock_for(ctx_key), contextlib.AsyncExitStack() as stack:
+            if target_profile is not None:
+                await stack.enter_async_context(self.pool.hold(target_profile.name, ctx_key))
+                page = await self.open_profile_page(target_profile, ctx_key, effective_headed)
+            else:
+                page = await self._acquire_page(ctx_key, storage_state, effective_headed)
+            deadline = time.monotonic() + timeout_ms / 1000
+            try:
+                await page.goto(self._new_chat_url or self.url, wait_until="domcontentloaded",
+                                timeout=min(timeout_ms, 60000))
+                box = page.locator(self.prompt_cfg["input_selector"]).first
+                await self._wait_chat_ready(page, box)
+                await _sleep_ms(self._input_delay_ms)
+                # model + mode (dropdown) — dropdown thường chọn chế độ tạo ảnh trước khi nhập prompt
+                model_id = kwargs.get("model_id") or (self._recipe["models"][0]["id"] if self._recipe.get("models") else "")
+                model = next((item for item in self._recipe["models"] if item["id"] == model_id), None)
+                cap = str((model or {}).get("capability") or "image")
+                await self._apply_mode(page, cap)
+                if model is not None and model.get("action"):
+                    await self._exec_action_steps(page, str(model["action"]), str(model.get("value") or model["id"]))
+                if self.prompt_cfg.get("input_mode", "fill") == "type":
+                    await box.click()
+                    await box.type(prompt)
+                else:
+                    await box.fill(prompt)
+                submit = self.prompt_cfg.get("submit", "Enter")
+                if submit.startswith("click:"):
+                    await page.click(submit.split(":", 1)[1])
+                else:
+                    await box.press("Enter")
+                # chờ ảnh xuất hiện (ảnh và nút copy ảnh là 2 tập riêng)
+                srcs = await self._wait_for_images(page, n, deadline)
+                assignment.conversation_url = _page_url(page)
+                # capture html nếu bật
+                if self._capture_html:
+                    try:
+                        sel = self._image_selector() or self.response_cfg.get("last_message_selector", "body")
+                        html = await page.evaluate("(sel)=>{ const els=document.querySelectorAll(sel); const el=els[els.length-1]; return el?el.outerHTML:null; }", sel)
+                        assignment.html = html
+                        self.last_response_html = html
+                    except Exception:
+                        pass
+                # Ưu tiên copy qua nút riêng cho từng ảnh (mỗi ảnh 1 nút)
+                if self._image_copy_selector():
+                    copied = await self._copy_images_via_buttons(page, n, deadline)
+                    if copied is not None and len(copied) == n:
+                        out: list[dict] = []
+                        for item in copied:
+                            if response_format == "url":
+                                if item.get("url"):
+                                    out.append({"url": item["url"]})
+                                elif item.get("b64_json"):
+                                    # có b64 nhưng client xin url → vẫn trả url nếu có, không thì fallback b64
+                                    out.append({"b64_json": item["b64_json"]})
+                                else:
+                                    out.append(item)
+                            else:
+                                if item.get("b64_json"):
+                                    out.append({"b64_json": item["b64_json"]})
+                                elif item.get("url"):
+                                    b64 = await self._image_to_b64(page, item["url"])
+                                    out.append({"b64_json": b64} if b64 else {"url": item["url"]})
+                                else:
+                                    out.append(item)
+                        if len(out) == n:
+                            return out
+                        applog.log(f"recipe: '{self.slug}' copy ảnh trả thiếu {len(out)}/{n}, fallback sang src", level="warn")
+                    else:
+                        applog.log(f"recipe: '{self.slug}' không copy đủ {n} ảnh qua nút, fallback sang src", level="warn")
+                # Fallback: lấy trực tiếp từ src / background-image
+                out: list[dict] = []
+                for src in srcs[:n]:
+                    if response_format == "url":
+                        out.append({"url": src})
+                    else:
+                        b64 = await self._image_to_b64(page, src)
+                        if b64:
+                            out.append({"b64_json": b64})
+                        else:
+                            out.append({"url": src})
+                return out
+            finally:
+                if assignment.conversation_url is None:
+                    assignment.conversation_url = _page_url(page)
+                if not self._keep_context:
+                    await self._release_ctx(ctx_key)
 
     async def _reply(self, page) -> tuple[str, str | None]:
         """Đọc reply dưới dạng Markdown và, khi bật, outerHTML gốc."""
@@ -1008,14 +1543,10 @@ class BrowserRecipe(Provider):
                 await _sleep_ms(self._input_delay_ms)
                 model = next((item for item in self._recipe["models"]
                               if item["id"] == model_id), None)
+                cap = str((model or {}).get("capability") or "chat")
+                await self._apply_mode(page, cap)
                 if model is not None and model.get("action"):
-                    for step in model["action"].split(";"):
-                        action, selector = step.strip().split(":", 1)
-                        if action == "select":
-                            await page.locator(selector).first.select_option(
-                                value=str(model.get("value") or model["id"]))
-                        else:
-                            await page.locator(selector).first.click()
+                    await self._exec_action_steps(page, str(model["action"]), str(model.get("value") or model["id"]))
                 if self.prompt_cfg.get("input_mode", "fill") == "type":
                     await box.click()
                     await box.type(prompt)

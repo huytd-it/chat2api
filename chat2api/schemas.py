@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Message(BaseModel):
@@ -13,6 +13,23 @@ class ChatRequest(BaseModel):
 
     def as_list(self) -> list[dict]:
         return [{"role": m.role, "content": m.content} for m in self.messages]
+
+
+class ImageGenerateRequest(BaseModel):
+    model: str
+    prompt: str = Field(min_length=1, max_length=4000)
+    n: int = Field(default=1, ge=1, le=4)
+    size: str = Field(default="1024x1024")
+    response_format: str = Field(default="b64_json")
+    quality: str | None = None
+    style: str | None = None
+    user: str | None = None
+
+
+class ImageData(BaseModel):
+    url: str | None = None
+    b64_json: str | None = None
+    revised_prompt: str | None = None
 
 
 class IntegrateRequest(BaseModel):
@@ -45,13 +62,20 @@ class RecipeDoneSignalSpec(BaseModel):
 
 
 class RecipeResponseSpec(BaseModel):
-    last_message_selector: str
+    last_message_selector: str = ""
     done_signal: RecipeDoneSignalSpec = RecipeDoneSignalSpec()
     # "markdown" giữ lại cấu trúc khối (heading, list, code) khi đọc câu trả
     # lời; bỏ trống là lấy text thuần.
     format: str | None = None
     # Kèm HTML gốc của câu trả lời trong bản ghi session, để soi lại sau.
     capture_html: bool | None = None
+    # Selector ảnh cho image generation. Nếu có, recipe được coi là image-capable.
+    image_selector: str | None = None
+    # Nút copy riêng cho từng ảnh (khác nút copy response). Mỗi ảnh có 1 nút.
+    # Nếu đặt, flow tạo ảnh sẽ bấm từng nút và đọc clipboard thay vì fetch src.
+    image_copy_selector: str | None = None
+    image_copy_scope: str | None = None          # after | inside | page (mặc định after)
+    image_copy_exclude: str | None = None        # loại nút không thuộc ảnh
 
 
 class RecipeNewChatSpec(BaseModel):
@@ -77,11 +101,21 @@ class RecipeLoginSpec(BaseModel):
     accounts: list[RecipeAccountSpec] | None = None
 
 
+class RecipeModeSpec(BaseModel):
+    # Dropdown chuyển chế độ (thường là Chat vs Image). Nếu site dùng chung 1 URL
+    # nhưng chế độ tạo ảnh nằm trong dropdown, đặt selector/action ở đây để
+    # _run_images tự bấm trước khi nhập prompt.
+    selector: str | None = None            # selector của nút/select chính (để chờ visible)
+    image_action: str | None = None        # vd: click:.mode-btn;click:[data-value='image']
+    chat_action: str | None = None         # vd: click:.mode-btn;click:[data-value='chat']
+
+
 class RecipeModelSpec(BaseModel):
     id: str
     # Action chạy trước khi nhập prompt. Bỏ trống để website giữ model mặc định.
     action: str | None = None       # nhiều bước ngăn bằng ;: click:<selector> | select:<selector>
     value: str | None = None        # option value, mặc định dùng id
+    capability: str | None = None   # chat | image | both, mặc định chat
 
 
 class RecipeModelDiscoveryRequest(BaseModel):
@@ -98,6 +132,7 @@ class RecipeManualSpec(BaseModel):
     prompt: RecipePromptSpec
     response: RecipeResponseSpec
     models: list[RecipeModelSpec]
+    mode: RecipeModeSpec | None = None
     new_chat: RecipeNewChatSpec | None = None
     timing: RecipeTimingSpec | None = None
     login: RecipeLoginSpec | None = None
