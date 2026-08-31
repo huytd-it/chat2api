@@ -41,29 +41,6 @@ fn pick_free_port() -> u16 {
         .unwrap_or(FALLBACK_PORT)
 }
 
-/// Honors an explicit `CHAT2API_PORT` override (e.g. set by
-/// `scripts/setup-and-run.ps1 -Port`) so the port can be pinned when a fixed
-/// value is wanted; otherwise picks a free one automatically.
-fn resolve_port() -> u16 {
-    if let Ok(val) = std::env::var("CHAT2API_PORT") {
-        let trimmed = val.trim();
-        if !trimmed.is_empty() {
-            match trimmed.parse::<u16>() {
-                Ok(port) => {
-                    eprintln!("[chat2api sidecar] using CHAT2API_PORT override: {port}");
-                    return port;
-                }
-                Err(_) => {
-                    eprintln!(
-                        "[chat2api sidecar] CHAT2API_PORT=\"{trimmed}\" is not a valid port number, ignoring"
-                    );
-                }
-            }
-        }
-    }
-    pick_free_port()
-}
-
 /// `chat2api.config.Config` loads `.env` and resolves the default `recipes/`
 /// path relative to the *process's current working directory*, not its own
 /// package location. Left unset, a spawned child just inherits this app's own
@@ -86,6 +63,98 @@ fn resolve_workdir() -> PathBuf {
         .and_then(Path::parent)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// A port the OS won't let us bind to — already in use, or inside a range
+/// Windows reserves for its own use (Hyper-V/WSL, per `netsh interface ipv4
+/// show excludedportrange protocol=tcp`) — can't serve the backend. Verify a
+/// configured port before committing to it; fall back to auto-pick otherwise.
+fn port_is_bindable(port: u16) -> bool {
+    TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// Reads a `CHAT2API_PORT`-style value from the process environment. Returns
+/// None (logging why) when the variable is absent, unparsable, 0, or not
+/// bindable.
+fn configured_port(key: &str, source: &str) -> Option<u16> {
+    let val = std::env::var(key).ok()?;
+    let trimmed = val.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let Ok(port) = trimmed.parse::<u16>() else {
+        eprintln!("[chat2api sidecar] {key}=\"{trimmed}\" ({source}) is not a valid port number, ignoring");
+        return None;
+    };
+    if port == 0 {
+        eprintln!("[chat2api sidecar] {key}=\"{trimmed}\" ({source}) is 0 (auto), ignoring");
+        return None;
+    }
+    if !port_is_bindable(port) {
+        eprintln!(
+            "[chat2api sidecar] {key}=\"{trimmed}\" ({source}) is not bindable (in use or inside a Windows-excluded port range), auto-picking instead"
+        );
+        return None;
+    }
+    eprintln!("[chat2api sidecar] using {key} from {source}: {port}");
+    Some(port)
+}
+
+/// Reads `CHAT2API_PORT` from the `.env` file in the sidecar workdir — the
+/// same file the Python backend loads — so the port can be pinned persistently
+/// (edit `.env`, double-click the exe) instead of setting an environment
+/// variable on every launch. Process env wins; this is the fallback.
+fn dotenv_port() -> Option<u16> {
+    let env_path = resolve_workdir().join(".env");
+    let Ok(contents) = std::fs::read_to_string(&env_path) else {
+        return None;
+    };
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || !line.contains('=') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "CHAT2API_PORT" {
+            continue;
+        }
+        let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+        let Ok(port) = value.parse::<u16>() else {
+            eprintln!("[chat2api sidecar] CHAT2API_PORT=\"{value}\" (.env) is not a valid port number, ignoring");
+            return None;
+        };
+        if port == 0 {
+            eprintln!("[chat2api sidecar] CHAT2API_PORT=\"{value}\" (.env) is 0 (auto), ignoring");
+            return None;
+        }
+        if !port_is_bindable(port) {
+            eprintln!(
+                "[chat2api sidecar] CHAT2API_PORT=\"{value}\" (.env) is not bindable (in use or inside a Windows-excluded port range), auto-picking instead"
+            );
+            return None;
+        }
+        eprintln!("[chat2api sidecar] using CHAT2API_PORT from .env: {port}");
+        return Some(port);
+    }
+    None
+}
+
+/// Resolves the port the backend should bind. Sources, in priority order:
+///   1. The process environment variable `CHAT2API_PORT` (set by
+///      `scripts/build-desktop.ps1 -Port`, `scripts/setup-and-run.ps1 -Port`).
+///   2. `CHAT2API_PORT` in the sidecar workdir's `.env` — persistent config so
+///      a standalone exe keeps the same port across launches.
+/// Otherwise picks a free one automatically.
+fn resolve_port() -> u16 {
+    if let Some(port) = configured_port("CHAT2API_PORT", "environment") {
+        return port;
+    }
+    if let Some(port) = dotenv_port() {
+        return port;
+    }
+    pick_free_port()
 }
 
 /// Spawns the Python chat2api server as a background process and streams its
