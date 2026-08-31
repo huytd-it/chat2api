@@ -68,13 +68,13 @@ FIELDS: list[dict] = [
     {"key": "API_MAX_CONCURRENT_REQUESTS", "type": "int", "default": "0", "group": "API",
      "apply": "reload", "label": "Trần request chat song song",
      "help": "0 = không giới hạn. Vượt trần thì request mới chờ, không bị từ chối."},
-    {"key": "API_HEADED", "type": "choice", "default": "always", "group": "API",
-     "apply": "reload", "label": "Hiện cửa sổ browser cho request API",
-     "choices": ["auto", "always", "never"],
-     "help": "always (mặc định): mọi request API mở cửa sổ Chromium nhìn thấy được — giống "
-             "hệt nút Gửi ở bàn test Sessions, và là cách duy nhất thấy được request đang "
-             "làm gì. never: luôn chạy ẩn. auto: theo ô 'Chạy ẩn' của từng profile ở tab "
-             "Profiles. Header X-Chat2api-Headed của client vẫn thắng cả ba."},
+    {"key": "API_HEADED", "type": "choice", "default": "auto", "group": "API",
+      "apply": "reload", "label": "Hiện cửa sổ browser cho request API",
+      "choices": ["auto", "always", "never"],
+      "help": "auto (mặc định): theo ô 'Chạy ẩn' của từng profile ở tab "
+              "Profiles — profile headless=true thì chạy ẩn, ngược lại hiện cửa sổ. "
+              "always: mọi request API mở cửa sổ nhìn thấy được. "
+              "never: luôn chạy ẩn. Header X-Chat2api-Headed của client vẫn thắng cả ba."},
     {"key": "API_SESSION_MODE", "type": "choice", "default": "per_request", "group": "API",
      "apply": "reload", "label": "Gom request thành session",
      "choices": ["per_request", "client_window"],

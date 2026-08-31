@@ -10,7 +10,7 @@ response:
   done_signal:
     type: copy_button
     quiet_ms: 10000
-    timeout_ms: 240000
+    timeout_ms: 300000
     scope: after
     use_copy_result: true
 new_chat:
@@ -23,4 +23,6 @@ models:
 slug: qwen-web
 login:
   anon_trial_limit: 20
+  strategy: round_robin
+  quota: 50
 keep_context: true

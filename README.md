@@ -346,7 +346,7 @@ Các thiết lập chính:
 | `API_MAX_CONCURRENT_PER_ACCOUNT` | `1` | Số request song song trên mỗi account |
 | `API_MAX_CONCURRENT_REQUESTS` | `0` | Trần toàn server; `0` là không giới hạn |
 | `API_SESSION_MODE` | `per_request` | Tách session theo request hoặc gom theo client window |
-| `API_HEADED` | `always` | `always`, `never` hoặc `auto` |
+| `API_HEADED` | `auto` | `always`, `never` hoặc `auto` |
 | `BROWSER_PROFILE_MODE` | `storage_state` | Dùng state nhẹ hoặc Chromium profile đầy đủ |
 | `POOL_MAX_PROFILES` | `6` | Số tiến trình profile được giữ mở |
 | `PROFILE_MAX_TABS` | `8` | Số tab tối đa mỗi profile |
@@ -435,7 +435,7 @@ API_ACCOUNT_STRATEGY=least_busy
 API_MAX_CONCURRENT_PER_ACCOUNT=1
 API_MAX_CONCURRENT_REQUESTS=0
 API_SESSION_MODE=per_request
-API_HEADED=always
+API_HEADED=auto
 
 # Agent integration / fallback
 AGENT_LLM_BASE_URL=

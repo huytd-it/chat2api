@@ -663,9 +663,9 @@ class BrowserRecipe(Provider):
         ô "Chạy ẩn" của chính profile → mặc định của provider. Đặt ở một chỗ để
         request API và nút Gửi ở bàn test đi đúng cùng một đường.
 
-        ``API_HEADED`` mặc định là ``always``: request API mở cửa sổ nhìn thấy
-        được, vì không nhìn thấy thì không debug được recipe đang kẹt ở đâu. Ô
-        "Chạy ẩn" của profile chỉ có tiếng nói khi người dùng chọn ``auto``.
+        ``API_HEADED`` mặc định là ``auto``: theo ô "Chạy ẩn" của profile
+        (headless=true → ẩn, ngược lại → hiện). Dùng ``always``/``never`` để
+        ép hiện/ẩn bất kể profile.
         """
         if headed is not None:
             return headed

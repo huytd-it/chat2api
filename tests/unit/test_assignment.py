@@ -221,10 +221,13 @@ def test_client_header_beats_every_setting(db, recipe, monkeypatch):
     assert recipe.resolve_headed(False, profile) is False
 
 
-def test_api_headed_defaults_to_showing_a_window(db, recipe, monkeypatch):
-    """Không cấu hình gì thì request API vẫn mở cửa sổ — đó là mặc định."""
+def test_api_headed_defaults_to_following_profile(db, recipe, monkeypatch):
+    """Mặc định auto: theo ô Chạy ẩn của profile, không ép hiện."""
     monkeypatch.delenv("API_HEADED", raising=False)
-    assert recipe.resolve_headed(None, _profile(db, "mac-dinh", headless=True)) is True
+    assert recipe.resolve_headed(None, _profile(db, "mac-dinh", headless=True)) is False
+    assert recipe.resolve_headed(None, _profile(db, "hien", headless=False)) is True
+    # Không có profile + auto → dùng provider default (headless=True → ẩn)
+    assert recipe.resolve_headed(None, None) is False
 
 
 def test_api_headed_always_shows_a_window(db, recipe, monkeypatch):
