@@ -44,6 +44,21 @@ class RecipeRenameRequest(BaseModel):
     slug: str
 
 
+class RecipeReanalyzeRequest(BaseModel):
+    """Phân tích lại recipe đã có bằng AI — giữ nguyên slug, ghi đè YAML."""
+    url: str | None = None
+    headed: bool = False
+    profile_id: int | None = None
+
+
+class RecordRequest(BaseModel):
+    """Mở phiên ghi thao tác (headed browser, user click/gõ, trace selector)."""
+
+    url: str
+    profile_id: int
+    slug: str | None = None  # ghi lại recipe đang có thì truyền slug hiện có
+
+
 class RecipePromptSpec(BaseModel):
     input_selector: str
     input_mode: str = "fill"      # fill | type
@@ -116,6 +131,12 @@ class RecipeModelSpec(BaseModel):
     action: str | None = None       # nhiều bước ngăn bằng ;: click:<selector> | select:<selector>
     value: str | None = None        # option value, mặc định dùng id
     capability: str | None = None   # chat | image | both, mặc định chat
+
+
+class RecipeAnalyzeRequest(BaseModel):
+    url: str
+    headed: bool = False
+    profile_id: int | None = None
 
 
 class RecipeModelDiscoveryRequest(BaseModel):
@@ -258,3 +279,48 @@ class SessionDeleteRequest(BaseModel):
 
 class SessionForkRequest(BaseModel):
     up_to_seq: int
+
+
+class ComboMemberSpec(BaseModel):
+    model_id: str
+    weight: int = 1
+    priority: int = 0
+
+
+class ComboCreateRequest(BaseModel):
+    slug: str
+    display_name: str | None = None
+    strategy: str = "round_robin"
+    description: str | None = None
+    enabled: bool = True
+    members: list[ComboMemberSpec]
+
+
+class ComboUpdateRequest(BaseModel):
+    display_name: str | None = None
+    strategy: str | None = None
+    description: str | None = None
+    enabled: bool | None = None
+    members: list[ComboMemberSpec] | None = None
+
+
+class OpenAIModelSpec(BaseModel):
+    id: str
+    capability: str | None = "chat"
+
+
+class OpenAIProviderCreateRequest(BaseModel):
+    slug: str
+    base_url: str
+    api_key: str | None = None
+    api_key_env: str | None = None
+    models: list[OpenAIModelSpec]
+    stream: bool = True
+
+
+class OpenAIProviderUpdateRequest(BaseModel):
+    base_url: str | None = None
+    api_key: str | None = None
+    api_key_env: str | None = None
+    models: list[OpenAIModelSpec] | None = None
+    stream: bool | None = None

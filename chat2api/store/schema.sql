@@ -184,6 +184,27 @@ CREATE TABLE IF NOT EXISTS recipe_account (
   PRIMARY KEY (recipe_id, account_id)
 );
 
+-- Combo: model ảo gộp nhiều model thật với chiến lược xoay vòng.
+CREATE TABLE IF NOT EXISTS combo (
+  id           INTEGER PRIMARY KEY,
+  slug         TEXT    NOT NULL UNIQUE,
+  display_name TEXT    NOT NULL DEFAULT '',
+  strategy     TEXT    NOT NULL DEFAULT 'round_robin',
+  description  TEXT    NOT NULL DEFAULT '',
+  enabled      INTEGER NOT NULL DEFAULT 1,
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS combo_member (
+  combo_id INTEGER NOT NULL REFERENCES combo(id) ON DELETE CASCADE,
+  model_id TEXT    NOT NULL,
+  weight   INTEGER NOT NULL DEFAULT 1,
+  priority INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (combo_id, model_id)
+);
+CREATE INDEX IF NOT EXISTS combo_member_by_combo ON combo_member(combo_id);
+
 -- ------------------------------------------------------ session / message
 
 CREATE TABLE IF NOT EXISTS session (

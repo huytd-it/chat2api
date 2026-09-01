@@ -38,8 +38,10 @@ export interface LogEntry {
 
 export interface JobStatus {
   status: string;
+  kind?: string;
   log: string[];
   can_complete_login?: boolean;
+  can_finish_record?: boolean;
   slug?: string;
 }
 
@@ -542,6 +544,23 @@ export interface DiscoveredRecipeModel {
   value?: string;
 }
 
+/** Phân tích URL bằng AI và trả về recipe chưa lưu — dùng để auto-fill form. */
+export async function analyzeRecipeDraft(
+  key: string,
+  url: string,
+  opts: { headed?: boolean; profileId?: number | null } = {},
+): Promise<{ status: string; recipe?: Record<string, unknown>; notes?: string; log?: string[]; hint?: string; slug?: string }> {
+  const base = await apiBase();
+  const body: Record<string, unknown> = { url, headed: !!opts.headed };
+  if (opts.profileId != null) body.profile_id = opts.profileId;
+  const r = await fetch(base + "/admin/recipes/analyze", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify(body),
+  });
+  return asJson(r);
+}
+
 /** Mở URL và dò model control khi người dùng chủ động yêu cầu. */
 export async function discoverRecipeModels(
   key: string,
@@ -676,6 +695,50 @@ export async function jobAction(
   const r = await fetch(base + "/admin/integrate/" + encodeURIComponent(jobId) + "/" + action, {
     method: "POST",
     headers: headers(key),
+  });
+  return asJson(r);
+}
+
+export async function startRecord(
+  key: string,
+  url: string,
+  profileId: number,
+  slug?: string,
+): Promise<{ job_id: string }> {
+  const base = await apiBase();
+  const body: Record<string, unknown> = { url, profile_id: profileId };
+  if (slug) body.slug = slug;
+  const r = await fetch(base + "/admin/record", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify(body),
+  });
+  return asJson(r);
+}
+
+export async function finishRecord(key: string, jobId: string): Promise<JobStatus> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/record/" + encodeURIComponent(jobId) + "/finish", {
+    method: "POST",
+    headers: headers(key),
+  });
+  return asJson(r);
+}
+
+/** Phân tích lại recipe đã có bằng AI — giữ nguyên slug, ghi đè YAML. */
+export async function reanalyzeRecipe(
+  key: string,
+  slug: string,
+  opts: { url?: string; headed?: boolean; profile_id?: number | null } = {},
+): Promise<{ job_id: string; slug: string; url: string }> {
+  const base = await apiBase();
+  const body: Record<string, unknown> = { headed: !!opts.headed };
+  if (opts.url) body.url = opts.url;
+  if (opts.profile_id != null) body.profile_id = opts.profile_id;
+  const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug) + "/reanalyze", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify(body),
   });
   return asJson(r);
 }
@@ -1027,6 +1090,137 @@ export async function closeProfile(key: string, name: string): Promise<void> {
   const base = await apiBase();
   const r = await fetch(base + "/admin/profiles/" + encodeURIComponent(name) + "/close", {
     method: "POST",
+    headers: headers(key),
+  });
+  await asJson(r);
+}
+
+export interface ComboMember {
+  model_id: string;
+  weight: number;
+  priority: number;
+}
+
+export interface ComboInfo {
+  id: number;
+  slug: string;
+  model_id: string;
+  display_name: string;
+  strategy: string;
+  description: string;
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+  members: ComboMember[];
+}
+
+export async function fetchCombos(key: string): Promise<ComboInfo[]> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/combos", { headers: headers(key) });
+  return asJson(r);
+}
+
+export async function fetchCombo(key: string, slug: string): Promise<ComboInfo> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/combos/" + encodeURIComponent(slug), { headers: headers(key) });
+  return asJson(r);
+}
+
+export async function createCombo(
+  key: string,
+  data: { slug: string; display_name?: string; strategy: string; description?: string; enabled?: boolean; members: ComboMember[] },
+): Promise<ComboInfo> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/combos", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify(data),
+  });
+  return asJson(r);
+}
+
+export async function updateCombo(
+  key: string,
+  slug: string,
+  data: Partial<{ display_name: string; strategy: string; description: string; enabled: boolean; members: ComboMember[] }>,
+): Promise<ComboInfo> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/combos/" + encodeURIComponent(slug), {
+    method: "PUT",
+    headers: headers(key),
+    body: JSON.stringify(data),
+  });
+  return asJson(r);
+}
+
+export async function deleteCombo(key: string, slug: string): Promise<void> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/combos/" + encodeURIComponent(slug), {
+    method: "DELETE",
+    headers: headers(key),
+  });
+  await asJson(r);
+}
+
+export interface OpenAIModel {
+  id: string;
+  capability: string;
+}
+
+export interface OpenAIProviderInfo {
+  slug: string;
+  base_url: string;
+  has_key: boolean;
+  api_key_env: string;
+  models: OpenAIModel[];
+  stream: boolean;
+  ready: boolean;
+  type: string;
+}
+
+export async function fetchOpenAIProviders(key: string): Promise<OpenAIProviderInfo[]> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/openai", { headers: headers(key) });
+  return asJson(r);
+}
+
+export async function fetchOpenAIProvider(key: string, slug: string): Promise<any> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/openai/" + encodeURIComponent(slug), { headers: headers(key) });
+  return asJson(r);
+}
+
+export async function createOpenAIProvider(
+  key: string,
+  data: { slug: string; base_url: string; api_key?: string; api_key_env?: string; models: OpenAIModel[]; stream?: boolean },
+): Promise<{ ok: true; slug: string }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/openai", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify(data),
+  });
+  return asJson(r);
+}
+
+export async function updateOpenAIProvider(
+  key: string,
+  slug: string,
+  data: Partial<{ base_url: string; api_key: string; api_key_env: string; models: OpenAIModel[]; stream: boolean }>,
+): Promise<{ ok: true; slug: string }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/openai/" + encodeURIComponent(slug), {
+    method: "PUT",
+    headers: headers(key),
+    body: JSON.stringify(data),
+  });
+  return asJson(r);
+}
+
+export async function deleteOpenAIProvider(key: string, slug: string): Promise<void> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/openai/" + encodeURIComponent(slug), {
+    method: "DELETE",
     headers: headers(key),
   });
   await asJson(r);

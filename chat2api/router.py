@@ -20,6 +20,8 @@ class Router:
         self.pool = pool
         self.providers: dict[str, Provider] = {}
         self.failures: dict[str, int] = {}
+        # Combo là provider ảo duy nhất trỏ tới nhiều model thật, nạp sau các provider khác
+        self._combo_provider = None
 
     def reload(self) -> None:
         self.providers.clear()
@@ -30,6 +32,8 @@ class Router:
         self.failures.clear()
         self._db_execute("UPDATE recipe SET failures = 0 WHERE failures != 0")
         if not self.recipes_dir.exists():
+            # vẫn phải khởi combo provider để /v1/models không rỗng khi chỉ có combo
+            self._ensure_combo_provider()
             return
         for child in sorted(self.recipes_dir.iterdir()):
             if not child.is_dir() or child.name.startswith("."):
@@ -46,6 +50,21 @@ class Router:
                 for p in items:
                     self.providers[p.slug] = p
                 break
+        self._ensure_combo_provider()
+
+    def _ensure_combo_provider(self) -> None:
+        """Đảm bảo provider 'combo' luôn tồn tại (kể cả khi chưa có combo nào)."""
+        try:
+            from .providers.combo import ComboProvider
+        except Exception as e:
+            print(f"[chat2api] combo provider không nạp được: {e}", file=sys.stderr)
+            return
+        if self._combo_provider is None:
+            self._combo_provider = ComboProvider(router=self)
+        else:
+            self._combo_provider.set_router(self)
+            self._combo_provider.reload()
+        self.providers[self._combo_provider.slug] = self._combo_provider
 
     def resolve(self, model_id: str) -> tuple[Provider, str]:
         prefix, _, local = model_id.partition("/")

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { apiKey, showToast } from "../stores";
-  import { startIntegration, fetchJob, jobAction, type JobStatus } from "../api";
+  import { startIntegration, startRecord, finishRecord, fetchJob, jobAction, type JobStatus } from "../api";
   import { profiles, refreshAccounts, refreshDomains, refreshModels, refreshRecipes } from "../sync";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
@@ -54,16 +54,26 @@
     pollAbort = null;
     activeJobId = null;
   }
+  let recordActionsVisible = $state(false);
+  let recordButtonsDisabled = $state(false);
+
   function showJobStatus(j: Partial<JobStatus> & { status: string }) {
     const canLogin = j.status === "waiting_login" && j.can_complete_login === true;
+    const canRecord = j.status === "recording" && j.can_finish_record === true;
+    const isResumingRecord = j.status === "resuming_record";
     loginActionsVisible = canLogin;
-    statusKind = j.status === "ok" ? "success" : ["failed", "cancelled", "login_timeout"].includes(j.status) ? "error" : "busy";
+    recordActionsVisible = canRecord;
+    statusKind = j.status === "ok" ? "success" : ["failed", "cancelled", "login_timeout", "record_timeout"].includes(j.status) ? "error" : "busy";
     currentJobStatus = j.status;
     if (canLogin) {
       if (actionInFlightFor !== pollGeneration) resetLoginButtons();
       jobStatusText = "Chrome đã mở. Hãy đăng nhập trong cửa sổ đó";
+    } else if (canRecord) {
+      if (actionInFlightFor !== pollGeneration) recordButtonsDisabled = false;
+      jobStatusText = "Chrome đang ghi — hãy thao tác trên trang, xong bấm Hoàn tất";
     } else if (j.status === "waiting_login") jobStatusText = "Đang đóng phiên đăng nhập hết hạn…";
     else if (j.status === "resuming") jobStatusText = "Đang lưu session và tiếp tục…";
+    else if (isResumingRecord) jobStatusText = "Đã ghi xong — đang sinh recipe từ selector…";
     else jobStatusText = "Trạng thái: " + j.status;
   }
   function startPolling(jobId: string) {
@@ -142,7 +152,7 @@
     const profileId = Number(selectedProfileId);
     const operation = ++operationGeneration;
     actionGeneration++; actionInFlightFor = null; resetLoginButtons(); integrateDisabled = true; stopPolling();
-    loginActionsVisible = false; jobLog = ""; statusKind = "busy"; currentJobStatus = "running"; jobStatusText = "Đang khởi tạo analyzer…";
+    recordActionsVisible = false; loginActionsVisible = false; jobLog = ""; statusKind = "busy"; currentJobStatus = "running"; jobStatusText = "Đang khởi tạo analyzer…";
     try {
       const data = await startIntegration($apiKey, url, profileId, headedMode);
       if (operation !== operationGeneration) return;
@@ -150,6 +160,38 @@
     } catch (e) {
       if (operation === operationGeneration) { jobStatusText = "Lỗi: " + e; statusKind = "error"; currentJobStatus = "failed"; }
     } finally { if (operation === operationGeneration) integrateDisabled = false; }
+  }
+
+  async function startRecordJob() {
+    const url = siteUrl.trim();
+    if (!url) { showToast("Nhập URL web chat trước khi bắt đầu."); return; }
+    try { new URL(url); } catch { showToast("URL không hợp lệ."); return; }
+    if (!selectedProfileId) { showToast("Chọn profile trước khi ghi thao tác."); return; }
+    const profileId = Number(selectedProfileId);
+    const operation = ++operationGeneration;
+    actionGeneration++; actionInFlightFor = null; resetLoginButtons(); recordButtonsDisabled = false; integrateDisabled = true; stopPolling();
+    loginActionsVisible = false; recordActionsVisible = false; jobLog = ""; statusKind = "busy"; currentJobStatus = "recording"; jobStatusText = "Đang mở browser ghi thao tác…";
+    try {
+      const data = await startRecord($apiKey, url, profileId);
+      if (operation !== operationGeneration) return;
+      jobStatusText = "Chrome đang ghi — hãy thao tác, xong bấm Hoàn tất"; startPolling(data.job_id);
+    } catch (e) {
+      if (operation === operationGeneration) { jobStatusText = "Lỗi: " + e; statusKind = "error"; currentJobStatus = "failed"; }
+    } finally { if (operation === operationGeneration) integrateDisabled = false; }
+  }
+
+  async function finishRecordJob() {
+    if (!activeJobId) return;
+    const jobId = activeJobId; const gen = pollGeneration; const tok = ++actionGeneration; actionInFlightFor = gen as unknown as number; recordButtonsDisabled = true;
+    try {
+      if (gen !== pollGeneration || jobId !== activeJobId || tok !== actionGeneration) return;
+      await finishRecord($apiKey, jobId);
+      if (gen !== pollGeneration || jobId !== activeJobId || tok !== actionGeneration) return;
+      showJobStatus({ status: "resuming_record" } as Partial<JobStatus> & { status: string });
+      startPolling(jobId); actionInFlightFor = null;
+    } catch (e) {
+      if (gen === pollGeneration && jobId === activeJobId && tok === actionGeneration) { jobStatusText = "Lỗi: " + e; statusKind = "error"; currentJobStatus = "failed"; recordButtonsDisabled = false; }
+    } finally { if (gen === pollGeneration && jobId === activeJobId && tok === actionGeneration) actionInFlightFor = null; }
   }
   async function copyLog() {
     try { await navigator.clipboard.writeText(jobLog); copyStatus = "Đã sao chép nhật ký job."; }
@@ -178,7 +220,7 @@
             {/each}
           </Select.Content>
         </Select.Root>
-        <p class="text-xs text-muted-foreground">Nếu site cần đăng nhập, phiên đăng nhập sẽ lưu thẳng vào profile này.</p>
+        <p class="text-xs text-muted-foreground">Nếu provider cần đăng nhập, phiên đăng nhập sẽ lưu thẳng vào profile này.</p>
       </div>
     {:else}
       <div class="flex flex-wrap items-center gap-3 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning">
@@ -187,9 +229,10 @@
         <Button variant="outline" size="sm" onclick={() => onManageProfiles?.()}><Stack /> Tạo profile</Button>
       </div>
     {/if}
-    <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
-      <div class="relative"><Globe class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" size={17} aria-hidden="true" /><Input class="h-10 pl-10 font-data" type="url" inputmode="url" placeholder="https://chat.example.com" aria-label="URL web chat" bind:value={siteUrl} onkeydown={(e) => e.key === "Enter" && startIntegrationJob()} /></div>
-      <Button class="h-10 px-4" disabled={integrateDisabled || !selectedProfileId} onclick={startIntegrationJob}>{#if integrateDisabled}<CircleNotch class="animate-spin" /> Đang bắt đầu{:else}<Browser /> Phân tích site{/if}</Button>
+    <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto]">
+      <div class="relative"><Globe class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" size={17} aria-hidden="true" /><Input class="h-10 pl-10 font-data" type="url" inputmode="url" placeholder="https://chat.example.com" aria-label="URL provider" bind:value={siteUrl} onkeydown={(e) => e.key === "Enter" && startIntegrationJob()} /></div>
+      <Button class="h-10 px-4" disabled={integrateDisabled || !selectedProfileId} onclick={startIntegrationJob}>{#if integrateDisabled}<CircleNotch class="animate-spin" /> Đang bắt đầu{:else}<Browser /> Phân tích Provider{/if}</Button>
+      <Button variant="outline" class="h-10 px-4" disabled={integrateDisabled || !selectedProfileId} onclick={startRecordJob}>Ghi thao tác</Button>
     </div>
     <label class="flex cursor-pointer items-center justify-between gap-4 rounded-lg border bg-muted/30 px-3 py-2.5 text-sm"><span><strong class="font-medium">Hiện browser khi test</strong><span class="block text-xs text-muted-foreground">Tắt headless để quan sát analyzer thao tác.</span></span><Switch bind:checked={headedMode} aria-label="Hiện browser khi test" /></label>
 
@@ -207,6 +250,12 @@
         <div class="flex flex-col gap-3 border-b bg-warning/5 p-3">
           <div class="flex items-start gap-2 text-sm text-warning"><Browser class="mt-0.5 shrink-0" size={17} aria-hidden="true" /><p>Một cửa sổ Chrome mới đã mở <strong>ngoài ứng dụng này</strong> — tìm cửa sổ đó trên taskbar, đăng nhập xong rồi quay lại đây và bấm "Đã đăng nhập".</p></div>
           <div class="flex flex-wrap gap-2"><Button disabled={loginButtonsDisabled} onclick={() => postJobAction("login-complete")}><Check /> Đã đăng nhập</Button><Button variant="outline" disabled={loginButtonsDisabled} onclick={() => postJobAction("cancel")}><X /> Hủy job</Button></div>
+        </div>
+      {/if}
+      {#if recordActionsVisible}
+        <div class="flex flex-col gap-3 border-b bg-primary/5 p-3">
+          <div class="flex items-start gap-2 text-sm text-primary"><Browser class="mt-0.5 shrink-0" size={17} aria-hidden="true" /><p>Chromium đang <strong>ghi thao tác</strong> — click/gõ/Enter trên trang như dùng thật. Log bên dưới hiện selector vừa bắt được. Xong thì bấm <strong>Hoàn tất</strong> để AI sinh recipe.</p></div>
+          <div class="flex flex-wrap gap-2"><Button disabled={recordButtonsDisabled} onclick={finishRecordJob}><Check /> Hoàn tất</Button><Button variant="outline" disabled={recordButtonsDisabled} onclick={() => postJobAction("cancel")}><X /> Hủy</Button></div>
         </div>
       {/if}
       <Collapsible.Root bind:open={logOpen}>

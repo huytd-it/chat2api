@@ -2,14 +2,18 @@ import { get, writable } from "svelte/store";
 import { apiKey, showToast } from "./stores";
 import {
   fetchAccounts,
+  fetchCombos,
   fetchDomains,
   fetchModels,
+  fetchOpenAIProviders,
   fetchOverview,
   fetchProfiles,
   fetchRecipes,
+  type ComboInfo,
   type DomainAccounts,
   type DomainInfo,
   type ModelInfo,
+  type OpenAIProviderInfo,
   type Overview,
   type ProfileInfo,
   type ProfileList,
@@ -116,11 +120,39 @@ export async function refreshDomains() {
   }
 }
 
+export const combos = writable<ComboInfo[]>([]);
+export const combosLoading = writable(false);
+
+export async function refreshCombos() {
+  combosLoading.set(true);
+  try {
+    combos.set(await fetchCombos(get(apiKey)));
+  } catch {
+    combos.set([]);
+  } finally {
+    combosLoading.set(false);
+  }
+}
+
+export const openaiProviders = writable<OpenAIProviderInfo[]>([]);
+export const openaiProvidersLoading = writable(false);
+
+export async function refreshOpenAIProviders() {
+  openaiProvidersLoading.set(true);
+  try {
+    openaiProviders.set(await fetchOpenAIProviders(get(apiKey)));
+  } catch {
+    openaiProviders.set([]);
+  } finally {
+    openaiProvidersLoading.set(false);
+  }
+}
+
 /** Mọi thứ trang Integrations hiển thị, nạp trong một lượt — chỉ dùng cho lần
  * tải đầu tiên; các thao tác đơn lẻ nên gọi refreshX() đúng phần bị ảnh hưởng
  * để tránh giật hình toàn trang (xem refreshAfterRecipeChange/Delete bên dưới). */
 export async function refreshIntegrations() {
-  await Promise.all([refreshRecipes(), refreshAccounts(), refreshProfiles(), refreshDomains()]);
+  await Promise.all([refreshRecipes(), refreshAccounts(), refreshProfiles(), refreshDomains(), refreshCombos(), refreshOpenAIProviders()]);
 }
 
 /** Sau reload/tạo mới một recipe: health và model có thể đổi. */
@@ -131,4 +163,8 @@ export async function refreshAfterRecipeChange() {
 /** Sau khi xóa một recipe: domain của nó có thể thành orphan, model mất theo. */
 export async function refreshAfterRecipeDelete() {
   await Promise.all([refreshRecipes(), refreshAccounts(), refreshDomains(), refreshModels()]);
+}
+
+export async function refreshAfterOpenAIChange() {
+  await Promise.all([refreshOpenAIProviders(), refreshModels()]);
 }

@@ -1,17 +1,23 @@
+SELECTOR_FN_JS = """function __c2aSel(el){
+  if(!el) return '';
+  if(el.id) return '#'+CSS.escape(el.id);
+  if(el.name) return el.tagName.toLowerCase()+'[name="'+el.name.replace(/"/g,'\\"')+'"]';
+  let s=el.tagName.toLowerCase();
+  if(el.parentElement){
+    const sibs=[...el.parentElement.children].filter(e=>e.tagName===el.tagName);
+    if(sibs.length>1) s+=':nth-of-type('+(sibs.indexOf(el)+1)+')';
+  }
+  return s;
+}"""
+
 SNAPSHOT_JS = """() => {
+  """ + SELECTOR_FN_JS + """
   const sel = 'input, textarea, button, [role=textbox], [role=button], [contenteditable=true]';
   const lines = [];
   for (const el of document.querySelectorAll(sel)) {
     const r = el.getBoundingClientRect();
     if (!r.width && !r.height) continue;
-    let s;
-    if (el.id) s = '#' + CSS.escape(el.id);
-    else if (el.name) s = el.tagName.toLowerCase() + '[name="' + el.name + '"]';
-    else {
-      s = el.tagName.toLowerCase();
-      const sibs = [...el.parentElement.children].filter(e => e.tagName === el.tagName);
-      if (sibs.length > 1) s += ':nth-of-type(' + (sibs.indexOf(el) + 1) + ')';
-    }
+    const s = __c2aSel(el);
     const label = (el.getAttribute('aria-label') || el.placeholder ||
                    (el.innerText || '')).trim().slice(0, 80);
     const role = el.getAttribute('role') || '';

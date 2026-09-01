@@ -21,6 +21,9 @@ class LoginSession:
     context: Any
     page: Any
     created_at: float
+    # trace thao tác cho phiên ghi (LoginSessionManager cũng phục vụ cho record)
+    trace: list[dict] | None = None
+    on_trace: Any | None = None
 
 
 async def _finish_cleanup(cleanup) -> None:
@@ -132,6 +135,108 @@ class LoginSessionManager:
             raise LoginSessionError("Unable to start login session") from error
         finally:
             await _finish_cleanup(self._remove_pending(job_id, current_task))
+
+    async def start_recording(self, job_id: str, slug: str, url: str, recipe_dir: Path,
+                            storage_state: Path | None = None,
+                            on_trace: Any | None = None) -> None:
+        """Mở headed browser cho phiên ghi thao tác.
+
+        Tương tự ``start`` nhưng gắn recorder JS (exposeBinding + initScript)
+        và giữ ``trace`` trong session. ``on_trace`` (nếu có) được gọi mỗi khi
+        ghi được một action — dùng để tỉa bớt/giản lược ở jobs nếu cần.
+        """
+        trace: list[dict] = []
+
+        async def trace_sink(ev: dict) -> None:
+            trace.append(ev)
+            if callable(on_trace):
+                try:
+                    res = on_trace(ev)
+                    if hasattr(res, "__await__"):
+                        await res
+                except Exception:
+                    pass
+
+        # Tái dùng toàn bộ khởi tạo của start, nhưng chen chỗ gắn recorder.
+        current_task = asyncio.current_task()
+        async with self._lock:
+            if self._closing:
+                raise LoginSessionError("Login session manager is closed")
+            if job_id in self._sessions or job_id in self._pending:
+                raise LoginSessionError(f"Login session already exists for job {job_id}")
+            self._pending[job_id] = current_task
+
+        browser = None
+        try:
+            playwright = await self._ensure_driver()
+            launch = asyncio.create_task(playwright.chromium.launch(headless=False))
+            try:
+                browser = await asyncio.shield(launch)
+            except asyncio.CancelledError:
+                try:
+                    browser = await launch
+                except Exception:
+                    pass
+                raise
+            state = str(storage_state) if storage_state and storage_state.exists() else None
+            context = await browser.new_context(storage_state=state)
+            page = await context.new_page()
+            # Gắn recorder TRƯỚC khi goto để bắt được click sớm nhất.
+            try:
+                from .agents.recorder import attach_recorder
+
+                await attach_recorder(page, trace_sink)
+                # Theo dõi chuyển trang cùng page (SPA history push / meta refresh ...)
+                def _nav(url_new: str) -> None:
+                    trace.append({"kind": "goto", "selector": "", "url": url_new,
+                                  "value": url_new, "tag": "", "label": ""})
+
+                async def _on_nav(frame):
+                    try:
+                        if frame == page.main_frame:
+                            _nav(frame.url)
+                            from .agents.recorder import RECORDER_JS
+
+                            try:
+                                await page.evaluate(RECORDER_JS)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                try:
+                    page.on("framenavigated", lambda f: asyncio.create_task(_on_nav(f)))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            session = LoginSession(
+                job_id=job_id, slug=slug, url=url, recipe_dir=Path(recipe_dir),
+                browser=browser, context=context, page=page, created_at=time.time(),
+                trace=trace, on_trace=trace_sink,
+            )
+            async with self._lock:
+                if self._closing:
+                    raise LoginSessionError("Login session manager is closed")
+                self._sessions[job_id] = session
+        except asyncio.CancelledError:
+            await _finish_cleanup(_close(browser, "close"))
+            raise
+        except Exception as error:
+            await _finish_cleanup(_close(browser, "close"))
+            if isinstance(error, LoginSessionError):
+                raise
+            raise LoginSessionError("Unable to start record session") from error
+        finally:
+            await _finish_cleanup(self._remove_pending(job_id, current_task))
+
+    async def trace_of(self, job_id: str) -> list[dict]:
+        async with self._lock:
+            s = self._sessions.get(job_id)
+            if s is None or s.trace is None:
+                return []
+            return list(s.trace)
 
     async def snapshot(self, job_id: str) -> dict:
         """Cookie + URL hiện tại của phiên đang mở, để tự dò domain (§6.1).

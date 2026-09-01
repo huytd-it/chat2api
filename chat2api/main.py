@@ -15,7 +15,7 @@ from .config import Config
 from .errors import OpenAIError
 from .providers.browser_recipe import TrialLimitExceeded
 from .router import ModelNotFound, Router
-from .schemas import ChatRequest, ImageGenerateRequest
+from .schemas import ChatRequest, ComboCreateRequest, ComboUpdateRequest, ImageGenerateRequest
 
 
 def _sse(cid: str, model: str, delta: str) -> str:
@@ -122,6 +122,13 @@ def merge_recipe(base: dict, patch: dict) -> dict:
         else:
             out[key] = value
     return out
+
+
+def llm_upstream_error(error) -> OpenAIError:
+    """Đổi `agents.llm.LlmError` (429 rate limit, 401 sai key, mạng chết…) thành
+    lỗi đọc được cho client — không để nó nổi lên thành 500 kèm traceback."""
+    status = getattr(error, "status", None)
+    return OpenAIError(status if status == 429 else 502, "llm_error", str(error))
 
 
 async def run_recipe_trial(cfg: Config, pool, recipe: dict, headed: bool) -> dict:
@@ -259,6 +266,7 @@ def create_app(cfg: Config) -> FastAPI:
             "X-Chat2api-Account-Label", "X-Chat2api-Profile-Id",
             "X-Chat2api-Profile-Name", "X-Chat2api-Target",
             "X-Chat2api-Conversation-Url", "X-Chat2api-Headed",
+            "X-Chat2api-Combo", "X-Chat2api-Combo-Member", "X-Chat2api-Combo-Strategy",
         ],
     )
     errors.register_error_handler(app)
@@ -319,11 +327,36 @@ def create_app(cfg: Config) -> FastAPI:
             raise OpenAIError(400, "model_not_supported",
                               f"Model '{body.model}' không hỗ trợ tạo ảnh (capability=chat)")
         from .providers.browser_recipe import BrowserRecipe as BR
+        from .providers.combo import ComboProvider as ComboPImg
         requested_session = sessions.normalize_session_id(
             request.headers.get("x-chat2api-session-id"))
+        # ---- Combo cho images ----
+        combo_info_img: dict | None = None
+        combo_member_id_img: str | None = None
+        combo_strategy_img: str | None = None
+        original_combo_provider_img = None
+        original_combo_local_img = None
+        if isinstance(provider, ComboPImg):
+            data = provider.get_combo(local)
+            if data is None or not data.get("members"):
+                raise OpenAIError(404, "model_not_found", f"Combo '{body.model}' không có member")
+            combo_strategy_img = data.get("strategy", "round_robin")
+            combo_info_img = data
+            original_combo_provider_img = provider
+            original_combo_local_img = local
+            if combo_strategy_img != "failover":
+                picked = await provider._pick_one(local, sticky_key=requested_session or "")
+                combo_member_id_img = picked["model_id"]
+                try:
+                    provider, local = rt.resolve(combo_member_id_img)
+                except ModelNotFound:
+                    raise OpenAIError(502, "upstream_error", f"Combo member '{combo_member_id_img}' không tồn tại")
         target_account_id = None
         raw_target = request.headers.get("x-chat2api-account-id", "").strip()
         if raw_target:
+            if isinstance(provider, ComboPImg):
+                raise OpenAIError(400, "target_unsupported",
+                                  "Combo failover không hỗ trợ ghim X-Chat2api-Account-Id")
             if not isinstance(provider, BR):
                 raise OpenAIError(400, "target_unsupported",
                                   "Chỉ browser recipe hỗ trợ chọn profile/account")
@@ -332,8 +365,9 @@ def create_app(cfg: Config) -> FastAPI:
             except (TypeError, ValueError):
                 raise OpenAIError(400, "invalid_target",
                                   f"X-Chat2api-Account-Id không phải số: {raw_target!r}")
+        is_combo_failover_img = isinstance(original_combo_provider_img, ComboPImg) and combo_strategy_img == "failover"
         assignment = None
-        if isinstance(provider, BR):
+        if not is_combo_failover_img and isinstance(provider, BR):
             try:
                 assignment = await provider.assign(
                     target_account_id, sticky_key=requested_session or "")
@@ -345,10 +379,12 @@ def create_app(cfg: Config) -> FastAPI:
         raw_headed = request.headers.get("x-chat2api-headed", "").strip().lower()
         headed = True if raw_headed == "true" else False if raw_headed == "false" else None
         # log session: prompt stored as messages list for reuse
+        recipe_slug_for_session_img = provider.slug if not isinstance(original_combo_provider_img, ComboPImg) else (
+            provider.slug if combo_strategy_img != "failover" else "combo")
         try:
             recording = await asyncio.to_thread(
                 sessions.begin,
-                requested_session, body.model, provider.slug,
+                requested_session, body.model, recipe_slug_for_session_img,
                 [{"role": "user", "content": body.prompt}], False,
                 request.headers.get("authorization", ""),
                 request.headers.get("user-agent", ""),
@@ -362,11 +398,17 @@ def create_app(cfg: Config) -> FastAPI:
                 assignment.release()
             raise
         if assignment is not None:
-            assignment.headed = provider.resolve_headed(headed, assignment.profile)
+            assignment.headed = provider.resolve_headed(headed, assignment.profile) if isinstance(provider, BR) else headed
         target_headers = _target_headers(recording.session_id, assignment)
+        if combo_info_img is not None:
+            target_headers["X-Chat2api-Combo"] = f"combo/{original_combo_local_img}"
+            target_headers["X-Chat2api-Combo-Strategy"] = combo_strategy_img or ""
+            if combo_member_id_img:
+                target_headers["X-Chat2api-Combo-Member"] = combo_member_id_img
         response.headers.update(target_headers)
         applog.log(
             f"images: model={body.model} n={body.n} size={body.size} session={recording.session_id[:8]}"
+            + (f" [combo:{original_combo_local_img}→{combo_member_id_img or combo_strategy_img}]" if combo_info_img else "")
             + (f" → {assignment.label}" if assignment and assignment.account_id else "")
             + (" (cửa sổ)" if assignment and assignment.headed else ""))
 
@@ -374,6 +416,14 @@ def create_app(cfg: Config) -> FastAPI:
             sent = {"n": 0}
             async with request.app.state.chat_gate.slot():
                 try:
+                    # Combo failover giữ provider là combo, delegate bên trong sẽ thử từng member
+                    if isinstance(original_combo_provider_img, ComboPImg) and combo_strategy_img == "failover":
+                        kwargs = {"headed": headed, "response_format": body.response_format,
+                                  "model_id": original_combo_local_img, "sticky_key": requested_session or ""}
+                        if assignment is not None:
+                            kwargs["assignment"] = assignment
+                        data = await original_combo_provider_img.generate_images(body.prompt, n=body.n, size=body.size, **kwargs)
+                        return data
                     kwargs = {"headed": headed, "response_format": body.response_format,
                               "model_id": local}
                     if assignment is not None:
@@ -386,7 +436,8 @@ def create_app(cfg: Config) -> FastAPI:
                         data = await provider.generate_images(body.prompt, n=body.n, size=body.size,
                                                               model_id=local,
                                                               response_format=body.response_format)
-                    rt.mark_success(provider.slug)
+                    if not isinstance(provider, ComboPImg):
+                        rt.mark_success(provider.slug)
                     return data
                 except TrialLimitExceeded as e:
                     applog.log(f"images: hết lượt dùng thử ({provider.slug}): {e}", "warn")
@@ -467,12 +518,46 @@ def create_app(cfg: Config) -> FastAPI:
         msgs = body.as_list()
         cid = "chatcmpl-" + uuid.uuid4().hex[:29]
         from .providers.browser_recipe import BrowserRecipe as BR
+        from .providers.combo import ComboProvider as ComboP
 
         requested_session = sessions.normalize_session_id(
             request.headers.get("x-chat2api-session-id"))
+        # ---- Combo: chọn member trước khi xử lý account/profile ----
+        combo_info: dict | None = None
+        combo_member_id: str | None = None
+        combo_strategy: str | None = None
+        original_combo_provider = None
+        original_combo_local = None
+        if isinstance(provider, ComboP):
+            combo_data = provider.get_combo(local)
+            if combo_data is None or not combo_data.get("members"):
+                raise OpenAIError(404, "model_not_found", f"Combo '{body.model}' không có member")
+            combo_strategy = combo_data.get("strategy", "round_robin")
+            combo_info = combo_data
+            original_combo_provider = provider
+            original_combo_local = local
+            if combo_strategy != "failover":
+                # pick một member cho lần này (round_robin/random/weighted/sticky)
+                picked = await provider._pick_one(local, sticky_key=requested_session or "")
+                combo_member_id = picked["model_id"]
+                try:
+                    provider, local = rt.resolve(combo_member_id)
+                except ModelNotFound:
+                    raise OpenAIError(502, "upstream_error",
+                                      f"Combo member '{combo_member_id}' không tồn tại")
+            else:
+                # failover: giữ nguyên combo provider, retry sẽ do ComboProvider.stream lo
+                # không gán assignment ở đây (để ComboProvider tự gán per-member)
+                pass
+
         target_account_id = None
         raw_target = request.headers.get("x-chat2api-account-id", "").strip()
         if raw_target:
+            # Combo non-failover đã unwrap thành underlying provider, nên check underlying
+            # Combo failover giữ nguyên ComboP thì không hỗ trợ ghim account trực tiếp
+            if isinstance(provider, ComboP):
+                raise OpenAIError(400, "target_unsupported",
+                                  "Combo failover không hỗ trợ ghim X-Chat2api-Account-Id, hãy để combo tự chọn")
             if not isinstance(provider, BR):
                 raise OpenAIError(400, "target_unsupported",
                                   "Chỉ browser recipe hỗ trợ chọn profile/account")
@@ -487,7 +572,9 @@ def create_app(cfg: Config) -> FastAPI:
         # chỗ hai request đến cùng lúc được tách ra hai account khác nhau — chọn
         # muộn hơn (bên trong stream) thì cả hai đã cùng nhìn thấy mọi account rảnh.
         assignment = None
-        if isinstance(provider, BR):
+        # Combo failover giữ assignment = None để ComboProvider tự xử per-member
+        is_combo_failover = isinstance(original_combo_provider, ComboP) and combo_strategy == "failover"
+        if not is_combo_failover and isinstance(provider, BR):
             try:
                 assignment = await provider.assign(
                     target_account_id, sticky_key=requested_session or "")
@@ -508,10 +595,13 @@ def create_app(cfg: Config) -> FastAPI:
         raw_headed = request.headers.get("x-chat2api-headed", "").strip().lower()
         headed = True if raw_headed == "true" else False if raw_headed == "false" else None
 
+        # Combo: giữ slug gốc cho session nhưng recipe_id tra theo underlying (nếu đã unwrap)
+        recipe_slug_for_session = provider.slug if not isinstance(original_combo_provider, ComboP) else (
+            provider.slug if combo_strategy != "failover" else "combo")
         try:
             recording = await asyncio.to_thread(
                 sessions.begin,
-                requested_session, body.model, provider.slug,
+                requested_session, body.model, recipe_slug_for_session,
                 msgs, body.stream, request.headers.get("authorization", ""),
                 request.headers.get("user-agent", ""),
                 getattr(request.state, "api_key_id", None),
@@ -526,11 +616,21 @@ def create_app(cfg: Config) -> FastAPI:
                 assignment.release()
             raise
         if assignment is not None:
-            assignment.headed = provider.resolve_headed(headed, assignment.profile)
+            # provider lúc này có thể là underlying (non-failover) hoặc BR gốc
+            assignment.headed = provider.resolve_headed(headed, assignment.profile) if isinstance(provider, BR) else headed
         target_headers = _target_headers(recording.session_id, assignment)
-        response.headers.update(target_headers)
+        # Header combo để client biết mình đang đi qua combo nào
+        if combo_info is not None:
+            target_headers["X-Chat2api-Combo"] = f"combo/{original_combo_local}"
+            target_headers["X-Chat2api-Combo-Strategy"] = combo_strategy or ""
+            if combo_member_id:
+                target_headers["X-Chat2api-Combo-Member"] = combo_member_id
+            response.headers.update(target_headers)
+        else:
+            response.headers.update(target_headers)
         applog.log(
             f"chat: model={body.model} stream={body.stream} session={recording.session_id[:8]}"
+            + (f" [combo:{original_combo_local}→{combo_member_id or combo_strategy}]" if combo_info else "")
             + (f" → {assignment.label}" if assignment and assignment.account_id else "")
             + (" (cửa sổ)" if assignment and assignment.headed else ""))
 
@@ -563,16 +663,24 @@ def create_app(cfg: Config) -> FastAPI:
 
         async def _run_provider(sent):
             try:
-                stream_kwargs = {"headed": headed} if isinstance(provider, BR) else {}
-                if assignment is not None:
-                    # Assignment đã mang sẵn account + profile + tab, nên không
-                    # truyền kèm target_account_id nữa (stream chỉ dùng nó khi
-                    # phải tự gán).
-                    stream_kwargs["assignment"] = assignment
+                # Combo failover cần sticky_key để sticky_session hoạt động
+                if isinstance(provider, ComboP):
+                    stream_kwargs: dict = {}
+                    if assignment is not None:
+                        stream_kwargs["assignment"] = assignment
+                    # headed vẫn cần cho underlying BR
+                    stream_kwargs["headed"] = headed
+                    stream_kwargs["sticky_key"] = requested_session or ""
+                else:
+                    stream_kwargs = {"headed": headed} if isinstance(provider, BR) else {}
+                    if assignment is not None:
+                        stream_kwargs["assignment"] = assignment
                 async for d in provider.stream(msgs, local, **stream_kwargs):
                     sent["n"] += 1
                     yield d
-                rt.mark_success(provider.slug)
+                # không mark failure/success cho combo ảo (chỉ đếm underlying sẽ tự mark nếu cần)
+                if not isinstance(provider, ComboP):
+                    rt.mark_success(provider.slug)
             except TrialLimitExceeded as e:
                 applog.log(f"chat: hết lượt dùng thử ({provider.slug}): {e}", "warn")
                 raise OpenAIError(403, "trial_limit_exceeded", str(e))
@@ -709,13 +817,17 @@ def create_app(cfg: Config) -> FastAPI:
 def register_admin(app: FastAPI, admin) -> None:
     import re
     import shutil
+    from pathlib import Path
 
     from .agents import llm
     from . import jobs, settings
     from .schemas import (AccountLoginRequest, AddAccountRequest, ApiKeyCreateRequest,
-                          IntegrateRequest, ProfileAccountRequest, ProfileCreateRequest,
-                           ProfileOpenRequest, ProfileUpdateRequest, RecipeManualSpec,
-                           RecipeModelDiscoveryRequest,
+                           ComboCreateRequest, ComboUpdateRequest, IntegrateRequest,
+                           OpenAIProviderCreateRequest, OpenAIProviderUpdateRequest,
+                           ProfileAccountRequest, ProfileCreateRequest,
+                           ProfileOpenRequest, ProfileUpdateRequest, RecipeAnalyzeRequest,
+                           RecipeManualSpec,
+                           RecipeModelDiscoveryRequest, RecipeReanalyzeRequest,
                            RecipeEditRequest, RecipeEditTestRequest, RecipeRenameRequest,
                            RecipeTestRequest, SaveAccountRequest,
                            SessionDeleteRequest, SessionForkRequest, SessionUpdateRequest,
@@ -892,6 +1004,46 @@ def register_admin(app: FastAPI, admin) -> None:
             raise OpenAIError(404, "not_found", "Job không tồn tại")
         except jobs.InvalidJobState:
             raise OpenAIError(409, "invalid_job_state", "Không thể hủy job ở trạng thái này")
+
+    @admin.post("/record")
+    async def record_start(body: "RecordRequest", request: Request):  # type: ignore[name-defined]
+        from .schemas import RecordRequest as _RR  # noqa: F401
+
+        _ = _RR  # keep import used
+        cfg = request.app.state.cfg
+        if not llm.configured(cfg):
+            raise OpenAIError(503, "agent_not_configured",
+                              "Đặt AGENT_LLM_BASE_URL, AGENT_LLM_API_KEY, AGENT_LLM_MODEL "
+                              "để dùng tính năng record.")
+        profile_row = await asyncio.to_thread(profiles.find, str(body.profile_id))
+        if profile_row is None:
+            raise OpenAIError(400, "invalid_profile", "Chọn một profile hợp lệ trước khi ghi thao tác.")
+        forced = (body.slug or "").strip() or None
+        if forced is not None and not re.fullmatch(r"[a-z0-9-]+", forced):
+            raise OpenAIError(400, "invalid_slug", "slug chỉ gồm [a-z0-9-]")
+        job_id = jobs.start_record(
+            body.url, cfg, request.app.state.pool,
+            router=request.app.state.router,
+            login_manager=request.app.state.login_manager,
+            publish_lock=request.app.state.recipe_publish_lock,
+            profile={"id": profile_row["id"], "name": profile_row["name"]},
+            forced_slug=forced,
+        )
+        applog.log(f"record: bắt đầu {body.url} (job={job_id}, profile={profile_row['name']}, slug={forced or '-'})")
+        return {"job_id": job_id}
+
+    @admin.post("/record/{job_id}/finish")
+    async def record_finish(job_id: str, request: Request):
+        try:
+            return await jobs.finish_record(
+                job_id, request.app.state.cfg, request.app.state.pool,
+                request.app.state.router, request.app.state.login_manager)
+        except jobs.JobNotFound:
+            raise OpenAIError(404, "not_found", "Job không tồn tại")
+        except jobs.InvalidJobState:
+            raise OpenAIError(409, "invalid_job_state", "Job không ở trạng thái ghi thao tác")
+        except jobs.ContextResetFailed:
+            raise OpenAIError(500, "context_reset_failed", "Không thể reset context sau khi ghi")
 
     @admin.get("/integrate/{job_id}/log")
     async def integrate_log(job_id: str):
@@ -1183,18 +1335,19 @@ def register_admin(app: FastAPI, admin) -> None:
         rt = request.app.state.router
         out = []
         for slug, provider in sorted(rt.providers.items()):
+            if slug == "combo":
+                continue
+            if not isinstance(provider, BR):
+                continue
             entry = {"slug": slug,
                     "models": [m.id.split("/", 1)[1] for m in provider.models()],
                     "unhealthy": rt.is_unhealthy(slug),
                     "type": type(provider).__name__}
-            if isinstance(provider, BR):
-                entry["accounts"] = provider.account_count
-                entry["account_names"] = provider.account_names
-                entry["trial"] = provider.trial_status
-                # Trang Integrations gộp account vào ngay trong hàng recipe, nên
-                # nó cần biết recipe này thuộc domain nào (§6).
-                entry["domain"] = provider.domain
-                entry["url"] = provider.url
+            entry["accounts"] = provider.account_count
+            entry["account_names"] = provider.account_names
+            entry["trial"] = provider.trial_status
+            entry["domain"] = provider.domain
+            entry["url"] = provider.url
             out.append(entry)
         return out
 
@@ -1241,6 +1394,67 @@ def register_admin(app: FastAPI, admin) -> None:
         return await run_recipe_trial(request.app.state.cfg, request.app.state.pool,
                                       recipe, body.headed)
 
+    @admin.post("/recipes/analyze")
+    async def analyze_recipe(body: RecipeAnalyzeRequest, request: Request):
+        """Phân tích URL bằng AI và trả về recipe chưa lưu — dùng để auto-fill
+        vào form chi tiết. Không ghi đĩa, không thử round-trip."""
+        from urllib.parse import urlparse
+
+        parsed = urlparse(body.url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise OpenAIError(400, "invalid_url", "URL không hợp lệ")
+        cfg = request.app.state.cfg
+        if not llm.configured(cfg):
+            raise OpenAIError(503, "agent_not_configured",
+                              "Đặt AGENT_LLM_BASE_URL, AGENT_LLM_API_KEY, AGENT_LLM_MODEL "
+                              "để dùng tính năng phân tích AI.")
+        storage_state = None
+        pool_profile = None
+        if body.profile_id is not None:
+            row = await asyncio.to_thread(profiles.find, str(body.profile_id))
+            if row is None:
+                raise OpenAIError(400, "invalid_profile", "Profile không tồn tại")
+            pool_profile = row
+            # Reuse profile storage nếu đã có account
+            try:
+                from pathlib import Path as _P
+                accs = await asyncio.to_thread(profiles.accounts_of, row["id"])
+                if accs:
+                    domain = __import__("chat2api.accounts", fromlist=["domain_of"]).domain_of(body.url)
+                    cand = next((a for a in accs if (a.get("host") or "").lower() == domain.lower()), None)
+                    if cand:
+                        p = _P(str(cand.get("storage_state") or ""))
+                        if p.exists():
+                            storage_state = p
+            except Exception:
+                pass
+        from .agents.analyzer import analyze_preview
+
+        log_lines: list[str] = []
+
+        def _log(line: str) -> None:
+            log_lines.append(line)
+
+        key = f"__analyze_preview__{uuid.uuid4().hex[:8]}"
+        try:
+            result = await analyze_preview(
+                body.url, request.app.state.pool, cfg, _log,
+                storage_state=storage_state, analyze_key=key, headed=body.headed)
+        except llm.LlmError as error:
+            raise llm_upstream_error(error) from error
+        finally:
+            try:
+                await request.app.state.pool.drop(key)
+            except Exception:
+                pass
+        if result.get("status") == "login_required":
+            return {"status": "login_required", "hint": result.get("hint", ""), "log": log_lines}
+        if result.get("status") != "ok":
+            raise OpenAIError(500, "analyze_failed",
+                              result.get("error") or result.get("hint") or "Phân tích thất bại")
+        return {"status": "ok", "recipe": result["recipe"], "notes": result.get("notes", ""),
+                "log": log_lines, "slug": result.get("slug", "")}
+
     @admin.post("/recipes/discover-models")
     async def discover_recipe_models(body: RecipeModelDiscoveryRequest, request: Request):
         """Chủ động mở trang và dò model controls; không chạy trong tải trang nền."""
@@ -1284,6 +1498,8 @@ def register_admin(app: FastAPI, admin) -> None:
                     page, request.app.state.cfg, before_action=before_action)
                 method = "agent" if found else method
             return {"models": found, "method": method}
+        except llm.LlmError as error:
+            raise llm_upstream_error(error) from error
         finally:
             await page.close()
             await request.app.state.pool.drop(key)
@@ -1440,6 +1656,61 @@ def register_admin(app: FastAPI, admin) -> None:
         return await run_recipe_trial(request.app.state.cfg, request.app.state.pool,
                                       data, body.headed)
 
+    @admin.post("/recipes/{slug}/reanalyze")
+    async def reanalyze_recipe(slug: str, body: RecipeReanalyzeRequest, request: Request):
+        """Phân tích lại recipe đã có bằng AI — giữ nguyên slug, ghi đè YAML."""
+        import yaml as yaml_mod
+
+        from .agents import llm
+
+        if not re.fullmatch(r"[a-z0-9-]+", slug or "") or slug in {"gemini", "openai"}:
+            raise OpenAIError(400, "invalid_slug", "Recipe này không phân tích lại được")
+        recipe_file = _recipe_file(request, slug)
+        cfg = request.app.state.cfg
+        if not llm.configured(cfg):
+            raise OpenAIError(503, "agent_not_configured",
+                              "Đặt AGENT_LLM_BASE_URL, AGENT_LLM_API_KEY, AGENT_LLM_MODEL "
+                              "để dùng tính năng phân tích lại.")
+        # URL: ưu tiên body.url, fallback đọc từ recipe.yaml hiện tại
+        url = (body.url or "").strip()
+        if not url:
+            try:
+                data = yaml_mod.safe_load(recipe_file.read_text(encoding="utf-8")) or {}
+                url = str(data.get("url") or "").strip()
+            except Exception:
+                url = ""
+        if not url:
+            raise OpenAIError(400, "missing_url", "Không tìm thấy URL của recipe để phân tích lại")
+        try:
+            parsed = __import__("urllib.parse", fromlist=["urlparse"]).urlparse(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError
+        except Exception:
+            raise OpenAIError(400, "invalid_url", "URL không hợp lệ")
+        profile_row = None
+        if body.profile_id is not None:
+            profile_row = await asyncio.to_thread(profiles.find, str(body.profile_id))
+            if profile_row is None:
+                raise OpenAIError(400, "invalid_profile",
+                                  "Profile không tồn tại")
+        else:
+            # Không chọn profile → vẫn cho chạy nhưng không gắn đăng nhập vào profile
+            # (dùng thử ẩn danh hoặc giữ nguyên state cũ).
+            profile_row = None
+        from . import jobs as jobs_mod
+
+        job_id = jobs_mod.start_reanalyze(
+            slug, url, cfg, request.app.state.pool,
+            router=request.app.state.router,
+            login_manager=request.app.state.login_manager,
+            publish_lock=request.app.state.recipe_publish_lock,
+            headed=body.headed,
+            profile={"id": profile_row["id"], "name": profile_row["name"]} if profile_row else None,
+        )
+        profile_label = profile_row["name"] if profile_row else "không gắn profile"
+        applog.log(f"reanalyze: {slug} -> {url} (job={job_id}, headed={body.headed}, profile={profile_label})")
+        return {"job_id": job_id, "slug": slug, "url": url}
+
     def _browser_recipe_or_404(request: Request, slug: str):
         from .providers.browser_recipe import BrowserRecipe as BR
 
@@ -1456,6 +1727,301 @@ def register_admin(app: FastAPI, admin) -> None:
         closed = await provider.close_browser()
         applog.log(f"browser: đóng thủ công {slug} ({closed} context)")
         return {"ok": True, "closed": closed}
+
+    # ------------------------------------------------------------- combos
+
+    @admin.get("/combos")
+    async def combo_list():
+        items = await asyncio.to_thread(__import__("chat2api.combos", fromlist=["list_combos"]).list_combos, True)
+        return items
+
+    @admin.get("/combos/{slug}")
+    async def combo_detail(slug: str):
+        item = await asyncio.to_thread(__import__("chat2api.combos", fromlist=["get_combo"]).get_combo, slug)
+        if item is None:
+            raise OpenAIError(404, "not_found", f"Combo '{slug}' không tồn tại")
+        return item
+
+    @admin.post("/combos")
+    async def combo_create(body: ComboCreateRequest, request: Request):
+        from chat2api import combos as combos_mod
+        # kiểm tra member model có tồn tại không (cảnh báo mềm: chỉ log, không chặn nếu do lộn thứ tự tạo)
+        available = {m.id for m in request.app.state.router.all_models()}
+        # cho phép combo trỏ tới model chưa tồn tại? không, báo lỗi rõ ràng
+        missing = [m.model_id for m in body.members if m.model_id not in available]
+        if missing:
+            raise OpenAIError(400, "invalid_combo_member", f"Member không tồn tại: {', '.join(missing)}")
+        try:
+            item = await asyncio.to_thread(combos_mod.create_combo, body.model_dump())
+        except ValueError as e:
+            raise OpenAIError(400, "invalid_combo", str(e))
+        except RuntimeError as e:
+            raise OpenAIError(503, "store_unavailable", str(e))
+        request.app.state.router._ensure_combo_provider()
+        applog.log(f"combo: tạo '{item['slug']}' ({item['strategy']}) với {len(item['members'])} member")
+        return item
+
+    @admin.put("/combos/{slug}")
+    async def combo_update(slug: str, body: ComboUpdateRequest, request: Request):
+        from chat2api import combos as combos_mod
+        data = body.model_dump(exclude_none=True)
+        # map display_name None -> keep
+        if "members" in data and data["members"] is not None:
+            # validate members exist
+            available = {m.id for m in request.app.state.router.all_models()}
+            missing = [m["model_id"] for m in data["members"] if m["model_id"] not in available and m["model_id"] != f"combo/{slug}"]
+            if missing:
+                raise OpenAIError(400, "invalid_combo_member", f"Member không tồn tại: {', '.join(missing)}")
+            # tránh tự trỏ vòng
+            if any(m["model_id"] == f"combo/{slug}" for m in data["members"]):
+                raise OpenAIError(400, "invalid_combo", "Combo không được chứa chính nó")
+        try:
+            item = await asyncio.to_thread(combos_mod.update_combo, slug, data)
+        except ValueError as e:
+            raise OpenAIError(400, "invalid_combo", str(e))
+        if item is None:
+            raise OpenAIError(404, "not_found", f"Combo '{slug}' không tồn tại")
+        request.app.state.router._ensure_combo_provider()
+        applog.log(f"combo: cập nhật '{slug}'")
+        return item
+
+    @admin.delete("/combos/{slug}")
+    async def combo_delete(slug: str, request: Request):
+        from chat2api import combos as combos_mod
+        ok = await asyncio.to_thread(combos_mod.delete_combo, slug)
+        if not ok:
+            raise OpenAIError(404, "not_found", f"Combo '{slug}' không tồn tại")
+        request.app.state.router._ensure_combo_provider()
+        applog.log(f"combo: xóa '{slug}'", "warn")
+        return {"ok": True}
+
+    # ------------------------------------------------------------- OpenAI providers (pass-through)
+
+    def _openai_dir(cfg):
+        return cfg.recipes_dir / "openai"
+
+    def _openai_file(cfg, slug: str):
+        return _openai_dir(cfg) / f"{slug}.yaml"
+
+    def _load_openai_config(path: Path) -> dict | None:
+        import yaml as _yaml
+        if not path.exists():
+            return None
+        try:
+            data = _yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            if not isinstance(data, dict):
+                return None
+            return data
+        except Exception:
+            return None
+
+    def _validate_openai_payload(data: dict, is_update: bool = False) -> tuple[dict, list[str]]:
+        errs: list[str] = []
+        clean: dict = {}
+        if not is_update or "slug" in data:
+            slug = str(data.get("slug") or "").strip().lower()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug) or slug in {"gemini", "openai", "combo"}:
+                errs.append("Slug chỉ gồm chữ thường, số và dấu -, không trùng tên hệ thống")
+            else:
+                clean["slug"] = slug
+        if "base_url" in data or not is_update:
+            base_url = str(data.get("base_url") or "").strip()
+            if not base_url:
+                errs.append("base_url không được rỗng")
+            else:
+                from urllib.parse import urlparse as _urlparse
+                parsed = _urlparse(base_url)
+                if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                    errs.append("base_url phải là http/https URL hợp lệ")
+                else:
+                    clean["base_url"] = base_url.rstrip("/")
+        if "api_key" in data and data.get("api_key") is not None:
+            # allow empty to keep existing
+            clean["api_key"] = str(data.get("api_key") or "").strip()
+        if "api_key_env" in data and data.get("api_key_env") is not None:
+            clean["api_key_env"] = str(data.get("api_key_env") or "").strip()
+        if "models" in data or not is_update:
+            models = data.get("models")
+            if not isinstance(models, list) or not models:
+                errs.append("models phải là danh sách không rỗng")
+            else:
+                clean_models = []
+                seen = set()
+                for idx, m in enumerate(models):
+                    if isinstance(m, str):
+                        mid = m.strip()
+                        cap = "chat"
+                    elif isinstance(m, dict):
+                        mid = str(m.get("id") or "").strip()
+                        cap = str(m.get("capability") or "chat").strip().lower()
+                        if cap not in {"chat", "image", "both"}:
+                            cap = "chat"
+                    else:
+                        errs.append(f"models[{idx}] không hợp lệ")
+                        continue
+                    if not mid:
+                        errs.append(f"models[{idx}].id không được rỗng")
+                        continue
+                    if not re.fullmatch(r"[A-Za-z0-9._-]+", mid):
+                        errs.append(f"models[{idx}].id chỉ gồm chữ, số, ., _, -")
+                        continue
+                    if mid in seen:
+                        errs.append(f"models[{idx}].id trùng: {mid}")
+                        continue
+                    seen.add(mid)
+                    clean_models.append({"id": mid, "capability": cap} if cap != "chat" else {"id": mid})
+                if not errs:
+                    clean["models"] = clean_models
+        if "stream" in data:
+            clean["stream"] = bool(data.get("stream"))
+        return clean, errs
+
+    @admin.get("/openai")
+    async def openai_list(request: Request):
+        import yaml as _yaml
+        cfg = request.app.state.cfg
+        odir = _openai_dir(cfg)
+        if not odir.exists():
+            return []
+        out = []
+        for yml in sorted(odir.glob("*.yaml")):
+            cfg_data = _load_openai_config(yml)
+            if not cfg_data:
+                continue
+            slug = cfg_data.get("slug") or yml.stem
+            # mask api_key
+            has_key = bool(cfg_data.get("api_key") or cfg_data.get("api_key_env"))
+            models = cfg_data.get("models") or []
+            # normalize models for frontend
+            norm_models = []
+            for m in models:
+                if isinstance(m, str):
+                    norm_models.append({"id": m, "capability": "chat"})
+                elif isinstance(m, dict):
+                    norm_models.append({"id": m.get("id"), "capability": m.get("capability", "chat")})
+            provider = request.app.state.router.providers.get(slug)
+            ready = False
+            if provider is not None:
+                try:
+                    ready = any(mi.ready for mi in provider.models())
+                except Exception:
+                    ready = bool(has_key)
+            out.append({
+                "slug": slug,
+                "base_url": cfg_data.get("base_url", ""),
+                "has_key": has_key,
+                "api_key_env": cfg_data.get("api_key_env", ""),
+                "models": norm_models,
+                "stream": bool(cfg_data.get("stream", True)),
+                "ready": ready,
+                "type": "openai",
+            })
+        return out
+
+    @admin.get("/openai/{slug}")
+    async def openai_detail(slug: str, request: Request):
+        cfg = request.app.state.cfg
+        path = _openai_file(cfg, slug)
+        data = _load_openai_config(path)
+        if data is None:
+            raise OpenAIError(404, "not_found", f"OpenAI provider '{slug}' không tồn tại")
+        # include yaml text for advanced edit
+        import yaml as _yaml
+        yaml_text = path.read_text(encoding="utf-8") if path.exists() else ""
+        # mask api_key in data
+        has_key = bool(data.get("api_key"))
+        masked = dict(data)
+        if has_key:
+            masked["api_key"] = "***"
+            masked["has_key"] = True
+        else:
+            masked["has_key"] = bool(data.get("api_key_env"))
+        masked["yaml"] = yaml_text
+        return masked
+
+    @admin.post("/openai")
+    async def openai_create(body: OpenAIProviderCreateRequest, request: Request):
+        cfg = request.app.state.cfg
+        payload = body.model_dump(exclude_none=True)
+        clean, errs = _validate_openai_payload(payload, is_update=False)
+        if errs:
+            raise OpenAIError(400, "invalid_openai", "; ".join(errs))
+        slug = clean["slug"]
+        path = _openai_file(cfg, slug)
+        if path.exists() or slug in request.app.state.router.providers:
+            raise OpenAIError(409, "slug_taken", f"Slug '{slug}' đã tồn tại")
+        # Build yaml data
+        yaml_data = {
+            "slug": slug,
+            "base_url": clean["base_url"],
+            "models": clean["models"],
+            "stream": clean.get("stream", True),
+        }
+        if clean.get("api_key"):
+            yaml_data["api_key"] = clean["api_key"]
+        if clean.get("api_key_env"):
+            yaml_data["api_key_env"] = clean["api_key_env"]
+        if not yaml_data.get("api_key") and not yaml_data.get("api_key_env"):
+            # allow empty but warn: provider will be not ready
+            pass
+        async with request.app.state.recipe_publish_lock:
+            _openai_dir(cfg).mkdir(parents=True, exist_ok=True)
+            import yaml as _yaml
+            path.write_text(_yaml.safe_dump(yaml_data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            request.app.state.router.reload()
+        applog.log(f"openai: tạo provider '{slug}' -> {clean['base_url']}")
+        return {"ok": True, "slug": slug}
+
+    @admin.put("/openai/{slug}")
+    async def openai_update(slug: str, body: OpenAIProviderUpdateRequest, request: Request):
+        import yaml as _yaml
+        cfg = request.app.state.cfg
+        path = _openai_file(cfg, slug)
+        existing = _load_openai_config(path)
+        if existing is None:
+            raise OpenAIError(404, "not_found", f"OpenAI provider '{slug}' không tồn tại")
+        payload = body.model_dump(exclude_none=True)
+        # If api_key is "***" or empty, keep existing
+        if "api_key" in payload:
+            val = payload["api_key"]
+            if val == "***" or val == "":
+                payload.pop("api_key", None)
+        clean, errs = _validate_openai_payload(payload, is_update=True)
+        if errs:
+            raise OpenAIError(400, "invalid_openai", "; ".join(errs))
+        # merge
+        merged = dict(existing)
+        for k in ("base_url", "models", "stream", "api_key_env"):
+            if k in clean:
+                merged[k] = clean[k]
+        if "api_key" in clean and clean["api_key"]:
+            merged["api_key"] = clean["api_key"]
+        # re-validate full
+        _, full_errs = _validate_openai_payload(merged, is_update=False)
+        if full_errs:
+            raise OpenAIError(400, "invalid_openai", "; ".join(full_errs))
+        async with request.app.state.recipe_publish_lock:
+            path.write_text(_yaml.safe_dump(merged, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            request.app.state.router.reload()
+        applog.log(f"openai: cập nhật '{slug}'")
+        return {"ok": True, "slug": slug}
+
+    @admin.delete("/openai/{slug}")
+    async def openai_delete(slug: str, request: Request):
+        cfg = request.app.state.cfg
+        path = _openai_file(cfg, slug)
+        if not path.exists():
+            raise OpenAIError(404, "not_found", f"OpenAI provider '{slug}' không tồn tại")
+        async with request.app.state.recipe_publish_lock:
+            path.unlink(missing_ok=True)
+            # clean empty dir
+            try:
+                _openai_dir(cfg).rmdir()
+            except Exception:
+                pass
+            request.app.state.router.reload()
+        applog.log(f"openai: xóa '{slug}'", "warn")
+        return {"ok": True}
 
     def _domain_usage(request: Request) -> dict[str, list[str]]:
         from .providers.browser_recipe import BrowserRecipe as BR
@@ -1739,13 +2305,15 @@ def register_admin(app: FastAPI, admin) -> None:
                     [dict(row) for row in distribution])
 
         routes, requests_last_minute, session_distribution = await asyncio.to_thread(recent_routes)
+        # combo là provider ảo, không tính vào số recipe cho dashboard
+        recipe_count = len([p for p in rt.providers.values() if p.slug != "combo"])
         return {
             "engine": cfg.browser_engine,
             "contexts": request.app.state.pool.size,
             "models": len(rt.all_models()),
-            "recipes": len(rt.providers),
+            "recipes": recipe_count,
             "browser_recipes": len(browser_recipes),
-            "unhealthy": sorted(s for s in rt.providers if rt.is_unhealthy(s)),
+            "unhealthy": sorted(s for s in rt.providers if rt.is_unhealthy(s) and s != "combo"),
             "domains": len(accounts.list_domains(cfg.recipes_dir)),
             "accounts": account_total,
             "open_browsers": sorted(p.slug for p in browser_recipes if p.browser_open),

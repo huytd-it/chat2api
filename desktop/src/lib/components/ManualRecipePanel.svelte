@@ -8,8 +8,8 @@
   import { Input } from "$lib/components/ui/input";
   import { Switch } from "$lib/components/ui/switch";
   import * as Card from "$lib/components/ui/card";
-  import * as Collapsible from "$lib/components/ui/collapsible";
-  import { CaretDown, Check, CircleNotch, Plus, Wrench } from "phosphor-svelte";
+  import * as Sheet from "$lib/components/ui/sheet";
+  import { Check, CircleNotch, Plus, Sliders, Wrench } from "phosphor-svelte";
 
   interface Props {
     /** Gọi một lần khi tạo recipe thành công, kèm slug mới. */
@@ -17,7 +17,7 @@
   }
   let { onSuccess }: Props = $props();
 
-  let panelOpen = $state(false);
+  let open = $state(false);
   let advancedOpen = $state(false);
 
   const form = new RecipeForm();
@@ -28,7 +28,6 @@
   let testing = $state(false);
   let testResult = $state<{ ok: boolean; reply: string; error?: string } | null>(null);
 
-  /** Slug do panel này giữ (màn sửa dùng slug có sẵn), nên nó tự kiểm. */
   function cleanSlug(): string | null {
     const next = slug.trim().toLowerCase();
     if (!/^[a-z0-9][a-z0-9-]*$/.test(next)) {
@@ -51,6 +50,15 @@
     testResult = null;
   }
 
+  function handleOpenChange(next: boolean) {
+    open = next;
+    if (!next) {
+      // giữ lại dữ liệu để người dùng không mất công nhập lại,
+      // chỉ xóa báo lỗi / kết quả test khi đóng
+      form.error = "";
+    }
+  }
+
   async function onTest() {
     const spec = buildSpec();
     if (!spec) { showToast(form.error); return; }
@@ -70,34 +78,53 @@
       await refreshAfterRecipeChange();
       onSuccess?.(spec.slug);
       resetForm();
-      panelOpen = false;
+      open = false;
     } catch (e) { form.error = (e as Error).message; showToast(form.error); }
     finally { creating = false; }
   }
 </script>
 
 <Card.Root class="overflow-hidden" aria-labelledby="manual-recipe-title">
-  <Collapsible.Root bind:open={panelOpen}>
-    <Collapsible.Trigger class="flex w-full items-center justify-between gap-3 border-b px-4 py-4 text-left hover:bg-muted/40 sm:px-6">
+  <Card.Header class="flex-row items-start justify-between gap-4">
+    <div class="flex items-start gap-3">
+      <div class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Wrench size={19} aria-hidden="true" /></div>
+      <div>
+        <Card.Title id="manual-recipe-title" class="text-base">Recipe workbench</Card.Title>
+        <Card.Description class="mt-1 max-w-2xl">Khai báo đầy đủ luồng browser, models, tín hiệu hoàn tất, session và account routing trong một panel riêng — không còn lỗi tràn form trong tab.</Card.Description>
+      </div>
+    </div>
+  </Card.Header>
+  <Card.Content class="flex flex-wrap items-center justify-between gap-3 border-t bg-muted/20 py-4">
+    <p class="text-xs leading-relaxed text-muted-foreground">Mở workbench dạng panel trượt — toàn bộ <span class="font-data">RecipeFields</span> hiển thị rộng rãi, có kiểm tra kết nối trước khi tạo.</p>
+    <Button onclick={() => (open = true)}><Sliders /> Tạo recipe thủ công</Button>
+  </Card.Content>
+  <Card.Footer class="border-t bg-muted/10 px-4 py-3 text-xs text-muted-foreground sm:px-6">
+    Slug + URL là bắt buộc. Mọi cấu hình khác có preset hợp lý — mở panel để tinh chỉnh.
+  </Card.Footer>
+</Card.Root>
+
+<Sheet.Root bind:open onOpenChange={handleOpenChange}>
+  <Sheet.Content side="right" class="w-full gap-0 p-0 sm:!max-w-[92vw] xl:!max-w-[88rem]">
+    <Sheet.Header class="border-b p-4 sm:p-5">
       <div class="flex items-start gap-3">
         <div class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Wrench size={19} aria-hidden="true" /></div>
-        <div>
-          <p id="manual-recipe-title" class="font-semibold">Recipe workbench</p>
-          <p class="text-sm text-muted-foreground">Khai báo đầy đủ luồng browser, models, tín hiệu hoàn tất, session và account routing.</p>
+        <div class="min-w-0">
+          <Sheet.Title class="font-data text-base">Tạo browser recipe</Sheet.Title>
+          <Sheet.Description>Mọi cấu hình nằm trên cùng một panel. Bắt đầu bằng slug và URL, sau đó mô tả chính xác thứ tự browser sẽ chọn model, nhập prompt, gửi và thu kết quả.</Sheet.Description>
         </div>
       </div>
-      <CaretDown class={`shrink-0 transition-transform ${panelOpen ? "" : "-rotate-90"}`} aria-hidden="true" />
-    </Collapsible.Trigger>
-    <Collapsible.Content>
-      <Card.Content class="grid gap-5 p-4 sm:p-6">
+    </Sheet.Header>
+
+    <div class="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
+      <div class="grid gap-5">
         {#if form.error}<div class="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive" role="alert">{form.error}</div>{/if}
 
         <div class="grid gap-3 rounded-xl border bg-muted/20 p-4 sm:grid-cols-[minmax(0,1fr)_minmax(16rem,.7fr)] sm:items-end">
           <div>
-            <h2 class="text-base font-semibold">Tạo browser recipe</h2>
-            <p class="mt-1 max-w-2xl text-xs leading-relaxed text-muted-foreground">Mọi cấu hình nằm trên cùng một màn. Bắt đầu bằng slug và URL, sau đó mô tả chính xác thứ tự browser sẽ chọn model, nhập prompt, gửi và thu kết quả.</p>
+            <h2 class="text-sm font-semibold">Định danh recipe</h2>
+            <p class="mt-1 text-xs leading-relaxed text-muted-foreground">Slug sẽ thành <span class="font-data">recipes/&lt;slug&gt;/recipe.yaml</span> và không đổi sau khi tạo.</p>
           </div>
-          <label for="mr-slug" class="grid gap-1.5 text-sm font-medium">Slug <span class="sr-only">bắt buộc</span><Input id="mr-slug" class="font-data" placeholder="my-chat-site" bind:value={slug} /></label>
+          <label for="mr-slug" class="grid gap-1.5 text-sm font-medium">Slug <span class="text-destructive">*</span><Input id="mr-slug" class="font-data" placeholder="my-chat-site" bind:value={slug} /></label>
         </div>
 
         <RecipeFields {form} idPrefix="mr" bind:advancedOpen />
@@ -108,15 +135,16 @@
             {:else}Kiểm tra thất bại{testResult.error ? `: ${testResult.error}` : testResult.reply ? ` — phản hồi: "${testResult.reply}"` : " — không nhận được phản hồi hợp lệ."}{/if}
           </div>
         {/if}
+      </div>
+    </div>
 
-        <div class="sticky bottom-0 -mx-4 flex flex-wrap items-center justify-between gap-3 border-t bg-card/95 px-4 py-4 backdrop-blur sm:-mx-6 sm:px-6">
-          <label class="flex items-center gap-2 text-sm"><Switch bind:checked={headedTest} aria-label="Hiện browser khi kiểm tra" /> Hiện browser khi kiểm tra</label>
-          <div class="flex flex-wrap gap-2">
-            <Button type="button" variant="outline" disabled={testing || creating} onclick={onTest}>{#if testing}<CircleNotch class="animate-spin" /> Đang kiểm tra{:else}<Check /> Kiểm tra kết nối{/if}</Button>
-            <Button type="button" disabled={creating || testing} onclick={onCreate}>{#if creating}<CircleNotch class="animate-spin" /> Đang tạo{:else}<Plus /> Tạo recipe{/if}</Button>
-          </div>
-        </div>
-      </Card.Content>
-    </Collapsible.Content>
-  </Collapsible.Root>
-</Card.Root>
+    <Sheet.Footer class="flex-row flex-wrap items-center justify-between gap-3 border-t p-4 sm:p-5">
+      <label class="flex items-center gap-2 text-sm"><Switch bind:checked={headedTest} aria-label="Hiện browser khi kiểm tra" /> Hiện browser khi kiểm tra</label>
+      <div class="flex flex-wrap gap-2">
+        <Button type="button" variant="ghost" size="sm" disabled={testing || creating} onclick={() => { resetForm(); form.error=""; testResult=null; }}>Đặt lại</Button>
+        <Button type="button" variant="outline" size="sm" disabled={testing || creating} onclick={onTest}>{#if testing}<CircleNotch class="animate-spin" /> Đang kiểm tra{:else}<Check /> Kiểm tra kết nối{/if}</Button>
+        <Button type="button" size="sm" disabled={creating || testing} onclick={onCreate}>{#if creating}<CircleNotch class="animate-spin" /> Đang tạo{:else}<Plus /> Tạo recipe{/if}</Button>
+      </div>
+    </Sheet.Footer>
+  </Sheet.Content>
+</Sheet.Root>

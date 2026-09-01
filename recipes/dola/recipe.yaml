@@ -1,0 +1,18 @@
+slug: dola
+url: https://www.dola.com/chat?channel=g
+prompt:
+  input_selector: .tiptap.ProseMirror
+  input_mode: fill
+  submit: Enter
+response:
+  last_message_selector: div[data-target-id="message-box-target-id"]
+  done_signal:
+    type: copy_button
+    scope: after
+    use_copy_result: true
+models:
+- id: dola-pro
+login:
+  strategy: round_robin
+  quota: 50
+keep_context: true
