@@ -14,7 +14,8 @@
   import { Switch } from "$lib/components/ui/switch";
   import { Textarea } from "$lib/components/ui/textarea";
   import JobStepTracker from "./JobStepTracker.svelte";
-  import { Browser, CaretDown, CaretRight, Check, CircleNotch, Copy, PencilSimple, Plus, Repeat, Sliders, Sparkle, Stack, Trash, WarningCircle, X, Globe, Plugs } from "phosphor-svelte";
+  import RecordSessionPanel from "./RecordSessionPanel.svelte";
+  import { Browser, CaretDown, CaretRight, Check, CircleNotch, Copy, PencilSimple, Plus, Record as RecordIcon, Repeat, Sliders, Sparkle, Stack, Trash, WarningCircle, X, Globe, Plugs } from "phosphor-svelte";
   import { get } from "svelte/store";
 
   interface Props {
@@ -168,6 +169,18 @@
       reanalyzeProfileId = "";
     }
   });
+  // ---- Ghi thao tác thật (record → AI sao chép selector) ----
+  let recordSlug = $state<string | null>(null);
+  let recordUrl = $state("");
+  let recordProfileId = $state<string>("");
+  const recordProfileName = $derived($profiles.find((p) => String(p.id) === recordProfileId)?.name ?? "");
+  function openRecord(slug: string, url: string) {
+    recordSlug = slug;
+    recordUrl = url;
+    const stillValid = recordProfileId && $profiles.some((p) => String(p.id) === recordProfileId);
+    if (!stillValid) recordProfileId = $profiles[0] ? String($profiles[0].id) : "";
+  }
+
   async function copyReanalyzeLog() {
     try { await navigator.clipboard.writeText(reanalyzeLog); showToast("Đã sao chép log"); }
     catch { showToast("Không thể truy cập clipboard"); }
@@ -313,7 +326,7 @@
                   <Button type="button" variant="ghost" size="sm" disabled={renameBusy} onclick={cancelRename}><X /> Hủy</Button>
                 </form>
               {:else}
-                <div class="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => onReload(rec.slug)}><Repeat class={busySlug === rec.slug ? "animate-spin" : ""} /> Reload</Button>{#if isBrowser}<Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => openReanalyze(rec.slug)}><Sparkle /> Phân tích lại bằng AI</Button><Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => (editingSlug = rec.slug)}><Sliders /> Chỉnh sửa</Button>{/if}<Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => startRename(rec.slug)}><PencilSimple /> Đổi tên</Button>{#if isBrowser}<Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => onCloseBrowser(rec.slug)}><X /> Đóng browser</Button>{/if}<Button variant="destructive" size="sm" disabled={busySlug === rec.slug} onclick={() => (deleteRecipeTarget = rec.slug)}><Trash /> Xóa</Button></div>
+                <div class="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => onReload(rec.slug)}><Repeat class={busySlug === rec.slug ? "animate-spin" : ""} /> Reload</Button>{#if isBrowser}<Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => openReanalyze(rec.slug)}><Sparkle /> Phân tích lại</Button><Button variant="outline" size="sm" disabled={busySlug === rec.slug} title="Ghi thao tác thật để sửa selector hỏng" onclick={() => openRecord(rec.slug, rec.url || (rec.domain ? `https://${rec.domain}` : ""))}><RecordIcon /> Ghi thao tác</Button><Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => (editingSlug = rec.slug)}><Sliders /> Chỉnh sửa</Button>{/if}<Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => startRename(rec.slug)}><PencilSimple /> Đổi tên</Button>{#if isBrowser}<Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => onCloseBrowser(rec.slug)}><X /> Đóng browser</Button>{/if}<Button variant="destructive" size="sm" disabled={busySlug === rec.slug} onclick={() => (deleteRecipeTarget = rec.slug)}><Trash /> Xóa</Button></div>
               {/if}
               {#if isBrowser}
                 <div class="border-t pt-4">
@@ -440,6 +453,41 @@
       <Button variant="outline" onclick={()=>showOpenAIDialog=false}>Hủy</Button>
       <Button onclick={submitOpenAI} disabled={oaBusy}>{#if oaBusy}<CircleNotch class="animate-spin"/>{:else}<Check/>{/if} {editingOpenAI ? "Lưu" : "Tạo"}</Button>
     </Dialog.Footer>
+  </Dialog.Content>
+</Dialog.Root>
+
+<!-- Dialog Ghi thao tác thật (ghi đè recipe đang có) -->
+<Dialog.Root open={recordSlug !== null} onOpenChange={(open) => { if (!open) recordSlug = null; }}>
+  <Dialog.Content class="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+    <Dialog.Header>
+      <Dialog.Title class="flex items-center gap-2"><RecordIcon size={18} /> Ghi thao tác cho {recordSlug}</Dialog.Title>
+      <Dialog.Description>Bạn thao tác thật trên trang; AI sao chép đúng các selector bị tác động để ghi đè recipe.yaml (giữ nguyên slug), rồi tự chạy thử.</Dialog.Description>
+    </Dialog.Header>
+    <div class="grid gap-4 py-2">
+      <div class="grid gap-1.5">
+        <label for="record-url" class="text-sm font-medium">URL trang chat</label>
+        <Input id="record-url" class="h-9 font-data" bind:value={recordUrl} placeholder="https://chat.example.com" />
+      </div>
+      <div class="grid gap-1.5">
+        <label for="record-profile" class="text-sm font-medium">Profile <span class="text-destructive">*</span></label>
+        <Select.Root type="single" bind:value={recordProfileId}>
+          <Select.Trigger id="record-profile" class="h-9 w-full">{recordProfileName || "Chọn profile…"}</Select.Trigger>
+          <Select.Content>
+            {#each $profiles as p (p.id)}<Select.Item value={String(p.id)} label={p.name}>{p.name}</Select.Item>{/each}
+          </Select.Content>
+        </Select.Root>
+        <p class="text-xs text-muted-foreground">Phiên ghi chạy trong profile này — đăng nhập giữa chừng cũng được lưu lại.</p>
+      </div>
+      {#key recordSlug}
+        <RecordSessionPanel
+          url={recordUrl}
+          profileId={recordProfileId ? Number(recordProfileId) : null}
+          slug={recordSlug}
+          label="Bắt đầu ghi"
+          disabled={!recordUrl.trim() || !recordProfileId}
+        />
+      {/key}
+    </div>
   </Dialog.Content>
 </Dialog.Root>
 

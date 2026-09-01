@@ -5,13 +5,14 @@
   import { refreshAfterRecipeChange } from "../sync";
   import { profiles } from "../sync";
   import RecipeFields from "./RecipeFields.svelte";
+  import RecordSessionPanel from "./RecordSessionPanel.svelte";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Switch } from "$lib/components/ui/switch";
   import * as Card from "$lib/components/ui/card";
   import * as Select from "$lib/components/ui/select";
   import * as Collapsible from "$lib/components/ui/collapsible";
-  import { CaretDown, Check, CircleNotch, Copy, Plus, Sliders, Sparkle, Stack, WarningCircle, Wrench } from "phosphor-svelte";
+  import { CaretDown, Check, CircleNotch, Copy, Plus, Record as RecordIcon, Sliders, Sparkle, Stack, WarningCircle, Wrench } from "phosphor-svelte";
 
   interface Props {
     onSuccess?: (slug: string) => void;
@@ -26,16 +27,15 @@
   let selectedProfileId = $state("");
   const selectedProfileName = $derived($profiles.find((p) => String(p.id) === selectedProfileId)?.name ?? "");
 
-  // Giữ lựa chọn hợp lệ khi danh sách profiles thay đổi (ví dụ sau khi tạo/xóa profile).
-  // Nếu profile đã chọn không còn tồn tại thì quay về "Không dùng — ẩn danh".
+  let headedAnalyze = $state(false);
+  // rcp-profile: giữ lựa chọn khi danh sách profiles đổi (tạo/xóa).
+  // Nếu profile đã chọn bị xóa thì về "Không dùng — ẩn danh", không tự nhảy sang profile khác.
   $effect(() => {
     if (!selectedProfileId) return;
     if ($profiles.length && !$profiles.some((p) => String(p.id) === selectedProfileId)) {
       selectedProfileId = "";
     }
   });
-
-  let headedAnalyze = $state(false);
   let headedTest = $state(false);
   let analyzing = $state(false);
   let creating = $state(false);
@@ -188,6 +188,23 @@
       <Button class="shrink-0" disabled={analyzing || !form.url.trim()} onclick={onAnalyze}>
         {#if analyzing}<CircleNotch class="animate-spin" /> Đang phân tích{:else}<Sparkle /> Phân tích bằng AI{/if}
       </Button>
+    </div>
+
+    <!-- Ghi thao tác thật: AI sao chép selector bị tác động -->
+    <div class="grid gap-3 rounded-xl border border-primary/15 bg-primary/5 p-3">
+      <div class="min-w-0">
+        <div class="flex items-center gap-2 text-sm font-semibold"><RecordIcon size={16} class="text-primary" aria-hidden="true" /> Ghi thao tác thật</div>
+        <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
+          Khi AI đoán sai DOM: nhập URL ở <span class="font-medium text-foreground">Trang đích</span>, chọn profile bên trên rồi bấm ghi — một cửa sổ Chromium mở ra, bạn gõ prompt / gửi / bấm Copy như dùng thật. AI sao chép đúng các selector bị tác động để sinh recipe và tự chạy thử.
+          {#if !selectedProfileId}<span class="font-medium text-warning"> Cần chọn profile trước.</span>{/if}
+        </p>
+      </div>
+      <RecordSessionPanel
+        url={form.url}
+        profileId={selectedProfileId ? Number(selectedProfileId) : null}
+        disabled={!form.url.trim() || !selectedProfileId || analyzing}
+        onSuccess={(s) => { if (s) onSuccess?.(s); }}
+      />
     </div>
 
     {#if form.error}<div class="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive" role="alert">{form.error}</div>{/if}

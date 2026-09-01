@@ -14,7 +14,7 @@ LOGIN_TIMEOUT_SECONDS = 600
 RECORD_TIMEOUT_SECONDS = 1800
 MAX_LOGIN_ATTEMPTS = 2
 TERMINAL_STATUSES = {"ok", "failed", "cancelled", "login_timeout", "record_timeout"}
-CANCELLABLE_STATUSES = {"running", "waiting_login", "resuming", "recording"}
+CANCELLABLE_STATUSES = {"running", "waiting_login", "resuming", "recording", "resuming_record"}
 JOBS: dict[str, dict] = {}
 
 
@@ -646,11 +646,17 @@ async def cancel_job(job_id: str, login_manager) -> dict:
     async with job["lock"]:
         if job["status"] == "cancelled":
             return {"ok": True, "status": "cancelled"}
-        if (job.get("login_timeout_claimed", False) or job.get("cancel_claimed", False)
+        if (job.get("login_timeout_claimed", False) or job.get("record_timeout_claimed", False)
+                or job.get("cancel_claimed", False)
                 or job["status"] not in CANCELLABLE_STATUSES):
             raise InvalidJobState
         job["cancel_claimed"] = True
         _cancel_timeout(job)
+        # Với phiên ghi: hủy cả timer riêng của record nếu còn chạy.
+        t = job.get("timeout_task")
+        if t is not None and not t.done() and job["status"] in ("recording", "resuming_record"):
+            t.cancel()
+            job["timeout_task"] = None
         task = job.get("task")
     return await _critical(_cancel_job(job, login_manager, task))
 
@@ -669,13 +675,16 @@ async def _finish_shutdown(login_manager, waiting_ids, tasks) -> None:
 async def shutdown(login_manager) -> None:
     current = asyncio.current_task()
     tasks = set()
-    waiting_ids = []
+    waiting_ids: list[str] = []
+    recording_ids: list[str] = []
     for job in list(JOBS.values()):
         async with job["lock"]:
             if job["status"] in TERMINAL_STATUSES:
                 continue
             if job["status"] == "waiting_login":
                 waiting_ids.append(job["id"])
+            elif job["status"] in ("recording", "resuming_record"):
+                recording_ids.append(job["id"])
             job["status"] = "cancelled"
             _save(job)
             for key in ("task", "timeout_task"):
@@ -684,7 +693,9 @@ async def shutdown(login_manager) -> None:
                     task.cancel()
                     tasks.add(task)
                 job[key] = None
-    await _critical(_finish_shutdown(login_manager, waiting_ids, tasks))
+    # Dọn cả browser login lẫn browser ghi — cùng LoginSessionManager.
+    all_ids = waiting_ids + recording_ids
+    await _critical(_finish_shutdown(login_manager, all_ids, tasks))
 
 
 async def get(job_id: str) -> dict | None:

@@ -826,7 +826,7 @@ def register_admin(app: FastAPI, admin) -> None:
                            OpenAIProviderCreateRequest, OpenAIProviderUpdateRequest,
                            ProfileAccountRequest, ProfileCreateRequest,
                            ProfileOpenRequest, ProfileUpdateRequest, RecipeAnalyzeRequest,
-                           RecipeManualSpec,
+                           RecipeManualSpec, RecordRequest,
                            RecipeModelDiscoveryRequest, RecipeReanalyzeRequest,
                            RecipeEditRequest, RecipeEditTestRequest, RecipeRenameRequest,
                            RecipeTestRequest, SaveAccountRequest,
@@ -1006,10 +1006,7 @@ def register_admin(app: FastAPI, admin) -> None:
             raise OpenAIError(409, "invalid_job_state", "Không thể hủy job ở trạng thái này")
 
     @admin.post("/record")
-    async def record_start(body: "RecordRequest", request: Request):  # type: ignore[name-defined]
-        from .schemas import RecordRequest as _RR  # noqa: F401
-
-        _ = _RR  # keep import used
+    async def record_start(body: RecordRequest, request: Request):
         cfg = request.app.state.cfg
         if not llm.configured(cfg):
             raise OpenAIError(503, "agent_not_configured",
