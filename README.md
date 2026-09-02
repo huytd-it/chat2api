@@ -28,6 +28,7 @@
 - **Điều phối song song:** phân request qua nhiều account/profile, giới hạn slot và xếp hàng khi quá tải.
 - **Đăng nhập dùng chung theo domain:** một phiên đăng nhập có thể phục vụ nhiều recipe cùng domain.
 - **Lưu vết đầy đủ:** SQLite lưu session, message, request log, account/profile đích và URL hội thoại gốc.
+- **Trace thao tác:** Mỗi phiên ghi được lưu thành tệp JSON/MD chi tiết trong thư mục `data/traces/` để phân tích và đề xuất recipe.
 - **Tích hợp bằng agent:** agent phân tích DOM, tạo recipe và chạy thử website mới.
 - **Fallback tùy chọn:** khi recipe liên tục lỗi, agent có thể điều khiển browser trực tiếp.
 
@@ -522,7 +523,12 @@ Khuyến nghị khi triển khai:
 
 ## Dữ liệu và session
 
-`CHAT2API_DATA_DIR` mặc định là `./data` và chứa `chat2api.db`. Mỗi request được ghi ở đầu và cuối — không ghi từng SSE delta — để giảm lock contention nhưng vẫn giữ được:
+`CHAT2API_DATA_DIR` mặc định là `./data` và chứa `chat2api.db` + `traces/` (xem `data/traces/README.md`). Dữ liệu ghi chép bao gồm:
+
+- Request/response tổng quát (vào `chat2api.db`) để thống kê và xem lại lịch sử.
+- **Trace thao tác:** Mỗi phiên record thao tác được lưu chi tiết thành tệp `.json` và `.md` trong `data/traces/<jobId>-<slug>.{json,md}` — giữ vĩnh viễn, đọc qua `GET /admin/record/{id}/trace.json|.md` (alias `?format=json|md`) và `GET /admin/traces`. Desktop có nút **Tải trace** trong *Ghi thao tác*. Skill `trace-analyzer` (`skills/trace-analyzer/SKILL.md` → sync ra `.claude/.opencode/.codex`) phân tích `.md` → đề xuất `recipe.yaml` → sửa → chạy thử.
+
+Mỗi request được ghi ở đầu và cuối — không ghi từng SSE delta — để giảm lock contention nhưng vẫn giữ được:
 
 - Prompt và reply, kể cả reply lỗi hoặc bị ngắt giữa stream.
 - Model, provider, status, latency và API key đã gọi.

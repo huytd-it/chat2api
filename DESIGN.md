@@ -112,3 +112,43 @@ Every route provides appropriate loading skeletons, actionable empty states, inl
 - Respect `prefers-reduced-motion`.
 - Maintain WCAG AA contrast in both themes.
 - Icon-only controls require accessible names and tooltips when their meaning is not obvious.
+
+## Trace — Ghi thao tác giàu (Phase 1-5)
+
+Mục tiêu: selector mỏng ban đầu (1c) được bổ sung thành trace giàu để sinh/sửa `recipe.yaml` bền, kể cả khi site đổi DOM.
+
+### Kiến trúc
+
+```
+page JS --enriched RECORDER_JS--> __c2aRecord --> trace_sink --> job["trace"]
+  --> trace_writer.py (atomic write) --> data/traces/<jobId>-<slug>.{json,md}
+  --> analyzer vẫn dùng RAM như cũ  +  GET /admin/record/{id}/trace(.json/.md)  +  GET /admin/traces
+  --> CLI đọc filesystem nếu cùng máy hoặc qua API nếu remote; desktop nút Tải trace
+```
+
+- `data/traces/<jobId>-<slug>.{json,md}` giữ **vĩnh viễn** (không TTL), theo `CHAT2API_DATA_DIR` (`config.py:traces_dir`).
+- `.json`: `{metadata:{jobId,slug,url,profile,startedAt,finishedAt,flows}, events:[{kind,selector,selectors:{primary,parent,grandparent,cssPath,xpath},attributes:{id,class,data-testid,role,aria-*},bbox:{x,y,w,h},text:{innerText≤500,outerHTML≤2000},frame:{url,chain},shadow:{hostSelector,depth},snapshotDiff≤10000, value≤8000, flow, ts, url, tag, label}], snapshot?:string}`.
+- `.md`: Metadata bảng + Tóm tắt theo flow + Events (bảng selectors/attrs/bbox + code `outerHTML` + `snapshotDiff`) + Snapshot cuối + Gợi ý recipe + banner PII. Do `recorder.py:format_trace_as_markdown` sinh.
+- Persist trước `login_manager.complete()` và cả trên `cancel`/`record_timeout` để không mất trace khi người dùng huỷ. Ghi atomic (temp + rename).
+- Tương thích ngược: event cũ chỉ có `selector:string` vẫn đọc được (`recorder.py:enrich_event` chuẩn hoá hai chiều `selector ↔ selectors.primary`, clamp sizes).
+
+### Luồng JS → file
+
+1. `chat2api/agents/dom.py` — các mảnh `XPATH_FN_JS/CSS_PATH_FN_JS/ATTRS_FN_JS/BBOX_FN_JS/FRAME_CHAIN_FN_JS` + `__c2aSel` legacy + `__c2aEnrich` gom đủ; `SNAPSHOT_JS` dùng `__c2aSel` legacy (không đổi contract).
+2. `chat2api/agents/recorder.py` — `RECORDER_JS` gọi `__c2aEnrich`, push `selector` (giữ) + `selectors/attributes/bbox/text/frame/shadow/snapshotDiff`; `enrich_event`/`format_trace_as_markdown`/`_row` xử lý cả đời cũ.
+3. `chat2api/agents/trace_writer.py` — `_traces_dir(cfg)` theo `CHAT2API_DATA_DIR`, `_atomic_write_*`, `write_trace()` ghi cả `.json` + `.md` (md qua `recorder.format_trace_as_markdown`).
+4. `chat2api/jobs.py` — `_trace_metadata` + `_persist_trace` trước `complete()`; gọi cả trong `_finish_record_timeout` và `_cancel_job` (record); `_snapshot` expose `trace_path/trace_md_path`; `config.py:traces_dir` + `on_trace` gọi `enrich_event`.
+5. `chat2api/main.py` — `GET /admin/record/{id}/trace(.json|.md)` (extension path là contract chính, `?format=` là alias), `GET /admin/traces` trả `{traces:[{name,size,mtime}],count}`.
+
+### Skill
+
+- Nguồn chính: `skills/trace-analyzer/SKILL.md` + `skills/trace-analyzer/references/recipe-schema.md`.
+- Sync ra `.claude/skills/trace-analyzer/`, `.opencode/skills/trace-analyzer/`, `.codex/skills/trace-analyzer/` bằng `scripts/sync-skills.ps1` / `.sh`.
+- Workflow skill: liệt kê trace (`GET /admin/traces` hoặc `ls data/traces/`), đọc `.md` (`GET .../trace.md`), phân tích `selectors/attrs/bbox/outerHTML/snapshotDiff` → đề xuất `recipe.yaml` (theo `references/recipe-schema.md`) → sửa → `python -m chat2api test` / `POST /admin/recipes/<slug>/reload`.
+
+### Rủi ro & edge
+
+- Perf: ~5 DOM query/click, <5ms, ~600KB json / ~1MB md cho 200 events.
+- Canvas/WebComponents: fallback `cssPath + bbox`.
+- Traces giữ vĩnh viễn nên cần dọn tay khi phình (chưa có retention).
+- PII banner trong `.md`; không commit `data/traces/` (chỉ giữ `README.md`).
