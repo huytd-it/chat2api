@@ -30,6 +30,9 @@ RECORDER_JS = (
   }
   function label(el){
     if(!el) return '';
+    // Nút icon-only đặt aria-label ở thẻ bọc, không ở chỗ bị click — __c2aName
+    // leo ancestor nên vẫn ra tên; giữ nhánh cũ làm đường lùi.
+    try{ const n=__c2aName(el); if(n) return n; }catch(e){}
     return ((el.getAttribute('aria-label')||el.getAttribute('aria-placeholder')
       ||el.placeholder|| (el.innerText||'')).trim().slice(0,120));
   }
@@ -45,6 +48,10 @@ RECORDER_JS = (
       frame: en.frame || {},
       shadow: en.shadow || {},
       snapshotDiff: (en.snapshotDiff||'').slice(0,10000),
+      actionable: en.actionable || null,
+      name: en.name || '',
+      icon: en.icon || null,
+      ancestors: en.ancestors || [],
       url: location.href,
       label: label(el),
       tag: (el && el.tagName || '').toLowerCase(),
@@ -57,9 +64,21 @@ RECORDER_JS = (
       if(fn) fn(p);
     }catch(e){}
   }
+  // `closest` trả về ancestor GẦN NHẤT khớp bất kỳ mục nào trong danh sách, nên
+  // gộp chung 'div, span, p' với 'button' là tự thua: web app hay nới vùng bấm
+  // bằng lớp phủ `<button><div class="absolute inset-[-6px] opacity-0">`, click
+  // trúng div đó thì div khớp ngay ở depth 0 và nút thật không bao giờ tới lượt.
+  // Kết quả: trace toàn div rỗng không id, không aria-label — không suy ra nổi
+  // selector. Vì vậy hỏi lớp bấm được TRƯỚC, chỉ rơi về container chung khi
+  // thật sự không có ancestor bấm được nào.
   document.addEventListener('click', (e) => {
-    const el = e.target.closest('button, a, [role=button], [data-testid], input, textarea, [contenteditable="true"], div, span, p') || e.target;
-    push('click', el);
+    const t = e.target;
+    let el = null;
+    try { el = t.closest(__C2A_ACTIONABLE); } catch (err) {}
+    if (!el) {
+      try { el = t.closest('div, span, p, li, td, section, article'); } catch (err) {}
+    }
+    push('click', el || t);
   }, true);
   document.addEventListener('keydown', (e) => {
     if(e.key === 'Enter'){
@@ -86,6 +105,15 @@ RECORDER_JS = (
 })();
 """
 )
+
+
+# `page.evaluate` coi chuỗi bắt đầu bằng `function` là MỘT function expression rồi
+# gọi nó, nên nạp thẳng RECORDER_JS (mở đầu bằng `function __c2aXPath`) luôn ném
+# `SyntaxError: Unexpected token 'function'` — và cả ba call site đều nuốt lỗi,
+# thành ra recorder chỉ chạy được nhờ `add_init_script` ở lần điều hướng SAU đó.
+# Trang đã tải xong tại thời điểm gắn recorder thì không ghi được gì. Bọc trong
+# arrow function để evaluate nhận đúng một expression.
+RECORDER_JS_EXPR = "() => {" + chr(10) + RECORDER_JS + chr(10) + "}"
 
 
 def enrich_event(ev: dict[str, Any]) -> dict[str, Any]:
@@ -115,6 +143,16 @@ def enrich_event(ev: dict[str, Any]) -> dict[str, Any]:
         ev["text"] = {}
     ev.setdefault("frame", {})
     ev.setdefault("shadow", {})
+    # Trace ghi bằng bản recorder cũ không có 4 key này — cho default rỗng để
+    # formatter / analyzer đọc được cả hai đời event.
+    if not isinstance(ev.get("actionable"), dict):
+        ev["actionable"] = None
+    if not isinstance(ev.get("name"), str):
+        ev["name"] = ""
+    if not isinstance(ev.get("icon"), dict):
+        ev["icon"] = None
+    if not isinstance(ev.get("ancestors"), list):
+        ev["ancestors"] = []
     if "snapshotDiff" not in ev:
         ev["snapshotDiff"] = ""
     # clamp sizes per spec (phase1)
@@ -146,9 +184,27 @@ def _row(index: int, ev: dict[str, Any]) -> str:
         sel = (ev.get("selector") or "")[:180]
     label = (ev.get("label") or "")[:60]
     extra = ""
+    # Nút icon-only: `sel` ở trên thường chỉ là lớp phủ vùng bấm, nên đưa luôn
+    # nút thật + vân tay icon vào dòng prompt — nếu không LLM chỉ thấy `div`.
+    act = ev.get("actionable")
+    if isinstance(act, dict) and not act.get("isSelf"):
+        act_sel = (act.get("cssPath") or act.get("selector") or "")[:180]
+        if act_sel:
+            extra += f" actionable={act_sel!r}"
+        act_attrs = act.get("attributes") or {}
+        keep = {k: v for k, v in act_attrs.items() if k != "class"}
+        if keep:
+            extra += f" actionableAttrs={json.dumps(keep, ensure_ascii=False)[:200]}"
+        if act.get("name"):
+            extra += f" actionableName={json.dumps(str(act['name'])[:60], ensure_ascii=False)}"
+    icon = (act or {}).get("icon") if isinstance(act, dict) else ev.get("icon")
+    if isinstance(icon, dict) and icon:
+        extra += f" icon={json.dumps(icon, ensure_ascii=False)[:160]}"
+    if ev.get("name") and ev.get("name") != ev.get("label"):
+        extra += f" name={json.dumps(str(ev['name'])[:60], ensure_ascii=False)}"
     if ev.get("value") is not None:
         v = str(ev["value"])[:120]
-        extra = f" value={json.dumps(v, ensure_ascii=False)}"
+        extra += f" value={json.dumps(v, ensure_ascii=False)}"
     if ev.get("key"):
         extra += f" key={ev['key']!r}"
     if ev.get("url"):
@@ -230,6 +286,8 @@ def format_trace_as_markdown(
             md.append("")
             md.append(f"- **selector (legacy):** `{ev.get('selector','')[:300]}`")
             md.append(f"- **tag:** `{ev.get('tag','')}` · **label:** `{ev.get('label','')[:120]}` · **url:** `{str(ev.get('url',''))[:120]}` · **ts:** `{ev.get('ts','')}`")
+            if ev.get("name") and ev.get("name") != ev.get("label"):
+                md.append(f"- **name (accessible, leo ancestor):** `{str(ev.get('name'))[:120]}`")
             if ev.get("value") is not None:
                 md.append(f"- **value:** `{str(ev.get('value'))[:200]}`")
             if ev.get("key"):
@@ -247,7 +305,33 @@ def format_trace_as_markdown(
             md.append(f"| text.innerText | `{str(text.get('innerText',''))[:500]}` |")
             md.append(f"| frame | `{json.dumps(frame, ensure_ascii=False)[:500]}` |")
             md.append(f"| shadow | `{json.dumps(shadow, ensure_ascii=False)[:300]}` |")
+            act = ev.get("actionable") if isinstance(ev.get("actionable"), dict) else None
+            if act and not act.get("isSelf"):
+                # Chỗ quan trọng nhất cho nút icon-only: element bị click chỉ là
+                # lớp phủ, còn attribute chọn được nằm ở nút thật bên dưới đây.
+                md.append(f"| actionable.tag | `{str(act.get('tag',''))[:60]}` |")
+                md.append(f"| actionable.selector | `{str(act.get('selector',''))[:300]}` |")
+                md.append(f"| actionable.cssPath | `{str(act.get('cssPath',''))[:400]}` |")
+                md.append(f"| actionable.xpath | `{str(act.get('xpath',''))[:400]}` |")
+                md.append(f"| actionable.attributes | `{json.dumps(act.get('attributes') or {}, ensure_ascii=False)[:500]}` |")
+                md.append(f"| actionable.name | `{str(act.get('name',''))[:120]}` |")
+                md.append(f"| actionable.bbox | `{json.dumps(act.get('bbox') or {}, ensure_ascii=False)}` |")
+            icon = (act or {}).get("icon") or ev.get("icon")
+            if isinstance(icon, dict) and icon:
+                md.append(f"| icon | `{json.dumps(icon, ensure_ascii=False)[:400]}` |")
+            ancestors = ev.get("ancestors") if isinstance(ev.get("ancestors"), list) else []
+            for depth, anc in enumerate(ancestors[:5], 1):
+                if not isinstance(anc, dict):
+                    continue
+                md.append(f"| ancestors[{depth}] | `{str(anc.get('tag',''))} {json.dumps(anc.get('attributes') or {}, ensure_ascii=False)[:280]}` |")
             md.append("")
+            if act and not act.get("isSelf") and act.get("openTag"):
+                md.append("**actionable openTag (thẻ mở của nút thật bọc target):**")
+                md.append("")
+                md.append("```html")
+                md.append(str(act.get("openTag"))[:600])
+                md.append("```")
+                md.append("")
             outer = (text.get("outerHTML") or "")[:2000]
             if outer:
                 md.append("**outerHTML (≤2000):**")
@@ -277,6 +361,8 @@ def format_trace_as_markdown(
     md.append("## Gợi ý recipe")
     md.append("")
     md.append("- Dùng các selector bền (id / data-testid / role) từ cột `attributes` khi có; fallback `cssPath`/`xpath`.")
+    md.append("- Nút icon-only: đọc `actionable.*` (nút thật) thay vì `selectors.primary` (thường chỉ là lớp phủ vùng bấm), và `ancestors[n]` để tìm id neo gần nhất.")
+    md.append("- Không có `aria-label`/`title`/`data-testid` nào bám được thì `icon` (viewBox + đầu `pathD`) là dấu hiệu nhận dạng duy nhất — chọn theo vị trí trong thanh hành động, đừng chọn theo `pathD` (CSS không làm được).")
     md.append("- `select_model` thường là click mở dropdown, `text` là fill + Enter/click gửi, `image`/`video` có thể có tab riêng.")
     md.append("- Kiểm tra `frame.chain` / `shadow.hostSelector` nếu target nằm trong iframe hoặc shadow DOM.")
     md.append("- Chạy thử recipe sinh ra với `python -m chat2api test` hoặc qua Skill `trace-analyzer`.")
@@ -367,7 +453,8 @@ async def attach_recorder(page, on_action) -> None:
     except Exception:
         pass
     try:
-        await page.evaluate(RECORDER_JS)
+        # Bọc expression: trang đang mở phải bắt đầu ghi ngay, không đợi navigate.
+        await page.evaluate(RECORDER_JS_EXPR)
     except Exception:
         pass
 

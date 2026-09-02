@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { apiKey, showToast } from "../stores";
-  import { profiles, profilesLoading, profilesMeta, refreshProfiles } from "../sync";
+  import { ensureProfiles, profiles, profilesError, profilesLoading, profilesMeta, refreshProfiles } from "../sync";
   import { closeProfile, createProfile, deleteProfile, detectProfileDomains, openProfile, updateProfile, type ProfileInfo } from "../api";
   import AccountDialog from "./AccountDialog.svelte";
   import { Button } from "$lib/components/ui/button";
@@ -29,6 +30,13 @@
     ),
   );
 
+  // Panel này chạy ở hai chỗ: tab Profiles của /integrations (trang đó có
+  // bootstrap riêng) và route /profiles đứng một mình (không có bootstrap nào).
+  // Trước đây nó chỉ nạp lại sau mỗi thao tác, nên mở thẳng /profiles là thấy
+  // danh sách rỗng dù kho vẫn còn profile. ensureProfiles() lo cả hai đường mà
+  // không gọi API hai lần.
+  onMount(() => { ensureProfiles(); });
+
   function setBusy(id: number, on: boolean) {
     const next = new Set(busyIds);
     if (on) next.add(id); else next.delete(id);
@@ -55,13 +63,14 @@
   <Card.Header class="flex-row items-center justify-between gap-4 border-b"><div class="flex items-start gap-3"><div class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><FolderOpen size={19} /></div><div><Card.Title id="profiles-title">Browser profiles</Card.Title><Card.Description>Hạ tầng Chromium dùng chung đăng nhập cho nhiều domain.</Card.Description></div></div><Button variant={creating ? "ghost" : "outline"} size="sm" onclick={() => (creating = !creating)}>{#if creating}<X /> Hủy{:else}<Plus /> Profile mới{/if}</Button></Card.Header>
   <Card.Content class="grid gap-4 p-4 sm:p-6">
     {#if panelError}<div class="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive" role="alert"><WarningCircle class="mt-0.5 shrink-0" />{panelError}</div>{/if}
+    {#if $profilesError}<div class="flex flex-col gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive sm:flex-row sm:items-center" role="alert"><span class="flex min-w-0 flex-1 items-start gap-2"><WarningCircle class="mt-0.5 shrink-0" />Không nạp được danh sách profile: {$profilesError}</span><Button variant="outline" size="sm" disabled={$profilesLoading} onclick={() => refreshProfiles()}>Thử lại</Button></div>{/if}
     {#if $profilesMeta && !$profilesMeta.persisted}<div class="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning"><WarningCircle class="mt-0.5 shrink-0" />Kho SQLite chưa mở nên chưa quản lý được profile. Xem log khởi động để biết vì sao.</div>
     {:else if $profilesMeta}<div class="rounded-lg border bg-muted/20 p-3 text-xs leading-5 text-muted-foreground"><p>Chế độ <strong class="font-data text-foreground">{$profilesMeta.mode}</strong> · tối đa <strong class="font-data text-foreground">{$profilesMeta.max_profiles}</strong> profile · <span class="break-all font-data">{$profilesMeta.profiles_dir}</span></p><p class="mt-1">Recipe browser có account ở đây được gán profile cho <strong class="text-foreground">từng request</strong>, bất kể chế độ trên — đổi ở Settings → API (<code class="font-data text-foreground">API_ACCOUNT_STRATEGY</code>). Chế độ <code class="font-data text-foreground">{$profilesMeta.mode}</code> chỉ còn quyết định đường chạy cho domain chưa có account nào.</p></div>{/if}
 
     {#if creating}<form class="grid gap-3 rounded-lg border bg-muted/20 p-4 sm:grid-cols-[minmax(0,1fr)_10rem_8rem_auto_auto] sm:items-end" onsubmit={(e) => { e.preventDefault(); onCreate(); }}><div class="grid gap-1.5"><label for="profile-name" class="text-sm font-medium">Tên profile</label><Input id="profile-name" class="font-data" placeholder="main" bind:value={newName} /></div><div class="grid gap-1.5"><label for="profile-engine" class="text-sm font-medium">Engine</label><Select.Root type="single" bind:value={newEngine}><Select.Trigger id="profile-engine" class="h-9 w-full">{engineLabel(newEngine)}</Select.Trigger><Select.Content><Select.Item value="playwright" label="Playwright">Playwright</Select.Item><Select.Item value="cloak" label="CloakBrowser">CloakBrowser</Select.Item></Select.Content></Select.Root></div><div class="grid gap-1.5"><label for="profile-tabs" class="text-sm font-medium">Tab tối đa</label><Input id="profile-tabs" type="number" min="1" max="32" bind:value={newMaxTabs} /></div><label class="flex h-9 items-center gap-2 text-sm"><Switch bind:checked={newHeadless} aria-label="Chạy profile ẩn" /> Chạy ẩn</label><Button type="submit" disabled={creatingBusy}>{#if creatingBusy}<CircleNotch class="animate-spin" />{:else}<Plus />{/if} Tạo</Button></form>{/if}
 
     {#if $profilesLoading && !$profiles.length}<div class="flex min-h-32 flex-col items-center justify-center gap-2 text-muted-foreground" role="status" aria-live="polite"><CircleNotch class="animate-spin" size={24} /><p class="text-sm">Đang tải profiles…</p></div>
-    {:else if !$profiles.length && $profilesMeta?.persisted}<div class="flex min-h-32 flex-col items-center justify-center text-center"><UserCircle class="mb-2 text-muted-foreground" size={28} /><p class="font-medium">Chưa có profile</p><p class="mt-1 text-sm text-muted-foreground">Tạo profile để gom đăng nhập nhiều domain.</p></div>{/if}
+    {:else if !$profiles.length && !$profilesError && $profilesMeta?.persisted}<div class="flex min-h-32 flex-col items-center justify-center text-center"><UserCircle class="mb-2 text-muted-foreground" size={28} /><p class="font-medium">Chưa có profile</p><p class="mt-1 text-sm text-muted-foreground">Tạo profile để gom đăng nhập nhiều domain.</p></div>{/if}
 
     <div class="grid gap-3">
       {#each $profiles as p (p.id)}{@const status = statusOf(p)}

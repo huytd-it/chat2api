@@ -228,10 +228,10 @@ class LoginSessionManager:
                     try:
                         if frame == page.main_frame:
                             _nav(frame.url)
-                            from .agents.recorder import RECORDER_JS
+                            from .agents.recorder import RECORDER_JS_EXPR
 
                             try:
-                                await page.evaluate(RECORDER_JS)
+                                await page.evaluate(RECORDER_JS_EXPR)
                             except Exception:
                                 pass
                     except Exception:

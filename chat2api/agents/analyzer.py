@@ -67,7 +67,17 @@ DOM SNAPSHOT CUỐI (lúc user bấm Hoàn tất):
 QUY TẮC SỬ DỤNG TRACE:
 - Selector xuất hiện trong TRACE là bằng chứng ĐÃ click/gõ được — ƯU TIÊN dùng chính
   nó cho input_selector / submit selector / new_chat.
+- Mỗi dòng trace có thể kèm `actionable=...` / `actionableAttrs=...` / `actionableName=...`:
+  đó là NÚT THẬT bọc chỗ bị click (web app hay phủ một div trong suốt lên nút để
+  nới vùng bấm). Khi có `actionable`, dùng nó làm selector — `sel=` khi đó chỉ là
+  lớp phủ, không chọn được gì.
+- `icon={...}` là vân tay icon của nút không có chữ. Dùng để NHẬN RA nút (viewBox,
+  pathD, iconName), TUYỆT ĐỐI không viết selector theo `pathD` — CSS không chọn được.
 - Click vào nút copy / sao chép trong trace là gợi ý mạnh cho done_signal copy_button.
+  NHƯNG chỉ đặt `done_signal.type: copy_button` khi nút copy đó có `aria-label`,
+  `title`, hoặc `data-testid` bám được (nhìn `actionableAttrs`). Nút copy chỉ có
+  icon, không tên: dùng `stable_text` — nếu không mọi request sẽ chờ hết
+  `fallback_quiet_ms` (15s) rồi mới chốt.
 - Chuỗi click trước khi fill thường là chọn model / chuyển chế độ — xem có cần models[].action hay mode.* không.
 - Vẫn kiểm tra DOM snapshot cuối để xác nhận selector còn tồn tại sau khi user thao tác.
 - Nếu trace rỗng, coi như luồng thường (snapshot only).

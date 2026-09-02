@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+<head>
+<!-- SimpleHTTPRequestHandler không gửi charset; thiếu dòng này browser
+     đọc UTF-8 thành cp1252 và `title` méo ký tự tiếng Việt. -->
+<meta charset="utf-8">
+<style>
+  /* Không có Tailwind ở đây nên phải tự dựng hình: lớp phủ cần kích thước thật
+     thì Playwright mới click được, đúng như trên site thật. */
+  .msg-actions button { position: relative; width: 36px; height: 36px; }
+  .overlay { position: absolute; inset: -6px; opacity: 0; }
+</style>
+</head>
+<body>
+<!-- Tái hiện đúng pattern làm recorder mù: nút icon-only, không text, không
+     aria-label trên chính nút, và một lớp div PHỦ LÊN để nới vùng bấm. Người
+     dùng luôn click trúng lớp phủ chứ không phải <button>. -->
+<div id="chat-route-main">
+  <div class="msg-actions">
+    <button data-dbx-name="button" title="Sao chép">
+      <div class="min-w-0 truncate">
+        <svg width="24" height="24" viewBox="0 0 24 24" data-dbx-name="icon-copy">
+          <path d="M15.8032 1.79688C18.0431 1.79687 19.1644 1.79648 20.02 2.23242Z"></path>
+        </svg>
+      </div>
+      <div class="overlay absolute inset-[-6px] opacity-0"></div>
+    </button>
+  </div>
+</div>
+</body>
+</html>

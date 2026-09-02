@@ -71,5 +71,7 @@ anon_trial_limit: 20
 - **last_message_selector**: suy từ snapshot cuối (dòng `---TEXT---`) hoặc `outerHTML` của message cuối trong `snapshotDiff`.
 - **done_signal**: mặc định `copy_button`; nếu site không có nút Copy, dùng `stable_text`.
 - **flows[].action**: click chuyển tab/mode trước khi fill (thường là flow `select_model` hoặc `image`/`video`).
+- **Nút icon-only (không text, không aria-label)**: event có `actionable.isSelf == false` nghĩa là element bị click chỉ là lớp phủ nới vùng bấm — lấy selector từ `actionable.cssPath` / `actionable.attributes`, đừng lấy `selectors.primary`. `icon` (viewBox + `pathD`) chỉ để NHẬN RA nút, CSS không chọn được theo nó.
+- **`done_signal` khi không bám được nút Copy**: `copy_button` bỏ trống `selector` sẽ dùng `DEFAULT_COPY_BUTTON_SELECTOR` (chỉ khớp qua `aria-label` / `title` / `data-testid` / `复制`). Site đặt nút Copy không có tên nào trong số đó thì mọi request phải chờ hết `fallback_quiet_ms` (mặc định 15000ms) rồi mới chốt — và `use_copy_result: true` khi đó vừa mất stream tăng dần vừa không đọc được clipboard. Kiểm tra `actionable.attributes` trong trace trước khi chọn `copy_button`.
 - **Iframe/shadow**: nếu `frame.chain` / `shadow.hostSelector` khác rỗng, selector phải tính trong frame/shadow đó (playwright frame locator).
 - **Tương thích ngược**: recipe phẳng (chỉ `prompt`/`response`/`mode`) vẫn chạy — đọc thành flow `text` (+ `image` nếu có `response.image_selector`).

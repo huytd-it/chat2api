@@ -94,19 +94,49 @@ export async function refreshOverview() {
 export const profiles = writable<ProfileInfo[]>([]);
 export const profilesMeta = writable<Omit<ProfileList, "profiles"> | null>(null);
 export const profilesLoading = writable(false);
+/** Lỗi của lần nạp gần nhất. Trước đây lỗi bị nuốt im lặng: `profilesMeta` về
+ * null nên panel không hiện nổi cả khối "Chưa có profile" — người dùng chỉ thấy
+ * một thẻ trống, không phân biệt được "kho rỗng" với "gọi API hỏng". */
+export const profilesError = writable("");
 
-export async function refreshProfiles() {
+/** Request đang bay, để `ensureProfiles()` ghép vào thay vì bắn thêm một lượt. */
+let profilesInflight: Promise<void> | null = null;
+let profilesSeq = 0;
+
+export function refreshProfiles(): Promise<void> {
   profilesLoading.set(true);
-  try {
-    const { profiles: list, ...meta } = await fetchProfiles(get(apiKey));
-    profiles.set(list);
-    profilesMeta.set(meta);
-  } catch {
-    profiles.set([]);
-    profilesMeta.set(null);
-  } finally {
-    profilesLoading.set(false);
-  }
+  // Chỉ lượt mới nhất được phép dọn `profilesInflight`: hai lượt chồng nhau thì
+  // lượt cũ về trước không được xoá dấu vết của lượt đang bay.
+  const seq = ++profilesSeq;
+  const run = (async () => {
+    try {
+      const { profiles: list, ...meta } = await fetchProfiles(get(apiKey));
+      profiles.set(list);
+      profilesMeta.set(meta);
+      profilesError.set("");
+    } catch (e) {
+      profiles.set([]);
+      profilesMeta.set(null);
+      profilesError.set((e as Error).message);
+    } finally {
+      profilesLoading.set(false);
+      if (profilesSeq === seq) profilesInflight = null;
+    }
+  })();
+  profilesInflight = run;
+  return run;
+}
+
+/** Nạp lần đầu cho nơi tự đứng một mình (route /profiles). Ghép vào request
+ * đang bay và bỏ qua nếu đã có dữ liệu, nên gọi kèm bootstrap của trang
+ * Integrations cũng chỉ tốn đúng một lượt.
+ *
+ * Khác `refreshProfiles()`: hàm kia luôn gọi API thật vì sau mỗi thao tác
+ * tạo/sửa/xoá ta cần số liệu mới, không được trả về kết quả cũ đang bay. */
+export function ensureProfiles(): Promise<void> {
+  if (profilesInflight) return profilesInflight;
+  if (get(profilesMeta) !== null) return Promise.resolve();
+  return refreshProfiles();
 }
 
 /** Domain đã biết — chỉ dùng để gợi ý trong ô Domain, hỏng thì im lặng bỏ qua. */
@@ -152,7 +182,7 @@ export async function refreshOpenAIProviders() {
  * tải đầu tiên; các thao tác đơn lẻ nên gọi refreshX() đúng phần bị ảnh hưởng
  * để tránh giật hình toàn trang (xem refreshAfterRecipeChange/Delete bên dưới). */
 export async function refreshIntegrations() {
-  await Promise.all([refreshRecipes(), refreshAccounts(), refreshProfiles(), refreshDomains(), refreshCombos(), refreshOpenAIProviders()]);
+  await Promise.all([refreshRecipes(), refreshAccounts(), ensureProfiles(), refreshDomains(), refreshCombos(), refreshOpenAIProviders()]);
 }
 
 /** Sau reload/tạo mới một recipe: health và model có thể đổi. */

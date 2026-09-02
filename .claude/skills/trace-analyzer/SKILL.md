@@ -22,7 +22,11 @@ page JS  —enriched RECORDER_JS→  __c2aRecord  →  trace_sink  →  job["tra
   → GET /admin/record/{id}/trace(.json/.md)  +  GET /admin/traces
 ```
 
-- `.json`: `{metadata:{jobId,slug,url,profile,startedAt,finishedAt,flows}, events:[{kind, selector, selectors:{primary,parent,grandparent,cssPath,xpath}, attributes:{id,class,data-testid,role,aria-*}, bbox:{x,y,w,h}, text:{innerText≤500,outerHTML≤2000}, frame:{url,chain}, shadow:{hostSelector,depth}, snapshotDiff≤10000, value≤8000, flow, ts, url, tag, label}] , snapshot?:string}`
+- `.json`: `{metadata:{jobId,slug,url,profile,startedAt,finishedAt,flows}, events:[{kind, selector, selectors:{primary,parent,grandparent,cssPath,xpath}, attributes:{id,class,data-testid,role,aria-*}, bbox:{x,y,w,h}, text:{innerText≤500,outerHTML≤2000}, frame:{url,chain}, shadow:{hostSelector,depth}, actionable, name, icon, ancestors, snapshotDiff≤10000, value≤8000, flow, ts, url, tag, label}] , snapshot?:string}`
+- **`actionable`** — nút THẬT bọc target: `{isSelf, tag, selector, cssPath, xpath, attributes, openTag, outerHTML, name, icon, bbox}`, hoặc `null` nếu không có ancestor bấm được. Web app hay nới vùng bấm bằng lớp phủ `<button><div class="absolute inset-[-6px] opacity-0">` — người dùng click trúng lớp phủ, nên `selectors.primary` là cái div rỗng vô dụng. **Với nút icon-only luôn đọc `actionable.*` trước.**
+- **`name`** — accessible name leo ≤4 cấp ancestor (aria-label → title → alt → placeholder → aria-labelledby → `<svg><title>` → innerText). Nút icon thường đặt aria-label ở thẻ bọc chứ không ở chỗ bị click.
+- **`icon`** — vân tay icon `{viewBox, pathD≤64, iconName, svgClass, useHref, imgSrc, imgAlt}`. Dùng ĐỂ NHẬN RA nút (“đây là nút Copy”), **không dùng để viết selector** — CSS không chọn được theo `path d`.
+- **`ancestors`** — ≤5 tổ tiên `{tag, sel, attributes}`, dừng sớm khi gặp `id`. Chỗ tìm id neo gần nhất (`#input-engine-container`, `#flow_chat_sidebar`…) để ghép selector bền thay vì bám `nth-of-type`.
 - `.md`: Metadata bảng + Tóm tắt theo flow + Events (bảng selectors/attrs/bbox + code outerHTML + snapshotDiff) + Snapshot cuối + Gợi ý recipe + banner PII.
 - Giữ vĩnh viễn, không TTL. Đọc qua filesystem nếu cùng máy, qua API nếu remote (xem `references/recipe-schema.md`).
 
@@ -46,6 +50,8 @@ curl -H "Authorization: Bearer $KEY" http://127.0.0.1:8100/admin/record/<jobId>/
 
 - Đọc **Tóm tắt theo flow** → biết site có mấy việc (`select_model` / `text` / `image` / `video`).
 - Quét bảng `selectors` mỗi event: ưu tiên `attributes[id]` / `attributes[data-testid]` / `attributes[role]` → fallback `selectors.cssPath` → `selectors.xpath`. Tránh `nth-of-type` mỏng.
+- **Event có `actionable` (isSelf=false) thì `selectors.primary` là lớp phủ, không phải nút.** Đọc `actionable.attributes` / `actionable.cssPath` / `actionable.name`, và xem `actionable openTag` trong .md để thấy toàn bộ attribute của nút.
+- Nút icon-only không có `aria-label`/`title`/`data-testid` nào: `icon` cho biết đó là nút gì, nhưng selector phải suy từ `ancestors` (id neo) + vị trí trong thanh hành động. Trường hợp này thường nên chuyển `done_signal` sang `stable_text` thay vì cố bám `copy_button`.
 - Kiểm tra `frame.chain` / `shadow.hostSelector` nếu target trong iframe/shadow.
 - Soi `bbox` để loại element ẩn (w/h ≈ 0).
 - Đối chiếu `outerHTML` / `snapshotDiff` để chọn selector bền.
