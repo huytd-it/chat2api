@@ -8,7 +8,16 @@ response:
   last_message_selector: div[data-target-id="message-box-target-id"]
   done_signal:
     type: copy_button
-    scope: after
+    # Nút Copy của dola không có aria-label / title / data-testid nào
+    # (trace a90495b375dc, event 10), nên DEFAULT_COPY_BUTTON_SELECTOR không
+    # bao giờ khớp — mọi request phải chờ hết fallback_quiet_ms (15s) mới chốt.
+    # Neo theo data-foundation-type (attribute ngữ nghĩa, không hash) rồi lấy
+    # nút đầu thanh hành động: thứ tự icon là copy / like / dislike.
+    selector: '[data-foundation-type="receive-message-action-bar"] .message-action-button-main > button:first-of-type'
+    # scope: page chứ không after — selector đã tự giới hạn vào thanh hành động
+    # của tin nhắn assistant, và mỗi request đều goto về /chat?channel=g (chat
+    # mới) nên trang chỉ có một reply. Đỡ phụ thuộc last_message_selector.
+    scope: page
     use_copy_result: true
 models:
 - id: dola-pro

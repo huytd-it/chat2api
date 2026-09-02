@@ -26,7 +26,7 @@ page JS  —enriched RECORDER_JS→  __c2aRecord  →  trace_sink  →  job["tra
 - **`actionable`** — nút THẬT bọc target: `{isSelf, tag, selector, cssPath, xpath, attributes, openTag, outerHTML, name, icon, bbox}`, hoặc `null` nếu không có ancestor bấm được. Web app hay nới vùng bấm bằng lớp phủ `<button><div class="absolute inset-[-6px] opacity-0">` — người dùng click trúng lớp phủ, nên `selectors.primary` là cái div rỗng vô dụng. **Với nút icon-only luôn đọc `actionable.*` trước.**
 - **`name`** — accessible name leo ≤4 cấp ancestor (aria-label → title → alt → placeholder → aria-labelledby → `<svg><title>` → innerText). Nút icon thường đặt aria-label ở thẻ bọc chứ không ở chỗ bị click.
 - **`icon`** — vân tay icon `{viewBox, pathD≤64, iconName, svgClass, useHref, imgSrc, imgAlt}`. Dùng ĐỂ NHẬN RA nút (“đây là nút Copy”), **không dùng để viết selector** — CSS không chọn được theo `path d`.
-- **`ancestors`** — ≤5 tổ tiên `{tag, sel, attributes}`, dừng sớm khi gặp `id`. Chỗ tìm id neo gần nhất (`#input-engine-container`, `#flow_chat_sidebar`…) để ghép selector bền thay vì bám `nth-of-type`.
+- **`ancestors`** — ≤8 tổ tiên `{tag, sel, attributes}`, dừng sớm khi gặp `id`. Chỗ tìm id neo gần nhất (`#input-engine-container`, `#flow_chat_sidebar`…) để ghép selector bền thay vì bám `nth-of-type`.
 - `.md`: Metadata bảng + Tóm tắt theo flow + Events (bảng selectors/attrs/bbox + code outerHTML + snapshotDiff) + Snapshot cuối + Gợi ý recipe + banner PII.
 - Giữ vĩnh viễn, không TTL. Đọc qua filesystem nếu cùng máy, qua API nếu remote (xem `references/recipe-schema.md`).
 

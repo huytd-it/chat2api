@@ -320,7 +320,7 @@ def format_trace_as_markdown(
             if isinstance(icon, dict) and icon:
                 md.append(f"| icon | `{json.dumps(icon, ensure_ascii=False)[:400]}` |")
             ancestors = ev.get("ancestors") if isinstance(ev.get("ancestors"), list) else []
-            for depth, anc in enumerate(ancestors[:5], 1):
+            for depth, anc in enumerate(ancestors[:8], 1):
                 if not isinstance(anc, dict):
                     continue
                 md.append(f"| ancestors[{depth}] | `{str(anc.get('tag',''))} {json.dumps(anc.get('attributes') or {}, ensure_ascii=False)[:280]}` |")

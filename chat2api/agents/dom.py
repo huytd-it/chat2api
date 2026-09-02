@@ -141,7 +141,7 @@ function __c2aAncestors(el, depth){
   const out = [];
   try{
     let cur = el ? el.parentElement : null;
-    for(let i=0; cur && i < (depth || 5); cur = cur.parentElement, i++){
+    for(let i=0; cur && i < (depth || 8); cur = cur.parentElement, i++){
       out.push({tag: cur.tagName.toLowerCase(), sel: __c2aSel(cur), attributes: __c2aAttrs(cur, 160)});
       if(cur.id) break;
     }
@@ -253,7 +253,7 @@ ENRICH_FN_JS = """function __c2aEnrich(el){
     actionable: __c2aActionableInfo(el),
     name: __c2aName(el),
     icon: __c2aIcon(el),
-    ancestors: __c2aAncestors(el, 5)
+    ancestors: __c2aAncestors(el, 8)
   };
 }"""
 
