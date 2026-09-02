@@ -4,6 +4,7 @@ import shutil
 import uuid
 from contextlib import suppress
 from pathlib import Path
+from datetime import datetime
 
 import yaml
 
@@ -150,6 +151,28 @@ async def _login_timeout(job: dict, login_manager) -> None:
 # --------------------------- record: phiên ghi thao tác
 
 async def _finish_record_timeout(job: dict, login_manager) -> None:
+    # Persist trace đã có trước khi đóng (để timeout vẫn để lại file)
+    try:
+        from .agents.trace_writer import write_trace as _wt
+        trace = list(job.get("trace") or [])
+        # login_sessions trace live có thể còn events chưa sync vào job["trace"] — merge
+        try:
+            sess = login_manager._sessions.get(job["id"])  # type: ignore[attr-defined]
+            if sess is not None and getattr(sess, "trace", None):
+                trace = list(sess.trace)
+        except Exception:
+            pass
+        snapshot = ""
+        try:
+            from .agents import dom as dom_mod  # type: ignore
+            sess2 = login_manager._sessions.get(job["id"])  # type: ignore[attr-defined]
+            if sess2 is not None:
+                snapshot = await dom_mod.snapshot(sess2.page)  # type: ignore
+        except Exception:
+            pass
+        _persist_trace(job, trace, snapshot, cfg=None)
+    except Exception:
+        pass
     try:
         await login_manager.cancel(job["id"])
     finally:
@@ -188,8 +211,12 @@ async def _open_record(job: dict, cfg, pool, login_manager) -> None:
         job["slug"] = slug
 
     def on_trace(ev: dict) -> None:
-        # Đóng dấu đoạn đang ghi lên event. `ev` là chính dict đã nằm trong
-        # session.trace nên đóng dấu ở đây là trace lưu lại cũng có nhãn.
+        # Chuẩn hoá event giàu (giữ selector cũ) rồi mới đóng dấu flow.
+        try:
+            from .agents.recorder import enrich_event
+            enrich_event(ev)
+        except Exception:
+            pass
         flow = job.get("segment")
         if flow:
             ev["flow"] = flow
@@ -198,7 +225,14 @@ async def _open_record(job: dict, cfg, pool, login_manager) -> None:
                     seg["events"] = int(seg.get("events") or 0) + 1
                     break
         kind = ev.get("kind") or ev.get("type") or "?"
-        sel = (ev.get("selector") or "")[:140]
+        sels = ev.get("selectors") or {}
+        sel = ""
+        if isinstance(sels, dict):
+            sel = (sels.get("primary") or sels.get("cssPath") or sels.get("xpath") or "")[:140]
+        elif isinstance(sels, str):
+            sel = sels[:140]
+        else:
+            sel = (ev.get("selector") or "")[:140]
         label = (ev.get("label") or "")[:48]
         extra = ""
         v = ev.get("value")
@@ -262,6 +296,33 @@ async def _open_record(job: dict, cfg, pool, login_manager) -> None:
         await login_manager.cancel(job["id"])
 
 
+def _trace_metadata(job: dict) -> dict:
+    prof = job.get("profile") or {}
+    return {
+        "jobId": job["id"],
+        "slug": job.get("slug") or "record",
+        "url": job.get("url") or "",
+        "profile": prof.get("name") or prof.get("id") or "",
+        "startedAt": job.get("started_at") or "",
+        "finishedAt": datetime.now().isoformat(),
+        "flows": [s.get("flow") for s in job.get("segments") or [] if s.get("flow")],
+    }
+
+
+def _persist_trace(job: dict, trace: list[dict], snapshot: str, cfg) -> None:
+    """Ghi trace bền — atomic, không ném, log cảnh báo nếu fail."""
+    try:
+        from .agents.trace_writer import write_trace
+
+        meta = _trace_metadata(job)
+        res = write_trace(job["id"], job.get("slug") or "record", trace, meta, snapshot=snapshot, cfg=cfg)
+        # expose cho _snapshot (GET /admin/record/{id}/trace)
+        job["trace_path"] = res.get("json") or ""
+        job["trace_md_path"] = res.get("md") or ""
+    except Exception as e:
+        job["log"].append(f"Cảnh báo: không lưu được trace: {e}")
+
+
 async def _finish_record(job: dict, cfg, pool, router, login_manager) -> None:
     # Lấy trace + snapshot cuối trước khi đóng browser.
     trace: list[dict] = []
@@ -276,6 +337,8 @@ async def _finish_record(job: dict, cfg, pool, router, login_manager) -> None:
             snapshot = await dom_mod.snapshot(sess.page)
         except Exception:
             snapshot = ""
+    # Persist trước khi complete (kể cả cancel/timeout vẫn có file) — nhưng snapshot/complete cần trước publish
+    _persist_trace(job, trace, snapshot, cfg)
     # Lưu cookie (đăng nhập trong lúc ghi, nếu có) trước khi đóng browser.
     try:
         state_path = await login_manager.complete(job["id"])
@@ -511,6 +574,7 @@ def start_record(url: str, cfg, pool, router=None, login_manager=None,
         "url": url,
         "slug": forced_slug,
         "status": "recording",
+        "started_at": datetime.now().isoformat(),
         "log": _JobLog(job_id),
         "trace": [],
         # Đoạn ghi đang mở (flow kind) và lịch sử các đoạn đã ghi.
@@ -708,6 +772,19 @@ async def complete_login(job_id: str, cfg, pool, router, login_manager) -> dict:
 
 
 async def _cancel_job(job: dict, login_manager, task) -> dict:
+    # Persist record trace trước khi đóng (cancel vẫn giữ file)
+    if job.get("kind") == "record":
+        try:
+            trace = list(job.get("trace") or [])
+            try:
+                sess = login_manager._sessions.get(job["id"])  # type: ignore[attr-defined]
+                if sess is not None and getattr(sess, "trace", None):
+                    trace = list(sess.trace)
+            except Exception:
+                pass
+            _persist_trace(job, trace, snapshot="", cfg=None)
+        except Exception:
+            pass
     try:
         await login_manager.cancel(job["id"])
         if task and task is not asyncio.current_task() and not task.done():
@@ -800,6 +877,9 @@ def _snapshot(job: dict, *, default_kind: str = "integrate",
         # Phiên ghi chia theo việc: đoạn nào đang ghi và đã ghi được những đoạn nào.
         "segment": job.get("segment"),
         "segments": [dict(s) for s in job.get("segments") or []],
+        # trace persisted — để desktop hiện nút Tải trace
+        "trace_path": job.get("trace_path"),
+        "trace_md_path": job.get("trace_md_path"),
     }
 
 

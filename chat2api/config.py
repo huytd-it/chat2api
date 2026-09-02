@@ -39,6 +39,7 @@ class Config:
         # không phải giai đoạn chuyển tiếp — xem docs/design-v2.md §9.
         mode = _env("BROWSER_PROFILE_MODE", "storage_state").strip().lower()
         self.browser_profile_mode = mode if mode in {"storage_state", "profile"} else "storage_state"
+        self.traces_dir = self.data_dir / "traces"
         self.profiles_dir = self.data_dir / "profiles"
         # Số profile (mỗi profile = 1 tiến trình Chromium) giữ mở cùng lúc.
         # Bàn test Sessions mở nhiều profile/domain/account song song, nên trần
