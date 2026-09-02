@@ -974,6 +974,71 @@ def register_admin(app: FastAPI, admin) -> None:
                    f"profile={profile_row['name']})")
         return {"job_id": job_id}
 
+    def _traces_dir_for_request(request: Request) -> Path:
+        cfg = getattr(request.app.state, "cfg", None)
+        if cfg is not None and hasattr(cfg, "traces_dir"):
+            return Path(cfg.traces_dir)  # type: ignore[attr-defined]
+        return Path("data/traces")
+
+    @admin.get("/record/{job_id}/trace")
+    async def get_trace(job_id: str, request: Request, format: str = "json"):
+        # Hỗ trợ cả ?format=json|md và path extension /trace.json /trace.md (spec)
+        # FastAPI không match dấu chấm trong path param, nên extension truyền qua ?format hoặc suffix trong job_id
+        fmt = (format or "json").lower().strip()
+        # nếu job_id có đuôi .json/.md (do client gọi /trace.json), tách ra
+        if job_id.endswith(".json"):
+            job_id = job_id[:-5]
+            fmt = "json"
+        elif job_id.endswith(".md"):
+            job_id = job_id[:-3]
+            fmt = "md"
+        if fmt not in ("json", "md"):
+            fmt = "json"
+        traces_dir = _traces_dir_for_request(request)
+        # thử job["trace_path"] trước (đã persist), fallback glob
+        job = await jobs.get(job_id)
+        if job is not None:
+            key = "trace_path" if fmt == "json" else "trace_md_path"
+            p = job.get(key)
+            if p:
+                try:
+                    pp = Path(p)
+                    if pp.exists():
+                        mt = "application/json" if fmt == "json" else "text/markdown; charset=utf-8"
+                        return Response(content=pp.read_bytes(), media_type=mt)
+                except Exception:
+                    pass
+        for f in traces_dir.glob(f"{job_id}-*.{fmt}"):
+            mt = "application/json" if fmt == "json" else "text/markdown; charset=utf-8"
+            return Response(content=f.read_bytes(), media_type=mt)
+        raise OpenAIError(404, "not_found", "Trace không tồn tại")
+
+    # Alias đúng spec: GET /admin/record/{id}/trace.json và /trace.md (extension trong path)
+    @admin.get("/record/{job_id}/trace.json")
+    async def get_trace_json(job_id: str, request: Request):
+        return await get_trace(job_id, request, format="json")
+
+    @admin.get("/record/{job_id}/trace.md")
+    async def get_trace_md(job_id: str, request: Request):
+        return await get_trace(job_id, request, format="md")
+
+    @admin.get("/traces")
+    async def list_traces(request: Request):
+        traces_dir = _traces_dir_for_request(request)
+        if not traces_dir.exists():
+            return {"traces": [], "count": 0}
+        files = sorted(traces_dir.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True)
+        out = []
+        for f in files:
+            if f.suffix not in (".json", ".md"):
+                continue
+            try:
+                st = f.stat()
+                out.append({"name": f.name, "size": st.st_size, "mtime": int(st.st_mtime * 1000)})
+            except Exception:
+                out.append({"name": f.name})
+        return {"traces": out, "count": len(out)}
+
     @admin.get("/integrate/{job_id}")
     async def integrate_status(job_id: str):
         job = await jobs.get(job_id)

@@ -3,7 +3,7 @@
   import { apiKey, showToast } from "../stores";
   import {
     fetchJob, finishRecord, jobAction, setRecordSegment, startRecord,
-    FLOW_KINDS, FLOW_LABELS,
+    fetchTrace, FLOW_KINDS, FLOW_LABELS,
     type FlowKind, type JobStatus, type RecordSegment,
   } from "../api";
   import { refreshAfterRecipeChange } from "../sync";
@@ -44,6 +44,30 @@
 
   const FLOW_ICONS = { select_model: Cube, text: TextT, image: ImageIcon, video: VideoCamera };
   const eventsOf = (flow: FlowKind) => segments.find((s) => s.flow === flow)?.events ?? 0;
+
+  let traceBusy = $state<null | "json" | "md">(null);
+  async function downloadTrace(fmt: "json" | "md") {
+    if (!jobId) return;
+    traceBusy = fmt;
+    try {
+      const data = await fetchTrace($apiKey, jobId, fmt);
+      const text = fmt === "json" ? JSON.stringify(data, null, 2) : String(data);
+      const blob = new Blob([text], { type: fmt === "json" ? "application/json" : "text/markdown" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${jobId}-${fmt === "json" ? "trace.json" : "trace.md"}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      showToast(`Đã tải trace .${fmt}`);
+    } catch (e) {
+      showToast("Không tải được trace: " + e);
+    } finally {
+      traceBusy = null;
+    }
+  }
 
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let pollAbort: AbortController | null = null;
@@ -268,6 +292,17 @@
         </Button>
         <Button size="sm" variant="outline" disabled={actionBusy} onclick={cancel}><X /> Hủy</Button>
       </div>
+    </div>
+  {/if}
+
+  {#if jobId}
+    <div class="flex flex-wrap gap-2">
+      <Button size="sm" variant="outline" disabled={traceBusy !== null} onclick={() => downloadTrace("json")}>
+        {#if traceBusy === "json"}<CircleNotch class="animate-spin" />{:else}<Cube />{/if} Tải trace .json
+      </Button>
+      <Button size="sm" variant="outline" disabled={traceBusy !== null} onclick={() => downloadTrace("md")}>
+        {#if traceBusy === "md"}<CircleNotch class="animate-spin" />{:else}<TextT />{/if} Tải trace .md
+      </Button>
     </div>
   {/if}
 

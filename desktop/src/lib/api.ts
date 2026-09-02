@@ -762,6 +762,40 @@ export async function finishRecord(key: string, jobId: string): Promise<JobStatu
   return asJson(r);
 }
 
+export async function fetchTrace(
+  key: string,
+  jobId: string,
+  format: "json" | "md" = "json",
+): Promise<string | any> {
+  const base = await apiBase();
+  // Spec: GET /admin/record/{id}/trace(.md/.json) — dùng extension path, fallback ?format alias
+  const suffix = format === "md" ? ".md" : ".json";
+  const urls = [
+    base + "/admin/record/" + encodeURIComponent(jobId) + "/trace" + suffix,
+    base + "/admin/record/" + encodeURIComponent(jobId) + "/trace?format=" + format,
+  ];
+  let lastErr: string | null = null;
+  for (const url of urls) {
+    const r = await fetch(url, { headers: headers(key) });
+    if (r.ok) return format === "json" ? r.json() : r.text();
+    const body = await r.json().catch(() => ({}));
+    lastErr = body?.error?.message || r.statusText;
+    if (r.status !== 404) break;
+  }
+  throw new Error(lastErr || "Trace not found");
+}
+
+export async function fetchTraces(key: string): Promise<{ traces: { name: string; size?: number; mtime?: number }[]; count: number }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/traces", { headers: headers(key) });
+  return asJson(r);
+}
+
+export function traceDownloadUrl(jobId: string, format: "json" | "md" = "json"): string {
+  // Dùng cho <a href> / nút Tải trace (desktop mở qua apiBase + auth header)
+  return "/admin/record/" + encodeURIComponent(jobId) + "/trace." + format;
+}
+
 /** Phân tích lại recipe đã có bằng AI — giữ nguyên slug, ghi đè YAML. */
 export async function reanalyzeRecipe(
   key: string,
