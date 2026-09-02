@@ -11,6 +11,9 @@ __pycache__/
 # `data-*/` phủ mọi biến thể data dir do CHAT2API_DATA_DIR sinh ra khi chạy thử
 # (data-profile/, data-test/...) — chúng chứa cookie đăng nhập, không được commit.
 data/
+!data/traces/
+data/traces/*
+!data/traces/README.md
 data-*/
 .superpowers/
 *.log
