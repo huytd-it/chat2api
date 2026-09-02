@@ -311,6 +311,62 @@ timing:
   ready_timeout_ms: 20000
 ```
 
+### Flow — chia recipe theo việc
+
+Một website thường làm nhiều việc trên cùng một trang: chọn model, chat, tạo ảnh, tạo video. Recipe mô tả từng việc thành một **flow** riêng dưới khóa `flows`, và các flow phối hợp với nhau để phục vụ đúng endpoint OpenAI:
+
+| Flow | Việc | Endpoint |
+|---|---|---|
+| `select_model` | Mở dropdown/menu model (phần dạo đầu dùng chung) | — |
+| `text` | Gửi prompt, đọc câu trả lời dạng chữ | `POST /v1/chat/completions` |
+| `image` | Gửi prompt, lấy ảnh kết quả | `POST /v1/images/generations` |
+| `video` | Gửi prompt, lấy video kết quả | chưa gắn endpoint |
+
+```yaml
+slug: example-web
+url: https://chat.example.com
+
+# prompt/response ở gốc là giá trị mặc định dùng chung — flow nào dùng chung
+# ô nhập thì bỏ trống `prompt` trong flow đó.
+prompt:
+  input_selector: "textarea"
+  input_mode: fill
+  submit: Enter
+response:
+  last_message_selector: ".assistant-message"
+  done_signal: {type: copy_button, quiet_ms: 600, timeout_ms: 120000}
+
+flows:
+  select_model:
+    selector: ".model-btn"          # chờ nút này hiện ra
+    action: "click:.model-btn"      # mở dropdown; chọn model NÀO thì để ở models[].action
+  text:
+    action: "click:[data-tab=chat]" # chuyển về chế độ chat, bỏ hẳn nếu trang không có chế độ
+  image:
+    action: "click:[data-tab=image]"
+    response:
+      media_selector: "img.result"          # ảnh kết quả
+      copy_selector: "button.copy-image"    # nút copy riêng của từng ảnh (tùy chọn)
+      copy_scope: after
+  video:
+    action: "click:[data-tab=video]"
+    prompt:
+      input_selector: "#video-prompt"       # trang này có ô nhập riêng cho video
+      submit: "click:.send-video"
+    response:
+      media_selector: "video.result"
+      done_signal: {type: copy_button, timeout_ms: 600000}
+
+models:
+  - id: example-model
+    capability: chat            # chat | image | video | both, hoặc "chat,image"
+    action: "click:[data-model=example]"
+```
+
+Recipe cũ **không cần sửa gì**: recipe phẳng (chỉ có `prompt`/`response`/`mode`) được đọc thành flow `text` (và `image` nếu có `response.image_selector` hoặc `mode.image_action`) với đúng selector cũ.
+
+Trong desktop app, **Integrations → Ghi thao tác** ghi từng flow một: chọn loại thao tác, bấm ghi, làm thật trên trang, kết thúc đoạn rồi chuyển sang việc tiếp theo. Mỗi thao tác được gắn nhãn đoạn đang mở, nên recipe sinh ra bám đúng việc thay vì để AI tự đoán ranh giới.
+
 ### Tín hiệu hoàn tất
 
 | `response.done_signal.type` | Khi nào dùng |

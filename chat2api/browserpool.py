@@ -313,6 +313,23 @@ class BrowserPool:
                     pass
             logger.info("BrowserPool: đóng tab '%s' (max_tabs=%s)", victim, profile.max_tabs)
 
+    async def close_tab(self, profile_name: str, slug: str) -> bool:
+        """Trả lại tab dài hạn của một cặp (profile, slug).
+
+        Recipe giữ tab sống giữa các request nên không cần hàm này; analyzer thì
+        mượn profile đúng một lần để dò DOM, dọn xong mới không chiếm mất suất
+        `max_tabs` của recipe đang chạy thật.
+        """
+        page = self._pages.pop(f"{profile_name}::{slug}", None)
+        if page is None:
+            return False
+        if not page.is_closed():
+            try:
+                await page.close()
+            except Exception:
+                pass
+        return True
+
     @staticmethod
     def _profile_alive(ctx) -> bool:
         browser = getattr(ctx, "browser", None)

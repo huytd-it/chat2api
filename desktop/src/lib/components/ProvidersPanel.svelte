@@ -49,8 +49,9 @@
   let deleteOpenAITarget = $state<string | null>(null);
 
   // ---- Phân tích lại bằng AI ----
+  const ANON_REANALYZE = "__anon__";
   let reanalyzeSlug = $state<string | null>(null);
-  let reanalyzeProfileId = $state<string>("");
+  let reanalyzeProfileId = $state<string>(ANON_REANALYZE);
   let reanalyzeHeaded = $state(false);
   let reanalyzeBusy = $state(false);
   let reanalyzeJobId = $state<string | null>(null);
@@ -136,37 +137,29 @@
     reanalyzeBusy = true; reanalyzeLog = ""; reanalyzeStatus = "running"; reanalyzeStatusKind = "busy"; reanalyzeJobStatusText = "Đang khởi tạo analyzer…";
     reanalyzeLoginVisible = false;
     try {
-      const profileId = reanalyzeProfileId ? Number(reanalyzeProfileId) : undefined;
+      const profileId = reanalyzeProfileId !== ANON_REANALYZE ? Number(reanalyzeProfileId) : undefined;
       const data = await reanalyzeRecipe($apiKey, reanalyzeSlug, { headed: reanalyzeHeaded, profile_id: profileId ?? null });
       reanalyzeJobStatusText = "Đang chạy job " + data.job_id + "…";
       reanalyzeStartPolling(data.job_id);
     } catch (e) { reanalyzeJobStatusText = "Lỗi: " + e; reanalyzeStatusKind = "error"; reanalyzeStatus = "failed"; }
     finally { reanalyzeBusy = false; }
   }
-  let reanalyzeHasChosen = $state(false);
-  // Giữ lựa chọn cũ nếu vẫn hợp lệ; chỉ lần đầu mới mặc định về profile đầu tiên.
-  // Sau khi người dùng đã chọn (kể cả "Không gắn profile"), các lần sau giữ nguyên.
+  // Giữ đúng lựa chọn đã chọn; mặc định ẩn danh (__anon__), không auto-nhảy sang profile đầu.
+  // Nếu profile đã chọn bị xóa thì về ẩn danh.
   function openReanalyze(slug: string, _url?: string) {
     reanalyzeReset();
     reanalyzeSlug = slug;
-    if (!reanalyzeHasChosen) {
-      reanalyzeProfileId = $profiles[0] ? String($profiles[0].id) : "";
-      reanalyzeHasChosen = true;
-    } else {
-      const stillValid = reanalyzeProfileId && $profiles.some((p) => String(p.id) === reanalyzeProfileId);
-      if (!stillValid && reanalyzeProfileId !== "") {
-        reanalyzeProfileId = $profiles[0] ? String($profiles[0].id) : "";
-      }
-      // keepEmpty (== "") thì giữ nguyên lựa chọn ẩn danh của người dùng
+    if (reanalyzeProfileId !== ANON_REANALYZE && !$profiles.some((p) => String(p.id) === reanalyzeProfileId)) {
+      reanalyzeProfileId = ANON_REANALYZE;
     }
     reanalyzeHeaded = false;
   }
 
   // Nếu profile đã chọn bị xóa ở tab Profiles, quay về ẩn danh thay vì giữ id rác.
   $effect(() => {
-    if (!reanalyzeProfileId) return;
+    if (reanalyzeProfileId === ANON_REANALYZE) return;
     if ($profiles.length && !$profiles.some((p) => String(p.id) === reanalyzeProfileId)) {
-      reanalyzeProfileId = "";
+      reanalyzeProfileId = ANON_REANALYZE;
     }
   });
   // ---- Ghi thao tác thật (record → AI sao chép selector) ----
@@ -503,13 +496,13 @@
         <div class="grid gap-1.5">
           <label for="reanalyze-profile" class="text-sm font-medium">Profile</label>
           <Select.Root type="single" bind:value={reanalyzeProfileId}>
-            <Select.Trigger id="reanalyze-profile" class="h-9 w-full">{#if reanalyzeProfileId}{$profiles.find((p) => String(p.id) === reanalyzeProfileId)?.name ?? reanalyzeProfileId}{:else}Không gắn profile (chạy ẩn danh){/if}</Select.Trigger>
+            <Select.Trigger id="reanalyze-profile" class="h-9 w-full">{#if reanalyzeProfileId !== ANON_REANALYZE}{$profiles.find((p) => String(p.id) === reanalyzeProfileId)?.name ?? reanalyzeProfileId}{:else}Không gắn profile (chạy ẩn danh){/if}</Select.Trigger>
             <Select.Content>
-              <Select.Item value="" label="Không gắn profile">Không gắn profile</Select.Item>
+              <Select.Item value={ANON_REANALYZE} label="Không gắn profile">Không gắn profile</Select.Item>
               {#each $profiles as p (p.id)}<Select.Item value={String(p.id)} label={p.name}>{p.name}</Select.Item>{/each}
             </Select.Content>
           </Select.Root>
-          <p class="text-xs text-muted-foreground">Nếu site cần đăng nhập, phiên sẽ lưu vào profile này.</p>
+          <p class="text-xs text-muted-foreground">AI dò DOM ngay trong profile này nên thấy đúng trang sau đăng nhập; phiên đăng nhập mới cũng lưu vào đây.</p>
         </div>
         <label class="flex cursor-pointer items-center justify-between gap-4 rounded-lg border bg-muted/30 px-3 py-2.5 text-sm">
           <span><strong class="font-medium">Hiện browser khi phân tích</strong><span class="block text-xs text-muted-foreground">Bỏ headless để quan sát.</span></span>

@@ -1,13 +1,16 @@
 import asyncio
+import contextlib
 import os
 import re
 import uuid
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlparse
 
 import yaml
 
+from .. import flows
 from ..providers.browser_recipe import BrowserRecipe, validate_recipe
 from . import dom, llm
 
@@ -68,6 +71,64 @@ QUY TẮC SỬ DỤNG TRACE:
 - Chuỗi click trước khi fill thường là chọn model / chuyển chế độ — xem có cần models[].action hay mode.* không.
 - Vẫn kiểm tra DOM snapshot cuối để xác nhận selector còn tồn tại sau khi user thao tác.
 - Nếu trace rỗng, coi như luồng thường (snapshot only).
+"""
+
+# Trace đã được người dùng chia đoạn theo việc — mỗi đoạn thành một flow.
+SYSTEM_GEN_FLOWS = SYSTEM_GEN_TRACE + """
+
+=== TRACE ĐÃ CHIA ĐOẠN THEO VIỆC ===
+Người dùng đã tự gắn nhãn từng đoạn khi ghi, mỗi đoạn là MỘT việc:
+
+  select_model  Mở dropdown/menu chọn model (phần dạo đầu dùng chung)
+  text          Gửi prompt và đọc câu trả lời dạng chữ   -> /v1/chat/completions
+  image         Gửi prompt và lấy ẢNH kết quả            -> /v1/images/generations
+  video         Gửi prompt và lấy VIDEO kết quả
+
+Vì vậy KHÔNG được tự đoán ranh giới: dịch ĐÚNG từng đoạn thành một mục trong
+khóa `flows` của recipe. Các đoạn đã ghi: {declared_flows}
+
+Thêm khóa `flows` vào YAML, song song với `prompt`/`response` (hai khóa cũ vẫn
+giữ vai trò giá trị mặc định dùng chung cho mọi flow — flow nào dùng chung ô
+nhập thì bỏ trống `prompt` trong flow đó):
+
+flows:
+  select_model:
+    selector: "<css nút mở dropdown model, để chờ nó hiện ra>"
+    action: "click:<nút mở dropdown>"     # phần dùng chung; chọn model NÀO thì để ở models[].action
+  text:
+    action: "click:<tab/nút chuyển về chế độ chat>"   # bỏ hẳn nếu trang không có chế độ
+    prompt:
+      input_selector: "<css ô nhập>"
+      input_mode: fill
+      submit: "Enter"
+    response:
+      last_message_selector: "<css khối trả lời>"
+      done_signal: {{type: copy_button, quiet_ms: 600, timeout_ms: 120000}}
+  image:
+    action: "click:<nút chuyển sang chế độ tạo ảnh>"
+    response:
+      media_selector: "<css ẢNH kết quả>"
+      copy_selector: "<css nút copy riêng của từng ảnh>"   # bỏ nếu không có
+      copy_scope: after
+      done_signal: {{type: copy_button, timeout_ms: 300000}}
+  video:
+    action: "click:<nút chuyển sang chế độ tạo video>"
+    response:
+      media_selector: "<css thẻ video kết quả>"
+      done_signal: {{type: copy_button, timeout_ms: 600000}}
+
+QUY TẮC CHIA FLOW:
+- CHỈ tạo flow cho những đoạn có trong danh sách trên. Không bịa flow chưa ghi.
+- Đoạn select_model: click mở menu là `flows.select_model.action`; click vào ĐÚNG
+  một model cụ thể là `models[].action` của model đó, kèm `models[].id` đặt theo
+  tên model người dùng đã chọn.
+- Đoạn image/video: click chuyển chế độ (nếu có) là `action`; ảnh/video kết quả
+  là `media_selector`; nút copy riêng từng ảnh là `copy_selector` (KHÁC nút copy
+  câu trả lời chữ).
+- models[].capability phải khớp việc model đó làm được: `chat`, `image`, `video`,
+  hoặc nhiều giá trị ngăn bằng dấu phẩy (`chat,image`).
+- Đoạn `(không gắn nhãn)` là thao tác phụ (cuộn, đóng popup, đăng nhập) — chỉ
+  dùng để hiểu ngữ cảnh, KHÔNG dựng thành flow.
 """
 
 
@@ -154,6 +215,43 @@ async def _publish_recipe(recipe: dict, slug: str, url: str, cfg, storage_state:
     return base_dir, final_slug
 
 
+@contextlib.asynccontextmanager
+async def _analyzer_page(pool, analyze_key: str, storage_state: Path | None,
+                          headed: bool, profile, log):
+    """Tab để AI dò DOM.
+
+    Có `profile` thì mượn ĐÚNG persistent context của profile đó: đăng nhập
+    thật nằm trong `user_data_dir` chứ không nằm ở file storage_state (file đó
+    bị xoá ngay sau lần seed đầu — `profiles.clear_seed`). Chạy context tạm sẽ
+    cho AI xem DOM lúc chưa đăng nhập, đúng thứ người dùng chọn profile để
+    tránh.
+
+    `storage_state` được ưu tiên hơn profile: nó là phiên người dùng vừa đăng
+    nhập tay ở bước `waiting_login`, tức bản mới nhất cho vòng chạy này.
+    """
+    if profile is None or storage_state is not None:
+        ctx = await pool.context_for(analyze_key, storage_state, headed=headed)
+        page = await ctx.new_page()
+        try:
+            yield page
+        finally:
+            await page.close()
+        return
+
+    if headed and profile.headless:
+        if pool.open_context(profile.name) is None:
+            profile = replace(profile, headless=False)
+        else:
+            log(f"Profile '{profile.name}' đang mở sẵn ở chế độ ẩn — lần này không hiện browser được.")
+    log(f"Dò DOM trong profile '{profile.name}'.")
+    async with pool.hold(profile.name, f"{profile.name}::{analyze_key}"):
+        page = await pool.page_for(profile, analyze_key)
+        try:
+            yield page
+        finally:
+            await pool.close_tab(profile.name, analyze_key)
+
+
 async def _trial_and_publish(recipe: dict, slug: str, url: str, cfg, pool, storage_state: Path | None,
                               analyze_key: str, publish_lock, headed: bool,
                               forced_slug: str | None, log) -> dict | None:
@@ -172,11 +270,28 @@ async def _trial_and_publish(recipe: dict, slug: str, url: str, cfg, pool, stora
     trial_dir.mkdir(parents=True, exist_ok=True)
     await pool.drop(trial_slug)
     runner = BrowserRecipe(trial_recipe, trial_dir, pool, headed=headed, accounts_root=cfg.recipes_dir)
+    # Round-trip kiểm chứng là một lượt CHAT. Recipe chỉ ghi thao tác tạo
+    # ảnh/video thì không có gì để chat, thử sẽ hỏng vĩnh viễn — publish thẳng
+    # và nói rõ là chưa kiểm chứng, hơn là bắt người dùng ghi lại vô ích.
+    chat_model = next((m for m in recipe.get("models") or []
+                       if isinstance(m, dict) and "text" in flows.flows_of(m)), None)
+    if "text" not in flows.build_flows(recipe) or chat_model is None:
+        log("Recipe không có flow text — bỏ qua round-trip, publish luôn "
+            "(flow ảnh/video chưa được kiểm chứng tự động).")
+        lock = publish_lock or asyncio.Lock()
+        async with lock:
+            base_dir, final_slug = await _publish_recipe(
+                recipe, desired_slug, url, cfg, storage_state, publish_lock, forced_slug, log)
+            await pool.drop(final_slug)
+        await pool.drop(trial_slug)
+        model_id = f"{final_slug}/{recipe['models'][0]['id']}"
+        log(f"Đã lưu: {model_id}")
+        return {"status": "ok", "slug": final_slug, "model_id": model_id}
     trial = [{"role": "user", "content": "Reply with exactly: OK"}]
     try:
         log("Thử round-trip ...")
         parts = []
-        async for d in runner.stream(trial, trial_recipe["models"][0]["id"]):
+        async for d in runner.stream(trial, chat_model["id"]):
             parts.append(d)
         reply = "".join(parts).strip()
         if reply and reply.lower() != "reply with exactly: ok":
@@ -197,22 +312,36 @@ async def _trial_and_publish(recipe: dict, slug: str, url: str, cfg, pool, stora
 async def build_recipe_from_trace(url: str, trace: list[dict], snapshot: str,
                                    pool, cfg, log, storage_state: Path | None = None,
                                    analyze_key: str | None = None, publish_lock=None,
-                                   headed: bool = False, forced_slug: str | None = None) -> dict:
+                                   headed: bool = False, forced_slug: str | None = None,
+                                   segments: list[str] | None = None) -> dict:
     """Sinh recipe từ trace thao tác thật của user.
 
     Luồng giống ``integrate`` nhưng LLM được bơm thêm ACTION TRACE với selector
     thực sự bị tác động — giúp output bám sát thao tác thật thay vì đoán.
-    Phần trial+publish tái dùng ``_trial_and_publish``.
+
+    ``segments`` là các đoạn người dùng đã gắn nhãn lúc ghi (``select_model`` /
+    ``text`` / ``image`` / ``video``). Có nhãn thì trace được nhóm theo đoạn và
+    LLM dựng thẳng khóa ``flows``; không có nhãn thì rơi về luồng cũ (một trace
+    phẳng, một luồng chat). Phần trial+publish tái dùng ``_trial_and_publish``.
     """
-    from .recorder import format_trace_for_prompt
+    from .recorder import format_trace_by_flow, format_trace_for_prompt
 
     slug = forced_slug or _domain_slug(url)
     analyze_key = analyze_key or f"{slug}__trace"
-    trace_block = format_trace_for_prompt(trace)
+    declared = [s for s in (segments or []) if s in flows.FLOW_KINDS]
+    trace_block = format_trace_by_flow(trace) if declared else format_trace_for_prompt(trace)
     snapshot_block = snapshot or "(không có snapshot cuối)"
+    if declared:
+        log("Đoạn đã ghi: " + ", ".join(flows.FLOW_LABELS.get(f, f) for f in declared))
     fix_ctx = ""
     for rnd in range(1, cfg.integrate_max_rounds + 1):
-        user = SYSTEM_GEN_TRACE.format(trace_block=trace_block, snapshot_block=snapshot_block)
+        if declared:
+            user = SYSTEM_GEN_FLOWS.format(
+                trace_block=trace_block, snapshot_block=snapshot_block,
+                declared_flows=", ".join(declared))
+        else:
+            user = SYSTEM_GEN_TRACE.format(trace_block=trace_block,
+                                           snapshot_block=snapshot_block)
         if fix_ctx:
             user += f"\n\nPhản hồi vòng trước bị lỗi:\n{fix_ctx}"
         user = f"URL: {url}\n\n{user}"
@@ -246,16 +375,15 @@ async def build_recipe_from_trace(url: str, trace: list[dict], snapshot: str,
 
 
 async def analyze_preview(url: str, pool, cfg, log, storage_state: Path | None = None,
-                           analyze_key: str | None = None, headed: bool = False) -> dict:
+                           analyze_key: str | None = None, headed: bool = False,
+                           profile=None) -> dict:
     """Chạy đúng luồng phân tích của `integrate` nhưng KHÔNG thử round-trip hay ghi đĩa.
 
     Trả về recipe dict để frontend tự điền vào form chi tiết — người dùng bấm lưu thủ công.
     """
     slug = _domain_slug(url)
     analyze_key = analyze_key or f"__analyze_preview__{slug}"
-    ctx = await pool.context_for(analyze_key, storage_state, headed=headed)
-    page = await ctx.new_page()
-    try:
+    async with _analyzer_page(pool, analyze_key, storage_state, headed, profile, log) as page:
         log(f"Mở {url} ...")
         await page.goto(url, wait_until="domcontentloaded", timeout=45000)
         if await _looks_like_login(page):
@@ -283,22 +411,19 @@ async def analyze_preview(url: str, pool, cfg, log, storage_state: Path | None =
             notes = str(data.get("notes") or "")
             return {"status": "ok", "slug": slug, "recipe": recipe, "notes": notes}
         return {"status": "failed", "error": "Hết vòng thử mà không sinh được recipe."}
-    finally:
-        await page.close()
 
 
 async def integrate(url: str, pool, cfg, log, storage_state: Path | None = None,
                      analyze_key: str | None = None, publish_lock=None,
-                     headed: bool = False, forced_slug: str | None = None) -> dict:
+                     headed: bool = False, forced_slug: str | None = None,
+                     profile=None) -> dict:
     from ..config import Config  # noqa: F401  (type hint)
 
     slug = forced_slug or _domain_slug(url)
     analyze_key = analyze_key or f"{slug}__analyze"
-    ctx = await pool.context_for(analyze_key, storage_state, headed=headed)
-    page = await ctx.new_page()
 
     fix_ctx = ""
-    try:
+    async with _analyzer_page(pool, analyze_key, storage_state, headed, profile, log) as page:
         log(f"Mở {url} ...")
         await page.goto(url, wait_until="domcontentloaded", timeout=45000)
         if await _looks_like_login(page):
@@ -335,5 +460,3 @@ async def integrate(url: str, pool, cfg, log, storage_state: Path | None = None,
             log(fix_ctx)
         return {"status": "failed", "slug": slug,
                 "hint": "Hết vòng thử. Xem log, chỉnh recipes/<slug>/recipe.yaml tay."}
-    finally:
-        await page.close()

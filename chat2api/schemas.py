@@ -59,6 +59,17 @@ class RecordRequest(BaseModel):
     slug: str | None = None  # ghi lại recipe đang có thì truyền slug hiện có
 
 
+class RecordSegmentRequest(BaseModel):
+    """Mở/đóng một đoạn ghi trong phiên đang chạy.
+
+    ``action="start"`` mở đoạn cho ``flow`` (đóng đoạn đang mở nếu có);
+    ``action="stop"`` đóng đoạn hiện tại và không cần ``flow``.
+    """
+
+    action: str = "start"           # start | stop
+    flow: str | None = None         # select_model | text | image | video
+
+
 class RecipePromptSpec(BaseModel):
     input_selector: str
     input_mode: str = "fill"      # fill | type

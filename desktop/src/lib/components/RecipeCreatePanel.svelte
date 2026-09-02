@@ -24,16 +24,19 @@
   let slug = $state("");
   let advancedOpen = $state(false);
 
-  let selectedProfileId = $state("");
-  const selectedProfileName = $derived($profiles.find((p) => String(p.id) === selectedProfileId)?.name ?? "");
+  const ANON_RCP = "__anon__";
+  let selectedProfileId = $state(ANON_RCP);
+  const selectedProfileName = $derived(
+    selectedProfileId === ANON_RCP ? "" : ($profiles.find((p) => String(p.id) === selectedProfileId)?.name ?? "")
+  );
 
   let headedAnalyze = $state(false);
-  // rcp-profile: giữ lựa chọn khi danh sách profiles đổi (tạo/xóa).
-  // Nếu profile đã chọn bị xóa thì về "Không dùng — ẩn danh", không tự nhảy sang profile khác.
+  // rcp-profile: sentinel __anon__ thay cho "" để bits-ui không nhầm "rỗng" (hasValue).
+  // Giữ đúng lựa chọn khi danh sách profiles đổi; nếu profile đã chọn bị xóa thì về ẩn danh.
   $effect(() => {
-    if (!selectedProfileId) return;
+    if (selectedProfileId === ANON_RCP) return;
     if ($profiles.length && !$profiles.some((p) => String(p.id) === selectedProfileId)) {
-      selectedProfileId = "";
+      selectedProfileId = ANON_RCP;
     }
   });
   let headedTest = $state(false);
@@ -79,7 +82,7 @@
     try {
       const data = await analyzeRecipeDraft($apiKey, url, {
         headed: headedAnalyze,
-        profileId: selectedProfileId ? Number(selectedProfileId) : null,
+        profileId: selectedProfileId !== ANON_RCP ? Number(selectedProfileId) : null,
       });
       analyzeLog = (data.log ?? []) as string[];
       if (data.status === "login_required") {
@@ -161,7 +164,7 @@
               {selectedProfileName || "Không dùng — ẩn danh"}
             </Select.Trigger>
             <Select.Content>
-              <Select.Item value="" label="Không dùng — ẩn danh">Không dùng — ẩn danh</Select.Item>
+              <Select.Item value={ANON_RCP} label="Không dùng — ẩn danh">Không dùng — ẩn danh</Select.Item>
               {#each $profiles as p (p.id)}
                 <Select.Item value={String(p.id)} label={p.name}>{p.name}</Select.Item>
               {/each}
@@ -196,13 +199,13 @@
         <div class="flex items-center gap-2 text-sm font-semibold"><RecordIcon size={16} class="text-primary" aria-hidden="true" /> Ghi thao tác thật</div>
         <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
           Khi AI đoán sai DOM: nhập URL ở <span class="font-medium text-foreground">Trang đích</span>, chọn profile bên trên rồi bấm ghi — một cửa sổ Chromium mở ra, bạn gõ prompt / gửi / bấm Copy như dùng thật. AI sao chép đúng các selector bị tác động để sinh recipe và tự chạy thử.
-          {#if !selectedProfileId}<span class="font-medium text-warning"> Cần chọn profile trước.</span>{/if}
+          {#if selectedProfileId === ANON_RCP}<span class="font-medium text-warning"> Cần chọn profile trước.</span>{/if}
         </p>
       </div>
       <RecordSessionPanel
         url={form.url}
-        profileId={selectedProfileId ? Number(selectedProfileId) : null}
-        disabled={!form.url.trim() || !selectedProfileId || analyzing}
+        profileId={selectedProfileId !== ANON_RCP ? Number(selectedProfileId) : null}
+        disabled={!form.url.trim() || selectedProfileId === ANON_RCP || analyzing}
         onSuccess={(s) => { if (s) onSuccess?.(s); }}
       />
     </div>

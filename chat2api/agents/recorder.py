@@ -71,25 +71,56 @@ RECORDER_JS = (
 )
 
 
+def _row(index: int, ev: dict[str, Any]) -> str:
+    kind = ev.get("kind") or ev.get("type") or "?"
+    sel = (ev.get("selector") or "")[:180]
+    label = (ev.get("label") or "")[:60]
+    extra = ""
+    if ev.get("value") is not None:
+        v = str(ev["value"])[:120]
+        extra = f" value={json.dumps(v, ensure_ascii=False)}"
+    if ev.get("key"):
+        extra += f" key={ev['key']!r}"
+    if ev.get("url"):
+        extra += f" url~{ev['url'][:80]}"
+    return (f"{index}. {kind} sel={sel!r} tag={ev.get('tag','')} "
+            f"label={json.dumps(label, ensure_ascii=False)}{extra}")
+
+
 def format_trace_for_prompt(trace: list[dict[str, Any]], max_entries: int = 80) -> str:
     """Rút gọn trace để nhúng vào prompt LLM."""
     if not trace:
         return "(chưa ghi được thao tác nào — chỉ có snapshot cuối)"
-    rows: list[str] = []
-    for i, ev in enumerate(trace[-max_entries:], 1):
-        kind = ev.get("kind") or ev.get("type") or "?"
-        sel = (ev.get("selector") or "")[:180]
-        label = (ev.get("label") or "")[:60]
-        extra = ""
-        if ev.get("value") is not None:
-            v = str(ev["value"])[:120]
-            extra = f" value={json.dumps(v, ensure_ascii=False)}"
-        if ev.get("key"):
-            extra += f" key={ev['key']!r}"
-        if ev.get("url"):
-            extra += f" url~{ev['url'][:80]}"
-        rows.append(f"{i}. {kind} sel={sel!r} tag={ev.get('tag','')} label={json.dumps(label, ensure_ascii=False)}{extra}")
-    return "\n".join(rows)
+    return "\n".join(_row(i, ev) for i, ev in enumerate(trace[-max_entries:], 1))
+
+
+def format_trace_by_flow(trace: list[dict[str, Any]], max_entries: int = 60) -> str:
+    """Trace nhóm theo đoạn người dùng đã gắn nhãn lúc ghi.
+
+    Mỗi đoạn là một việc riêng (chọn model / text / image / video) nên LLM
+    không phải tự đoán ranh giới — nó chỉ việc dịch từng đoạn thành một flow
+    trong recipe. Event ghi ngoài mọi đoạn xếp vào nhóm ``(không gắn nhãn)``.
+    """
+    from ..flows import FLOW_KINDS, FLOW_LABELS
+
+    if not trace:
+        return "(chưa ghi được thao tác nào — chỉ có snapshot cuối)"
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for ev in trace:
+        groups.setdefault(str(ev.get("flow") or ""), []).append(ev)
+    if list(groups) == [""]:
+        return format_trace_for_prompt(trace)
+
+    order = [k for k in FLOW_KINDS if k in groups] + ([""] if "" in groups else [])
+    blocks: list[str] = []
+    for flow in order:
+        events = groups[flow][-max_entries:]
+        title = FLOW_LABELS.get(flow, "(không gắn nhãn — thao tác phụ)") if flow else \
+            "(không gắn nhãn — thao tác phụ)"
+        header = f"[ĐOẠN: {flow or 'unlabeled'}] {title}"
+        rows = "\n".join(_row(i, ev) for i, ev in enumerate(events, 1))
+        blocks.append(f"{header}\n{rows}")
+    return "\n\n".join(blocks)
 
 
 async def attach_recorder(page, on_action) -> None:

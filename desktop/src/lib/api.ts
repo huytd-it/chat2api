@@ -36,6 +36,25 @@ export interface LogEntry {
   message: string;
 }
 
+/** Loại thao tác trong một đoạn ghi. Khớp `chat2api/flows.py`. */
+export type FlowKind = "select_model" | "text" | "image" | "video";
+
+export const FLOW_KINDS: FlowKind[] = ["select_model", "text", "image", "video"];
+
+export const FLOW_LABELS: Record<FlowKind, string> = {
+  select_model: "Chọn model",
+  text: "Generate text",
+  image: "Generate image",
+  video: "Generate video",
+};
+
+/** Một đoạn đã ghi trong phiên: ghi cho việc gì và bắt được bao nhiêu thao tác. */
+export interface RecordSegment {
+  flow: FlowKind;
+  events: number;
+  open: boolean;
+}
+
 export interface JobStatus {
   status: string;
   kind?: string;
@@ -43,6 +62,9 @@ export interface JobStatus {
   can_complete_login?: boolean;
   can_finish_record?: boolean;
   slug?: string;
+  /** Đoạn đang ghi, null khi không ghi đoạn nào. */
+  segment?: FlowKind | null;
+  segments?: RecordSegment[];
 }
 
 export interface AccountInfo {
@@ -712,6 +734,21 @@ export async function startRecord(
     method: "POST",
     headers: headers(key),
     body: JSON.stringify(body),
+  });
+  return asJson(r);
+}
+
+/** Mở đoạn ghi cho `flow`, hoặc đóng đoạn đang mở khi `flow` là null. */
+export async function setRecordSegment(
+  key: string,
+  jobId: string,
+  flow: FlowKind | null,
+): Promise<JobStatus> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/record/" + encodeURIComponent(jobId) + "/segment", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify(flow ? { action: "start", flow } : { action: "stop" }),
   });
   return asJson(r);
 }

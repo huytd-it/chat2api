@@ -370,5 +370,138 @@ async def test_concurrent_authenticated_publication_separates_hosts_and_state(tm
     }
 
 
+RECIPE_YAML = (
+    "slug: example\nurl: https://example.test/chat\n"
+    "prompt:\n  input_selector: '#p'\n"
+    "response:\n  last_message_selector: '.m'\n  done_signal:\n    type: stable_text\n"
+    "models:\n  - id: web\n"
+)
+
+
+def _profile_pool(monkeypatch, calls):
+    """Pool giả ghi lại analyzer mượn đường nào để mở tab."""
+    import contextlib
+
+    class Page:
+        async def goto(self, *args, **kwargs): ...
+        async def close(self): calls["closed"].append("anon-page")
+
+    class Context:
+        async def new_page(self): return Page()
+
+    class Pool:
+        async def context_for(self, key, storage_state=None, headed=False):
+            calls["context_for"].append((key, storage_state))
+            return Context()
+
+        async def page_for(self, profile, slug):
+            calls["page_for"].append((profile.name, slug, profile.headless))
+            return Page()
+
+        async def close_tab(self, profile_name, slug):
+            calls["closed"].append((profile_name, slug))
+            return True
+
+        def open_context(self, profile_name):
+            return calls.get("open_context")
+
+        @contextlib.asynccontextmanager
+        async def hold(self, profile_name, tab_key=""):
+            calls["held"].append(tab_key)
+            yield
+
+    async def fake_chat_json(cfg, system, user, timeout=180):
+        return {"recipe_yaml": RECIPE_YAML}
+
+    from chat2api.agents import analyzer
+
+    monkeypatch.setattr(analyzer.llm, "chat_json", fake_chat_json)
+    monkeypatch.setattr(analyzer.dom, "snapshot", lambda page: _async_value("dom"))
+    monkeypatch.setattr(analyzer, "_looks_like_login", lambda page: _async_value(False))
+    return Pool()
+
+
+async def test_analyze_preview_reads_dom_inside_chosen_profile(tmp_path, monkeypatch):
+    """Chọn profile = dò DOM trong persistent context của profile đó.
+
+    Đây là điều người dùng mua khi chọn profile: thấy trang SAU đăng nhập. Chạy
+    context ẩn danh thì AI đọc nhầm màn hình login.
+    """
+    from dataclasses import dataclass
+    from types import SimpleNamespace
+    from chat2api.agents import analyzer
+
+    @dataclass
+    class FakeProfile:
+        id: int
+        name: str
+        headless: bool
+
+    cfg = SimpleNamespace(recipes_dir=tmp_path / "recipes", integrate_max_rounds=1)
+    calls = {"context_for": [], "page_for": [], "closed": [], "held": [], "open_context": None}
+    pool = _profile_pool(monkeypatch, calls)
+
+    result = await analyzer.analyze_preview(
+        "https://example.test/chat", pool, cfg, lambda _: None,
+        analyze_key="job1", profile=FakeProfile(id=7, name="chrome-a", headless=True))
+
+    assert result["status"] == "ok"
+    assert calls["context_for"] == []          # không mở context ẩn danh
+    assert calls["page_for"] == [("chrome-a", "job1", True)]
+    assert calls["held"] == ["chrome-a::job1"]
+    assert calls["closed"] == [("chrome-a", "job1")]   # trả lại suất max_tabs
+
+
+async def test_analyze_preview_headed_opens_profile_visibly(tmp_path, monkeypatch):
+    """'Hiện browser khi phân tích' phải thắng `profile.headless` lúc chưa mở."""
+    from dataclasses import dataclass
+    from types import SimpleNamespace
+    from chat2api.agents import analyzer
+
+    @dataclass
+    class FakeProfile:
+        id: int
+        name: str
+        headless: bool
+
+    cfg = SimpleNamespace(recipes_dir=tmp_path / "recipes", integrate_max_rounds=1)
+    calls = {"context_for": [], "page_for": [], "closed": [], "held": [], "open_context": None}
+    pool = _profile_pool(monkeypatch, calls)
+
+    await analyzer.analyze_preview(
+        "https://example.test/chat", pool, cfg, lambda _: None,
+        analyze_key="job1", headed=True,
+        profile=FakeProfile(id=7, name="chrome-a", headless=True))
+
+    assert calls["page_for"] == [("chrome-a", "job1", False)]
+
+
+async def test_analyze_preview_storage_state_beats_profile(tmp_path, monkeypatch):
+    """Phiên vừa đăng nhập tay (storage_state) mới nhất — dùng nó, không mượn profile."""
+    from dataclasses import dataclass
+    from types import SimpleNamespace
+    from chat2api.agents import analyzer
+
+    @dataclass
+    class FakeProfile:
+        id: int
+        name: str
+        headless: bool
+
+    cfg = SimpleNamespace(recipes_dir=tmp_path / "recipes", integrate_max_rounds=1)
+    calls = {"context_for": [], "page_for": [], "closed": [], "held": [], "open_context": None}
+    pool = _profile_pool(monkeypatch, calls)
+    state = tmp_path / "state.json"
+    state.write_text("{}")
+
+    await analyzer.analyze_preview(
+        "https://example.test/chat", pool, cfg, lambda _: None,
+        storage_state=state, analyze_key="job1",
+        profile=FakeProfile(id=7, name="chrome-a", headless=True))
+
+    assert calls["context_for"] == [("job1", state)]
+    assert calls["page_for"] == []
+
+
 async def _async_value(value):
     return value

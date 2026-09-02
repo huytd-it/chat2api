@@ -15,7 +15,10 @@ export default defineConfig(async () => ({
   clearScreen: false,
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
-    port: 1420,
+    // 1420 falls inside Windows' Hyper-V/WSL reserved TCP range on some
+    // machines (netsh interface ipv4 show excludedportrange) and silently
+    // fails to bind; override via env when that happens.
+    port: Number(process.env.TAURI_DEV_PORT) || 1420,
     strictPort: true,
     host: host || false,
     hmr: host

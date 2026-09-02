@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -292,3 +294,202 @@ async def test_close_all_cancels_and_drains_pending_start(tmp_path):
     assert manager._pending == {}
     assert pw.stopped
     assert not await manager.has("j1")
+
+
+# --------------------------------------------------- start_recording (profile)
+#
+# "Ghi thao tác" phải mở đúng persistent context của profile đã chọn (cookie
+# đăng nhập sẵn có), không phải một browser ẩn danh trắng phiên. Các fake dưới
+# đây mô phỏng đúng bề mặt của BrowserPool mà start_recording gọi tới, không
+# cần Chromium thật.
+
+
+@dataclass
+class FakeProfile:
+    # dataclass thật vì login_sessions.start_recording gọi dataclasses.replace()
+    # trên `profile` giống hệt chat2api.profiles.Profile ở production.
+    name: str = "main"
+    headless: bool = True
+
+
+class FakeRecordContext:
+    def __init__(self):
+        self.saved = None
+
+    async def storage_state(self, path):
+        self.saved = Path(path)
+        self.saved.parent.mkdir(parents=True, exist_ok=True)
+        self.saved.write_text("{}")
+
+    async def cookies(self):
+        return []
+
+
+class FakeRecordPage:
+    def __init__(self, url="about:blank"):
+        self.context = FakeRecordContext()
+        self.main_frame = None
+        self.url = url
+        self.goto_calls = []
+        self._closed = False
+
+    async def goto(self, url, **kwargs):
+        self.goto_calls.append(url)
+
+    def on(self, *args, **kwargs):
+        pass
+
+    def is_closed(self):
+        return self._closed
+
+    async def close(self):
+        self._closed = True
+
+
+class FakeRecordPool:
+    """Chỉ implement đúng bề mặt mà LoginSessionManager.start_recording dùng."""
+
+    def __init__(self, already_open=False, already_headless=False):
+        self.already_open = already_open
+        self.already_headless = already_headless
+        self.hold_calls: list[tuple] = []
+        self.page_for_calls: list[tuple] = []
+        self.closed_tabs: list[tuple] = []
+        self.pages: dict[tuple, FakeRecordPage] = {}
+
+    def open_context(self, name):
+        return object() if self.already_open else None
+
+    def profile_headless(self, name):
+        return self.already_headless
+
+    @contextlib.asynccontextmanager
+    async def hold(self, profile_name, tab_key=""):
+        self.hold_calls.append((profile_name, tab_key, "enter"))
+        try:
+            yield
+        finally:
+            self.hold_calls.append((profile_name, tab_key, "exit"))
+
+    async def page_for(self, profile, tab_key):
+        page = FakeRecordPage()
+        self.pages[(profile.name, tab_key)] = page
+        self.page_for_calls.append((profile.name, tab_key, profile.headless))
+        return page
+
+    async def close_tab(self, profile_name, tab_key):
+        page = self.pages.pop((profile_name, tab_key), None)
+        if page is None:
+            return False
+        await page.close()
+        self.closed_tabs.append((profile_name, tab_key))
+        return True
+
+
+async def test_start_recording_reuses_profile_persistent_context():
+    """Chưa mở lần nào -> mở mới ép headed, ghi trong context của PROFILE
+    (không phải browser ẩn danh riêng)."""
+    pool = FakeRecordPool(already_open=False)
+    profile = FakeProfile("codex08", headless=True)
+    manager = LoginSessionManager()
+
+    await manager.start_recording("j1", "record", "https://chat.qwen.ai", Path("recipes/.login/j1"),
+                                  pool, profile)
+
+    assert await manager.has("j1")
+    assert pool.page_for_calls == [("codex08", "record-j1", False)]   # ép headed=False (hiện cửa sổ)
+    assert pool.hold_calls[0] == ("codex08", "record-j1", "enter")
+    page = pool.pages[("codex08", "record-j1")]
+    assert page.goto_calls == ["https://chat.qwen.ai"]
+
+    session = manager._sessions["j1"]
+    assert session.browser is None            # không sở hữu browser riêng
+    assert session.pool is pool
+    assert session.profile_name == "codex08"
+    assert session.tab_key == "record-j1"
+
+
+async def test_start_recording_refuses_when_profile_already_open_headless():
+    """Profile đang chạy nền (headless) từ trước -> không mở được cửa sổ thật,
+    báo lỗi rõ thay vì âm thầm ghi trong chế độ ẩn (vô dụng vì cần thao tác tay)."""
+    pool = FakeRecordPool(already_open=True, already_headless=True)
+    profile = FakeProfile("codex08", headless=True)
+    manager = LoginSessionManager()
+
+    with pytest.raises(LoginSessionError, match="headless"):
+        await manager.start_recording("j1", "record", "https://chat.qwen.ai", Path("x"),
+                                      pool, profile)
+
+    assert not await manager.has("j1")
+    assert pool.page_for_calls == []
+    assert pool.hold_calls == []
+
+
+async def test_start_recording_reuses_existing_headed_profile_as_is():
+    """Profile đã mở sẵn (không headless) -> dùng nguyên context đó, không ép
+    lại `headless` (đang mở rồi thì không đổi flag khởi động được nữa)."""
+    pool = FakeRecordPool(already_open=True, already_headless=False)
+    profile = FakeProfile("codex08", headless=True)
+    manager = LoginSessionManager()
+
+    await manager.start_recording("j1", "record", "https://chat.qwen.ai", Path("x"), pool, profile)
+
+    assert pool.page_for_calls == [("codex08", "record-j1", True)]  # giữ nguyên profile.headless gốc
+    assert await manager.has("j1")
+
+
+async def test_complete_closes_only_the_tab_not_the_profile_context():
+    pool = FakeRecordPool(already_open=False)
+    profile = FakeProfile("codex08", headless=True)
+    manager = LoginSessionManager()
+    await manager.start_recording("j1", "record", "https://chat.qwen.ai",
+                                  Path("recipes") / ".login" / "j1", pool, profile)
+    page = pool.pages[("codex08", "record-j1")]
+
+    state_path = await manager.complete("j1")
+
+    assert state_path == Path("recipes") / ".login" / "j1" / "auth" / "state.json"
+    assert state_path.exists()
+    state_path.unlink()
+    assert pool.closed_tabs == [("codex08", "record-j1")]        # chỉ đóng tab ghi
+    assert pool.hold_calls[-1] == ("codex08", "record-j1", "exit")
+    assert not await manager.has("j1")
+    assert page.is_closed()   # tab đóng qua close_tab; profile context không bị đụng tới
+
+
+async def test_cancel_closes_only_the_tab_not_the_profile_context():
+    pool = FakeRecordPool(already_open=False)
+    profile = FakeProfile("codex08", headless=True)
+    manager = LoginSessionManager()
+    await manager.start_recording("j1", "record", "https://chat.qwen.ai", Path("x"), pool, profile)
+
+    await manager.cancel("j1")
+
+    assert pool.closed_tabs == [("codex08", "record-j1")]
+    assert pool.hold_calls[-1] == ("codex08", "record-j1", "exit")
+    assert not await manager.has("j1")
+
+
+async def test_start_recording_cleans_up_tab_and_hold_on_goto_failure():
+    pool = FakeRecordPool(already_open=False)
+    profile = FakeProfile("codex08", headless=True)
+    manager = LoginSessionManager()
+
+    async def boom(url, **kwargs):
+        raise RuntimeError("goto failed")
+
+    real_page_for = pool.page_for
+
+    async def page_for(profile, tab_key):
+        page = await real_page_for(profile, tab_key)
+        page.goto = boom
+        return page
+
+    pool.page_for = page_for
+
+    with pytest.raises(LoginSessionError, match="Unable to start record session"):
+        await manager.start_recording("j1", "record", "https://x", Path("x"), pool, profile)
+
+    assert not await manager.has("j1")
+    assert pool.closed_tabs == [("codex08", "record-j1")]
+    assert pool.hold_calls[-1] == ("codex08", "record-j1", "exit")

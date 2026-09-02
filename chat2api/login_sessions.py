@@ -24,6 +24,14 @@ class LoginSession:
     # trace thao tác cho phiên ghi (LoginSessionManager cũng phục vụ cho record)
     trace: list[dict] | None = None
     on_trace: Any | None = None
+    # Phiên ghi trong persistent context CỦA PROFILE (start_recording) không sở
+    # hữu `browser` riêng — dọn dẹp phải đóng đúng tab + nhả `hold`, KHÔNG đóng
+    # context (nó còn sống cho các request khác của profile). `pool is None`
+    # nghĩa là phiên browser tạm ẩn danh cũ (`start`), dọn qua `browser`.
+    pool: Any | None = None
+    profile_name: str | None = None
+    tab_key: str | None = None
+    hold: Any | None = None
 
 
 async def _finish_cleanup(cleanup) -> None:
@@ -42,6 +50,27 @@ async def _close(resource, method: str) -> None:
         await getattr(resource, method)()
     except Exception:
         pass
+
+
+async def _close_record_resources(pool, profile_name, tab_key, hold) -> None:
+    """Đóng đúng tab ghi trong profile + nhả `hold`, không đóng persistent context."""
+    try:
+        if pool is not None and profile_name and tab_key:
+            await pool.close_tab(profile_name, tab_key)
+    except Exception:
+        pass
+    if hold is not None:
+        try:
+            await hold.aclose()
+        except Exception:
+            pass
+
+
+async def _close_session_resources(session) -> None:
+    if session.pool is not None:
+        await _close_record_resources(session.pool, session.profile_name, session.tab_key, session.hold)
+    else:
+        await _close(session.browser, "close")
 
 
 class LoginSessionManager:
@@ -137,13 +166,17 @@ class LoginSessionManager:
             await _finish_cleanup(self._remove_pending(job_id, current_task))
 
     async def start_recording(self, job_id: str, slug: str, url: str, recipe_dir: Path,
-                            storage_state: Path | None = None,
+                            pool: Any, profile: Any,
                             on_trace: Any | None = None) -> None:
-        """Mở headed browser cho phiên ghi thao tác.
+        """Mở tab ghi thao tác NGAY TRONG persistent context của `profile`.
 
-        Tương tự ``start`` nhưng gắn recorder JS (exposeBinding + initScript)
-        và giữ ``trace`` trong session. ``on_trace`` (nếu có) được gọi mỗi khi
-        ghi được một action — dùng để tỉa bớt/giản lược ở jobs nếu cần.
+        Khác ``start`` (browser ẩn danh tạm, luôn trắng phiên): ở đây tái dùng
+        đúng ``BrowserPool.context_for_profile`` của `profile` qua
+        ``pool.page_for``, nên cookie/localStorage đăng nhập sẵn có của profile
+        đó hiện diện ngay khi cửa sổ ghi mở ra — không phải đăng nhập lại. Tab
+        ghi dùng khoá riêng (`record-<job_id>`) nên không đụng tab đang phục vụ
+        request thật của profile; dọn dẹp (`complete`/`cancel`) chỉ đóng tab đó,
+        KHÔNG đóng persistent context (nó còn phục vụ recipe khác).
         """
         trace: list[dict] = []
 
@@ -157,7 +190,6 @@ class LoginSessionManager:
                 except Exception:
                     pass
 
-        # Tái dùng toàn bộ khởi tạo của start, nhưng chen chỗ gắn recorder.
         current_task = asyncio.current_task()
         async with self._lock:
             if self._closing:
@@ -166,21 +198,22 @@ class LoginSessionManager:
                 raise LoginSessionError(f"Login session already exists for job {job_id}")
             self._pending[job_id] = current_task
 
-        browser = None
+        from contextlib import AsyncExitStack
+        from dataclasses import replace
+
+        tab_key = f"record-{job_id}"
+        hold = AsyncExitStack()
         try:
-            playwright = await self._ensure_driver()
-            launch = asyncio.create_task(playwright.chromium.launch(headless=False))
-            try:
-                browser = await asyncio.shield(launch)
-            except asyncio.CancelledError:
-                try:
-                    browser = await launch
-                except Exception:
-                    pass
-                raise
-            state = str(storage_state) if storage_state and storage_state.exists() else None
-            context = await browser.new_context(storage_state=state)
-            page = await context.new_page()
+            if pool.open_context(profile.name) is None:
+                # Chưa mở lần nào trong tiến trình này -> mở mới, ép headed để
+                # người dùng thấy cửa sổ mà thao tác.
+                profile = replace(profile, headless=False)
+            elif pool.profile_headless(profile.name):
+                raise LoginSessionError(
+                    f"Profile '{profile.name}' đang chạy ẩn (headless) — đóng profile ở "
+                    "tab Profiles rồi ghi lại để mở được cửa sổ thật.")
+            await hold.enter_async_context(pool.hold(profile.name, tab_key))
+            page = await pool.page_for(profile, tab_key)
             # Gắn recorder TRƯỚC khi goto để bắt được click sớm nhất.
             try:
                 from .agents.recorder import attach_recorder
@@ -213,18 +246,19 @@ class LoginSessionManager:
             await page.goto(url, wait_until="domcontentloaded", timeout=45000)
             session = LoginSession(
                 job_id=job_id, slug=slug, url=url, recipe_dir=Path(recipe_dir),
-                browser=browser, context=context, page=page, created_at=time.time(),
+                browser=None, context=page.context, page=page, created_at=time.time(),
                 trace=trace, on_trace=trace_sink,
+                pool=pool, profile_name=profile.name, tab_key=tab_key, hold=hold,
             )
             async with self._lock:
                 if self._closing:
                     raise LoginSessionError("Login session manager is closed")
                 self._sessions[job_id] = session
         except asyncio.CancelledError:
-            await _finish_cleanup(_close(browser, "close"))
+            await _finish_cleanup(_close_record_resources(pool, profile.name, tab_key, hold))
             raise
         except Exception as error:
-            await _finish_cleanup(_close(browser, "close"))
+            await _finish_cleanup(_close_record_resources(pool, profile.name, tab_key, hold))
             if isinstance(error, LoginSessionError):
                 raise
             raise LoginSessionError("Unable to start record session") from error
@@ -274,13 +308,13 @@ class LoginSessionManager:
         except Exception as error:
             raise LoginSessionError("Unable to save login session") from error
         finally:
-            await _finish_cleanup(_close(session.browser, "close"))
+            await _finish_cleanup(_close_session_resources(session))
 
     async def cancel(self, job_id: str) -> None:
         async with self._lock:
             session = self._sessions.pop(job_id, None)
         if session is not None:
-            await _finish_cleanup(_close(session.browser, "close"))
+            await _finish_cleanup(_close_session_resources(session))
 
     async def close_all(self) -> None:
         current_task = asyncio.current_task()
@@ -296,7 +330,7 @@ class LoginSessionManager:
 
         async def cleanup() -> None:
             for session in sessions:
-                await _close(session.browser, "close")
+                await _close_session_resources(session)
             async with self._driver_lock:
                 playwright = self._playwright
                 self._playwright = None

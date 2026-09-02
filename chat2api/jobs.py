@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from . import accounts, applog, profiles as profiles_mod, store
+from . import accounts, applog, flows, profiles as profiles_mod, store
 from .agents.analyzer import integrate
 
 LOGIN_TIMEOUT_SECONDS = 600
@@ -181,13 +181,22 @@ async def _record_timeout(job: dict, login_manager) -> None:
                 job["timeout_task"] = None
 
 
-async def _open_record(job: dict, cfg, login_manager) -> None:
+async def _open_record(job: dict, cfg, pool, login_manager) -> None:
     slug = job.get("slug") or "record"
     if not re.fullmatch(r"[a-z0-9-]+", slug):
         slug = "record"
         job["slug"] = slug
 
     def on_trace(ev: dict) -> None:
+        # Đóng dấu đoạn đang ghi lên event. `ev` là chính dict đã nằm trong
+        # session.trace nên đóng dấu ở đây là trace lưu lại cũng có nhãn.
+        flow = job.get("segment")
+        if flow:
+            ev["flow"] = flow
+            for seg in reversed(job.get("segments") or []):
+                if seg.get("flow") == flow and seg.get("open"):
+                    seg["events"] = int(seg.get("events") or 0) + 1
+                    break
         kind = ev.get("kind") or ev.get("type") or "?"
         sel = (ev.get("selector") or "")[:140]
         label = (ev.get("label") or "")[:48]
@@ -197,15 +206,31 @@ async def _open_record(job: dict, cfg, login_manager) -> None:
             extra = f" value={v[:60]!r}"
         if ev.get("key"):
             extra += f" key={ev['key']!r}"
-        job["log"].append(f"[{kind}] sel={sel!r} tag={ev.get('tag','')} label={label!r}{extra}")
+        prefix = f"{flows.FLOW_LABELS.get(flow, flow)} · " if flow else ""
+        job["log"].append(
+            f"{prefix}[{kind}] sel={sel!r} tag={ev.get('tag','')} label={label!r}{extra}")
         # Nếu JS gửi quá nhiều event, giữ trace gọn (100 event gần nhất).
         tr = job.get("trace")
         if isinstance(tr, list) and len(tr) > 200:
             del tr[: len(tr) - 120]
 
+    # Bắt buộc chọn profile ở /admin/record — mở NGAY TRONG persistent context
+    # của nó để cửa sổ ghi thấy đúng phiên đăng nhập sẵn có, không phải trắng.
+    profile = await _pool_profile(job)
+    if profile is None:
+        async with job["lock"]:
+            if job["status"] == "recording":
+                job["log"].append("Không tìm thấy profile đã chọn để ghi thao tác.")
+                job["status"] = "failed"
+                _save(job)
+                applog.log(f"record: {job['id']} lỗi: thiếu profile", "error")
+                _cleanup_staging(job)
+        return
+
     try:
         await login_manager.start_recording(job["id"], slug, job["url"],
-                                            job["staging_dir"], on_trace=on_trace)
+                                            job["staging_dir"], pool, profile,
+                                            on_trace=on_trace)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -273,6 +298,7 @@ async def _finish_record(job: dict, cfg, pool, router, login_manager) -> None:
             storage_state=state_path, analyze_key=analyze_key,
             publish_lock=job["publish_lock"], headed=False,
             forced_slug=job.get("forced_slug"),
+            segments=[s.get("flow") for s in job.get("segments") or [] if s.get("flow")],
         )
     finally:
         try:
@@ -385,6 +411,18 @@ def _attach_login_to_profile(job: dict, cfg) -> None:
     profiles_mod.add_account_with_state(profile["id"], domain, profile["name"], str(target))
 
 
+async def _pool_profile(job: dict):
+    """Profile người dùng chọn trước khi bấm phân tích, dạng BrowserPool dùng được.
+
+    `job["profile"]` chỉ giữ {"id", "name"} cho `_attach_login_to_profile`; muốn
+    MỞ profile đó thì cần bản đầy đủ (user_data_dir, headless, max_tabs...).
+    """
+    chosen = job.get("profile")
+    if not chosen:
+        return None
+    return await asyncio.to_thread(profiles_mod.get_profile, chosen["name"])
+
+
 async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, login_manager,
                         storage_state: Path | None = None) -> None:
     try:
@@ -395,6 +433,7 @@ async def _run_analyzer(job: dict, expected_status: str, cfg, pool, router, logi
                 storage_state=storage_state, analyze_key=analyze_key,
                 publish_lock=job["publish_lock"], headed=job.get("headed", False),
                 forced_slug=job.get("forced_slug"),
+                profile=await _pool_profile(job),
             )
         finally:
             try:
@@ -474,6 +513,9 @@ def start_record(url: str, cfg, pool, router=None, login_manager=None,
         "status": "recording",
         "log": _JobLog(job_id),
         "trace": [],
+        # Đoạn ghi đang mở (flow kind) và lịch sử các đoạn đã ghi.
+        "segment": None,
+        "segments": [],
         "task": None,
         "timeout_task": None,
         "login_attempts": 0,
@@ -491,8 +533,48 @@ def start_record(url: str, cfg, pool, router=None, login_manager=None,
     _save(job)
     job["log"].append(f"Bắt đầu ghi thao tác: {url}")
     job["log"].append("Đã mở cửa sổ Chromium. Hãy thao tác trên trang, xong bấm Hoàn tất.")
-    job["task"] = asyncio.create_task(_open_record(job, cfg, login_manager))
+    job["task"] = asyncio.create_task(_open_record(job, cfg, pool, login_manager))
     return job_id
+
+
+async def set_record_segment(job_id: str, flow: str | None, action: str) -> dict:
+    """Mở/đóng một đoạn ghi.
+
+    ``action="start"``: đóng đoạn đang mở (nếu có) rồi mở đoạn mới cho ``flow``.
+    ``action="stop"``: chỉ đóng đoạn đang mở — event sau đó vẫn được ghi nhưng
+    không mang nhãn, analyzer sẽ coi là thao tác phụ.
+
+    Mở lại một flow đã ghi thì các event mới nối tiếp vào đúng flow đó: người
+    dùng ghi thiếu một bước có thể quay lại ghi bù mà không mất đoạn cũ.
+    """
+    job = JOBS.get(job_id)
+    if job is None:
+        raise JobNotFound
+    if action not in {"start", "stop"}:
+        raise InvalidJobState
+    if action == "start" and flow not in flows.FLOW_KINDS:
+        raise InvalidJobState
+    async with job["lock"]:
+        if job["status"] != "recording" or job.get("record_timeout_claimed") or job.get("cancel_claimed"):
+            raise InvalidJobState
+        segments = job.setdefault("segments", [])
+        for seg in segments:
+            seg["open"] = False
+        if action == "stop":
+            if job.get("segment"):
+                job["log"].append(
+                    f"Kết thúc đoạn: {flows.FLOW_LABELS.get(job['segment'], job['segment'])}")
+            job["segment"] = None
+        else:
+            job["segment"] = flow
+            existing = next((s for s in segments if s.get("flow") == flow), None)
+            if existing is None:
+                segments.append({"flow": flow, "events": 0, "open": True})
+            else:
+                existing["open"] = True
+            job["log"].append(f"Bắt đầu đoạn: {flows.FLOW_LABELS.get(flow, flow)}")
+        _save(job)
+        return _snapshot(job, default_kind="record", can_finish_record=True)
 
 
 async def finish_record(job_id: str, cfg, pool, router, login_manager) -> dict:
@@ -508,6 +590,10 @@ async def finish_record(job_id: str, cfg, pool, router, login_manager) -> dict:
         if job["status"] != "recording" or job.get("record_timeout_claimed") or job.get("cancel_claimed"):
             raise InvalidJobState
         job["status"] = "resuming_record"
+        # Đoạn còn mở lúc bấm Hoàn tất coi như kết thúc tại đây.
+        job["segment"] = None
+        for seg in job.get("segments") or []:
+            seg["open"] = False
         _save(job)
         _cancel_timeout(job)
         # Hủy timeout riêng của record
@@ -698,75 +784,42 @@ async def shutdown(login_manager) -> None:
     await _critical(_finish_shutdown(login_manager, all_ids, tasks))
 
 
+def _snapshot(job: dict, *, default_kind: str = "integrate",
+              can_complete_login: bool = False, can_finish_record: bool = False) -> dict:
+    """Ảnh chụp job cho API. Gọi khi ĐANG giữ ``job["lock"]``."""
+    return {
+        "id": job["id"],
+        "kind": job.get("kind") or default_kind,
+        "url": job["url"],
+        "slug": job.get("slug"),
+        "status": job["status"],
+        "log": list(job["log"]),
+        "login_attempts": job["login_attempts"],
+        "can_complete_login": can_complete_login,
+        "can_finish_record": can_finish_record,
+        # Phiên ghi chia theo việc: đoạn nào đang ghi và đã ghi được những đoạn nào.
+        "segment": job.get("segment"),
+        "segments": [dict(s) for s in job.get("segments") or []],
+    }
+
+
 async def get(job_id: str) -> dict | None:
     job = JOBS.get(job_id)
     if job is None:
         return None
     async with job["lock"]:
-        snapshot = {
-            "id": job["id"],
-            "kind": job.get("kind") or "integrate",
-            "url": job["url"],
-            "slug": job.get("slug"),
-            "status": job["status"],
-            "log": list(job["log"]),
-            "login_attempts": job["login_attempts"],
-            "can_complete_login": False,
-            "can_finish_record": False,
-        }
+        snapshot = _snapshot(job)
         manager = job.get("login_manager")
         waiting = job["status"] == "waiting_login" and not job.get("login_timeout_claimed", False)
         rec = job["status"] == "recording" and not job.get("record_timeout_claimed", False)
     if waiting and manager is not None and await manager.has(job_id):
         async with job["lock"]:
-            if job["status"] == "waiting_login" and not job.get("login_timeout_claimed", False):
-                snapshot = {
-                    "id": job["id"],
-                    "kind": job.get("kind") or "integrate",
-                    "url": job["url"],
-                    "slug": job.get("slug"),
-                    "status": job["status"],
-                    "log": list(job["log"]),
-                    "login_attempts": job["login_attempts"],
-                    "can_complete_login": True,
-                    "can_finish_record": False,
-                }
-            else:
-                snapshot = {
-                    "id": job["id"],
-                    "kind": job.get("kind") or "integrate",
-                    "url": job["url"],
-                    "slug": job.get("slug"),
-                    "status": job["status"],
-                    "log": list(job["log"]),
-                    "login_attempts": job["login_attempts"],
-                    "can_complete_login": False,
-                    "can_finish_record": False,
-                }
+            still = (job["status"] == "waiting_login"
+                     and not job.get("login_timeout_claimed", False))
+            snapshot = _snapshot(job, can_complete_login=still)
     elif rec and manager is not None and await manager.has(job_id):
         async with job["lock"]:
-            if job["status"] == "recording" and not job.get("record_timeout_claimed", False):
-                snapshot = {
-                    "id": job["id"],
-                    "kind": job.get("kind") or "record",
-                    "url": job["url"],
-                    "slug": job.get("slug"),
-                    "status": job["status"],
-                    "log": list(job["log"]),
-                    "login_attempts": job["login_attempts"],
-                    "can_complete_login": False,
-                    "can_finish_record": True,
-                }
-            else:
-                snapshot = {
-                    "id": job["id"],
-                    "kind": job.get("kind") or "record",
-                    "url": job["url"],
-                    "slug": job.get("slug"),
-                    "status": job["status"],
-                    "log": list(job["log"]),
-                    "login_attempts": job["login_attempts"],
-                    "can_complete_login": False,
-                    "can_finish_record": False,
-                }
+            still = (job["status"] == "recording"
+                     and not job.get("record_timeout_claimed", False))
+            snapshot = _snapshot(job, default_kind="record", can_finish_record=still)
     return snapshot

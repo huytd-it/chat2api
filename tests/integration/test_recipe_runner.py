@@ -522,3 +522,107 @@ async def test_timing_defaults_come_from_env(fixture_recipe, tmp_path, monkeypat
         assert (provider._ready_delay_ms, provider._input_delay_ms) == (250, 150)
     finally:
         await pool.aclose()
+
+
+# ---------------------------------------------------------------- flow video
+# Flow video dùng chung khung với flow ảnh nhưng đọc `<video>`: URL thật hay
+# nằm ở `<source>` con hoặc data-src chứ không phải `video.src`, và không được
+# chờ video tải xong (file rất nặng) — có metadata là đủ.
+
+def _video_recipe(fixture_recipe):
+    return {
+        **fixture_recipe,
+        "flows": {
+            "select_model": {"selector": "#model-btn", "action": "click:#model-btn"},
+            "text": {"prompt": fixture_recipe["prompt"],
+                     "response": fixture_recipe["response"]},
+            "video": {
+                "action": "click:#tab-video",
+                "prompt": fixture_recipe["prompt"],
+                "response": {"video_selector": "video.result",
+                             "done_signal": {"type": "stable_text", "timeout_ms": 8000}},
+            },
+        },
+        "models": [{"id": "fixture-web"}, {"id": "fixture-vid", "capability": "video"}],
+    }
+
+
+async def test_video_flow_is_declared_separately_from_the_chat_flow(fixture_recipe, tmp_path):
+    provider = BrowserRecipe(_video_recipe(fixture_recipe), tmp_path, None)
+
+    assert provider.supported_flows() == ["select_model", "text", "video"]
+    assert provider.supports_video() and not provider.supports_image()
+    # Flow video có selector riêng, không mượn last_message_selector của chat.
+    assert provider.flow_response("video")["media_selector"] == "video.result"
+    assert provider.flow_response("text")["last_message_selector"] == ".msg"
+    # Luồng chat cũ vẫn nguyên vẹn.
+    assert provider.prompt_cfg["input_selector"] == "#prompt"
+
+
+async def test_a_recipe_without_a_video_flow_refuses_video_requests(fixture_recipe, tmp_path):
+    provider = BrowserRecipe(fixture_recipe, tmp_path, None)
+
+    assert not provider.supports_video()
+    with pytest.raises(NotImplementedError):
+        await provider.generate_videos("a cat")
+
+
+async def test_video_srcs_are_read_from_source_children_and_data_src(fixture_recipe, tmp_path):
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(_video_recipe(fixture_recipe), tmp_path, pool)
+        context = await pool.context_for("video")
+        page = await context.new_page()
+        await page.set_content("""
+          <div class="result-wrap">
+            <video class="result"><source src="https://cdn.tld/a.mp4"></video>
+            <video class="result" data-src="https://cdn.tld/b.mp4"></video>
+          </div>
+        """)
+
+        srcs = await provider._extract_media_srcs(page, 4, "video")
+
+        assert srcs == ["https://cdn.tld/a.mp4", "https://cdn.tld/b.mp4"]
+    finally:
+        await pool.aclose()
+
+
+async def test_video_flow_does_not_pick_up_images_from_the_same_page(fixture_recipe, tmp_path):
+    """Nhiều trang tạo video kèm ảnh thumbnail; lấy nhầm là API trả ra ảnh."""
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(_video_recipe(fixture_recipe), tmp_path, pool)
+        context = await pool.context_for("video-mixed")
+        page = await context.new_page()
+        await page.set_content("""
+          <div class="result-wrap">
+            <img src="https://cdn.tld/thumb.png">
+            <video class="result"><source src="https://cdn.tld/clip.mp4"></video>
+          </div>
+        """)
+
+        srcs = await provider._extract_media_srcs(page, 4, "video")
+
+        assert srcs == ["https://cdn.tld/clip.mp4"]
+    finally:
+        await pool.aclose()
+
+
+async def test_waiting_for_video_accepts_metadata_without_a_full_download(fixture_recipe, tmp_path):
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(_video_recipe(fixture_recipe), tmp_path, pool)
+        context = await pool.context_for("video-wait")
+        page = await context.new_page()
+        # `readyState` là 0 (chưa tải gì) nhưng đã có src — đủ để trả kết quả,
+        # nếu không mọi request video đều chạy tới timeout.
+        await page.set_content('<video class="result" src="https://cdn.tld/clip.mp4"></video>')
+
+        srcs = await provider._wait_for_media(page, 1, time.monotonic() + 5, "video")
+
+        assert srcs == ["https://cdn.tld/clip.mp4"]
+    finally:
+        await pool.aclose()

@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from . import (accounts, apikeys, applog, auth, errors, profiles, sessions,  # noqa: F401  (import auth để đăng ký dependency)
+from . import (accounts, apikeys, applog, auth, errors, flows, profiles, sessions,  # noqa: F401  (import auth để đăng ký dependency)
                settings, store)
 from .config import Config
 from .errors import OpenAIError
@@ -826,7 +826,7 @@ def register_admin(app: FastAPI, admin) -> None:
                            OpenAIProviderCreateRequest, OpenAIProviderUpdateRequest,
                            ProfileAccountRequest, ProfileCreateRequest,
                            ProfileOpenRequest, ProfileUpdateRequest, RecipeAnalyzeRequest,
-                           RecipeManualSpec, RecordRequest,
+                           RecipeManualSpec, RecordRequest, RecordSegmentRequest,
                            RecipeModelDiscoveryRequest, RecipeReanalyzeRequest,
                            RecipeEditRequest, RecipeEditTestRequest, RecipeRenameRequest,
                            RecipeTestRequest, SaveAccountRequest,
@@ -1028,6 +1028,23 @@ def register_admin(app: FastAPI, admin) -> None:
         )
         applog.log(f"record: bắt đầu {body.url} (job={job_id}, profile={profile_row['name']}, slug={forced or '-'})")
         return {"job_id": job_id}
+
+    @admin.post("/record/{job_id}/segment")
+    async def record_segment(job_id: str, body: RecordSegmentRequest):
+        """Chuyển đoạn ghi: mỗi đoạn là một việc (chọn model / text / image / video)."""
+        action = (body.action or "start").strip().lower()
+        flow = (body.flow or "").strip() or None
+        if action not in {"start", "stop"}:
+            raise OpenAIError(400, "invalid_request_error", "action phải là 'start' hoặc 'stop'")
+        if action == "start" and flow not in flows.FLOW_KINDS:
+            raise OpenAIError(400, "invalid_flow",
+                              f"flow phải là một trong {', '.join(flows.FLOW_KINDS)}")
+        try:
+            return await jobs.set_record_segment(job_id, flow, action)
+        except jobs.JobNotFound:
+            raise OpenAIError(404, "not_found", "Job không tồn tại")
+        except jobs.InvalidJobState:
+            raise OpenAIError(409, "invalid_job_state", "Job không ở trạng thái ghi thao tác")
 
     @admin.post("/record/{job_id}/finish")
     async def record_finish(job_id: str, request: Request):
@@ -1405,26 +1422,19 @@ def register_admin(app: FastAPI, admin) -> None:
             raise OpenAIError(503, "agent_not_configured",
                               "Đặt AGENT_LLM_BASE_URL, AGENT_LLM_API_KEY, AGENT_LLM_MODEL "
                               "để dùng tính năng phân tích AI.")
-        storage_state = None
+        # Người dùng chọn profile để AI thấy DOM SAU đăng nhập, nên analyzer phải
+        # chạy thẳng trong persistent context của profile đó. Không lấy được
+        # đăng nhập qua `account.storage_state_path`: cột đó bị xoá ngay sau lần
+        # seed đầu (`profiles.clear_seed`), tức đúng những profile đã dùng thật
+        # thì lại không có file để mượn.
         pool_profile = None
         if body.profile_id is not None:
             row = await asyncio.to_thread(profiles.find, str(body.profile_id))
             if row is None:
                 raise OpenAIError(400, "invalid_profile", "Profile không tồn tại")
-            pool_profile = row
-            # Reuse profile storage nếu đã có account
-            try:
-                from pathlib import Path as _P
-                accs = await asyncio.to_thread(profiles.accounts_of, row["id"])
-                if accs:
-                    domain = __import__("chat2api.accounts", fromlist=["domain_of"]).domain_of(body.url)
-                    cand = next((a for a in accs if (a.get("host") or "").lower() == domain.lower()), None)
-                    if cand:
-                        p = _P(str(cand.get("storage_state") or ""))
-                        if p.exists():
-                            storage_state = p
-            except Exception:
-                pass
+            pool_profile = await asyncio.to_thread(profiles.get_profile, row["name"])
+            if pool_profile is None:
+                raise OpenAIError(400, "invalid_profile", "Profile không mở được")
         from .agents.analyzer import analyze_preview
 
         log_lines: list[str] = []
@@ -1436,9 +1446,11 @@ def register_admin(app: FastAPI, admin) -> None:
         try:
             result = await analyze_preview(
                 body.url, request.app.state.pool, cfg, _log,
-                storage_state=storage_state, analyze_key=key, headed=body.headed)
+                analyze_key=key, headed=body.headed, profile=pool_profile)
         except llm.LlmError as error:
             raise llm_upstream_error(error) from error
+        except profiles.ProfileLocked as error:
+            raise OpenAIError(409, "profile_locked", str(error)) from error
         finally:
             try:
                 await request.app.state.pool.drop(key)

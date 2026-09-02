@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import AsyncIterator
 from urllib.parse import urlsplit
 
-from .. import accounts, applog, settings, store
+from .. import accounts, applog, flows, settings, store
 from ..prompt import flatten_messages
 from .base import ModelInfo, Provider
 
@@ -113,13 +113,19 @@ def validate_recipe(d: dict) -> list[str]:
     if slug and not re.fullmatch(r"[a-z0-9-]+", str(slug)):
         errs.append("invalid field: slug (chỉ [a-z0-9-])")
     need("url", bool(d.get("url")))
-    need("prompt.input_selector", bool((d.get("prompt") or {}).get("input_selector")))
+    # Recipe khai báo `flows` tự mang ô nhập/khối trả lời trong từng flow, nên
+    # khối `prompt`/`response` phẳng ở gốc chỉ còn là giá trị mặc định dùng chung
+    # và được phép vắng mặt.
+    declared_flows = isinstance(d.get("flows"), dict) and bool(d.get("flows"))
+    errs += flows.validate_flows(d, DONE_SIGNALS, COPY_SCOPES)
     resp = d.get("response") or {}
     ds = resp.get("done_signal") or {}
-    # image recipe có thể dùng image_selector thay vì last_message_selector
-    has_image = bool(resp.get("image_selector"))
-    if not has_image:
-        need("response.last_message_selector", bool(resp.get("last_message_selector")))
+    if not declared_flows:
+        need("prompt.input_selector", bool((d.get("prompt") or {}).get("input_selector")))
+        # image recipe có thể dùng image_selector thay vì last_message_selector
+        has_image = bool(resp.get("image_selector"))
+        if not has_image:
+            need("response.last_message_selector", bool(resp.get("last_message_selector")))
     # validate image_copy_selector nếu có
     img_copy_sel = resp.get("image_copy_selector")
     if img_copy_sel is not None and not isinstance(img_copy_sel, str):
@@ -128,7 +134,8 @@ def validate_recipe(d: dict) -> list[str]:
         errs.append("invalid field: response.image_copy_scope (after | inside | page)")
     if resp.get("image_copy_exclude") is not None and not isinstance(resp.get("image_copy_exclude"), str):
         errs.append("invalid field: response.image_copy_exclude (phải là string)")
-    need("response.done_signal.type", ds.get("type") in DONE_SIGNALS)
+    if not declared_flows or ds:
+        need("response.done_signal.type", ds.get("type") in DONE_SIGNALS)
     if ds.get("type") in {"selector_appear", "selector_disappear"}:
         need("response.done_signal.selector", bool(ds.get("selector")))
     if ds.get("type") == "copy_button":
@@ -162,9 +169,11 @@ def validate_recipe(d: dict) -> list[str]:
         for i, model in enumerate(models):
             if not isinstance(model, dict):
                 continue
-            cap = model.get("capability", "chat")
-            if cap not in ("chat", "image", "both"):
-                errs.append(f"invalid field: models[{i}].capability (chat | image | both)")
+            cap = model.get("capability")
+            if cap is not None and not flows.capability_valid(cap):
+                errs.append(
+                    f"invalid field: models[{i}].capability "
+                    f"({' | '.join(flows.CAPABILITIES)}; nhiều giá trị ngăn bằng dấu phẩy)")
             action = model.get("action")
             steps = action.split(";") if isinstance(action, str) else []
             if action is not None and not (steps and all(
@@ -407,8 +416,15 @@ class BrowserRecipe(Provider):
         # True chỉ khi dùng để test recipe (Integrate) với ô "hiện browser" bật —
         # provider load từ router lúc chạy production luôn headless.
         self._headed = headed
-        self.prompt_cfg = recipe.get("prompt", {})
-        self.response_cfg = recipe.get("response", {})
+        # Thao tác đã ghi, chia theo việc: select_model / text / image / video.
+        # Recipe cũ (phẳng) được dựng lại thành flow tương đương nên không đổi
+        # hành vi; recipe mới khai báo `flows` thì mỗi việc có selector riêng.
+        self.flows = flows.build_flows(recipe)
+        text_flow = self.flows.get("text") or {}
+        # Ba thuộc tính dưới là *flow text*, giữ tên cũ vì cả main.py, analyzer
+        # lẫn test đều đọc chúng như "luồng chat của recipe này".
+        self.prompt_cfg = text_flow.get("prompt") or recipe.get("prompt", {})
+        self.response_cfg = text_flow.get("response") or recipe.get("response", {})
         self.ds = self.response_cfg.get("done_signal", {})
         # HTML gốc chỉ được chụp khi recipe bật tường minh để recipe cũ không
         # đổi hành vi và DB không phình ngoài ý muốn. Main đọc giá trị cuối này
@@ -433,9 +449,14 @@ class BrowserRecipe(Provider):
         self._new_chat_selector = new_chat.get("selector")
         mode = recipe.get("mode") or {}
         self._mode_cfg = mode if isinstance(mode, dict) else {}
-        self._mode_selector = str(self._mode_cfg.get("selector") or "")
-        self._mode_image_action = str(self._mode_cfg.get("image_action") or "")
-        self._mode_chat_action = str(self._mode_cfg.get("chat_action") or "")
+        # Phần dạo đầu dùng chung trước khi chọn model (mở dropdown, chờ nó hiện).
+        select_flow = self.flows.get("select_model") or {}
+        self._select_model_selector = str(select_flow.get("selector")
+                                          or self._mode_cfg.get("selector") or "")
+        self._select_model_action = str(select_flow.get("action") or "")
+        self._mode_selector = self._select_model_selector
+        self._mode_image_action = str((self.flows.get("image") or {}).get("action") or "")
+        self._mode_chat_action = str((self.flows.get("text") or {}).get("action") or "")
         timing = recipe.get("timing") or {}
         self._ready_delay_ms = _timing(timing, "ready_delay_ms")
         self._input_delay_ms = _timing(timing, "input_delay_ms")
@@ -748,33 +769,65 @@ class BrowserRecipe(Provider):
                 applog.log(f"recipe: '{self.slug}' action '{action}:{selector}' lỗi: {e}", level="warn")
                 raise
 
+    # ------------------------------- flows -------------------------------
+
+    def flow(self, kind: str) -> dict:
+        """Cấu hình một flow (``text`` / ``image`` / ``video`` / ``select_model``)."""
+        return self.flows.get(kind) or {}
+
+    def has_flow(self, kind: str) -> bool:
+        return kind in self.flows
+
+    def flow_prompt(self, kind: str) -> dict:
+        return self.flow(kind).get("prompt") or self.prompt_cfg
+
+    def flow_response(self, kind: str) -> dict:
+        return self.flow(kind).get("response") or {}
+
+    def flow_done_signal(self, kind: str) -> dict:
+        return self.flow_response(kind).get("done_signal") or self.ds or {}
+
     async def _apply_mode(self, page, capability: str) -> None:
-        """Chọn chế độ từ dropdown nếu recipe khai báo `mode`.
-        
-        Nhiều web chat dùng chung URL nhưng dropdown chuyển giữa Chat/Image.
-        Nếu `mode.selector` được đặt thì chờ nó visible trước, rồi chạy
-        `image_action` hoặc `chat_action` tương ứng.
+        """Tương thích ngược: `capability` cũ → flow tương ứng."""
+        await self._enter_flow(page, flows.CAPABILITY_FLOW.get(capability, "image"))
+
+    async def _enter_flow(self, page, kind: str) -> None:
+        """Đưa trang về đúng chế độ của flow trước khi nhập prompt.
+
+        Nhiều web chat dùng chung một URL và chuyển giữa Chat / Image / Video
+        bằng dropdown hoặc tab, nên mỗi flow mang sẵn chuỗi `action` ghi được
+        lúc người dùng bấm. Không khai báo `action` thì không làm gì — trang
+        vốn đã ở đúng chế độ.
         """
-        if not self._mode_cfg:
-            return
-        action = ""
-        if capability in ("image", "both") and self._mode_image_action:
-            # _run_images gọi với capability image; _run chat gọi với chat
-            # cả hai đều đi qua đây nên phân biệt theo capability của model
-            # đang chạy. Trường hợp both thì cả hai đều có thể, ưu tiên theo caller.
-            action = self._mode_image_action
-        elif capability == "chat" and self._mode_chat_action:
-            action = self._mode_chat_action
-        elif self._mode_image_action and capability != "chat":
-            action = self._mode_image_action
+        action = str(self.flow(kind).get("action") or "")
         if not action:
             return
-        if self._mode_selector:
+        selector = str(self.flow(kind).get("selector") or self._select_model_selector)
+        if selector:
             try:
-                await page.locator(self._mode_selector).first.wait_for(state="visible", timeout=8000)
+                await page.locator(selector).first.wait_for(state="visible", timeout=8000)
             except Exception:
                 pass
         await self._exec_action_steps(page, action)
+
+    async def _select_model(self, page, model: dict | None) -> None:
+        """Chạy phần dạo đầu chung rồi đường bấm riêng của model.
+
+        `flows.select_model.action` là thao tác dùng chung (mở dropdown model);
+        `models[].action` là đường bấm riêng tới đúng model đó. Tách ra vì một
+        site chỉ có một cách mở dropdown nhưng mỗi model một option.
+        """
+        if self._select_model_action:
+            if self._select_model_selector:
+                try:
+                    await page.locator(self._select_model_selector).first.wait_for(
+                        state="visible", timeout=8000)
+                except Exception:
+                    pass
+            await self._exec_action_steps(page, self._select_model_action)
+        if model is not None and model.get("action"):
+            await self._exec_action_steps(page, str(model["action"]),
+                                          str(model.get("value") or model["id"]))
 
     async def _acquire_page(self, ctx_key: str, storage_state, headed: bool):
         """Lấy tab để chạy request, theo chế độ đang bật.
@@ -846,119 +899,184 @@ class BrowserRecipe(Provider):
     def models(self) -> list[ModelInfo]:
         out: list[ModelInfo] = []
         for m in self._recipe["models"]:
-            cap = str(m.get("capability", "chat") or "chat")
-            if cap not in ("chat", "image", "both"):
-                cap = "chat"
+            caps = flows.capabilities_of(m)
+            # ModelInfo.capability là một chuỗi: giữ "both" cho cặp chat+image
+            # (nghĩa cũ, client đang đọc), còn lại nối bằng dấu phẩy.
+            if caps == {"chat", "image"}:
+                cap = "both"
+            else:
+                cap = ",".join(sorted(caps))
             out.append(ModelInfo(id=f"{self.slug}/{m['id']}", slug=self.slug, capability=cap))
         return out
 
+    def _model_flows(self) -> set[str]:
+        out: set[str] = set()
+        for m in self._recipe.get("models") or []:
+            if isinstance(m, dict):
+                out |= flows.flows_of(m)
+        return out
+
     def supports_image(self) -> bool:
-        return any(m.capability in ("image", "both") for m in self.models()) or bool(
-            self.response_cfg.get("image_selector"))
+        return "image" in self._model_flows() or self.has_flow("image")
 
-    # ------------------------------- image generation -------------------------------
+    def supports_video(self) -> bool:
+        return "video" in self._model_flows() or self.has_flow("video")
 
-    def _image_selector(self) -> str:
-        return str(self.response_cfg.get("image_selector") or "")
+    def supported_flows(self) -> list[str]:
+        """Flow recipe này chạy được — UI ghi thao tác đọc để biết còn thiếu gì."""
+        return [k for k in flows.FLOW_KINDS if k in self.flows]
 
-    def _image_copy_selector(self) -> str:
-        return str(self.response_cfg.get("image_copy_selector") or "")
+    # ------------------------------- media (image/video) -------------------------------
+    # Ảnh và video khác nhau ở selector và cách đọc file, phần còn lại (chờ
+    # xong, bấm nút copy, đổi sang b64) giống hệt nhau nên dùng chung code.
+    # Flow đang chạy đi qua tham số `flow`, KHÔNG giữ trên self: một instance
+    # provider phục vụ nhiều request song song (nhiều account) nên state dùng
+    # chung sẽ bị request sau đè lên request trước.
 
-    def _image_copy_scope(self) -> str:
-        return str(self.response_cfg.get("image_copy_scope") or "after")
+    def _media_response(self, flow: str = "image") -> dict:
+        return self.flow_response(flow) or self.response_cfg
 
-    def _image_copy_exclude(self) -> str:
-        return str(self.response_cfg.get("image_copy_exclude") or "")
+    def _media_fallback_selector(self, flow: str = "image") -> str:
+        """Khối tin nhắn để dò ảnh/video khi flow không khai báo media_selector."""
+        return str(self._media_response(flow).get("last_message_selector")
+                   or self.response_cfg.get("last_message_selector") or "")
 
-    async def _extract_image_srcs(self, page, limit: int) -> list[str]:
-        sel = self._image_selector()
+    def _image_selector(self, flow: str = "image") -> str:
+        resp = self._media_response(flow)
+        return str(resp.get("media_selector") or resp.get("image_selector") or "")
+
+    def _image_copy_selector(self, flow: str = "image") -> str:
+        resp = self._media_response(flow)
+        return str(resp.get("copy_selector") or resp.get("image_copy_selector") or "")
+
+    def _image_copy_scope(self, flow: str = "image") -> str:
+        resp = self._media_response(flow)
+        return str(resp.get("copy_scope") or resp.get("image_copy_scope") or "after")
+
+    def _image_copy_exclude(self, flow: str = "image") -> str:
+        resp = self._media_response(flow)
+        return str(resp.get("copy_exclude") or resp.get("image_copy_exclude") or "")
+
+    async def _extract_media_srcs(self, page, limit: int, flow: str = "image") -> list[str]:
+        """URL của ảnh (``flow=image``) hoặc video (``flow=video``) trong câu trả lời.
+
+        Video hay để URL thật ở ``<source>`` con hoặc ``data-src`` chứ không phải
+        ``video.src``, nên nhánh JS đọc cả hai; ảnh thì thêm đường
+        ``background-image`` vì nhiều site render ảnh kết quả bằng CSS.
+        """
+        tag = "video" if flow == "video" else "img"
+        sel = self._image_selector(flow)
         if sel:
             srcs = await page.evaluate(
-                r"""(sel) => {
-                    const nodes = Array.from(document.querySelectorAll(sel));
-                    const out = [];
-                    for (const n of nodes) {
+                r"""([sel, tag]) => {
+                    const srcOf = (n) => {
                         let src = n.getAttribute('src') || n.getAttribute('data-src') || '';
-                        if (!src && n.tagName.toLowerCase() === 'img') src = n.src || '';
-                        // background-image fallback
+                        if (!src && n.tagName.toLowerCase() === tag) src = n.currentSrc || n.src || '';
                         if (!src) {
+                            const source = n.querySelector && n.querySelector('source');
+                            if (source) src = source.getAttribute('src') || source.src || '';
+                        }
+                        if (!src && tag === 'img') {
                             const bg = getComputedStyle(n).backgroundImage;
                             const m = bg && bg.match(/url\(["']?(.*?)["']?\)/);
                             if (m) src = m[1];
                         }
-                        if (src) out.push(src);
-                        // also check nested img
-                        if (n.tagName.toLowerCase() !== 'img') {
-                            for (const img of n.querySelectorAll('img')) {
-                                let s = img.getAttribute('src') || img.src || '';
+                        return src;
+                    };
+                    const nodes = Array.from(document.querySelectorAll(sel));
+                    const out = [];
+                    for (const n of nodes) {
+                        const src = srcOf(n);
+                        if (src && !out.includes(src)) out.push(src);
+                        if (n.tagName.toLowerCase() !== tag) {
+                            for (const inner of n.querySelectorAll(tag)) {
+                                const s = srcOf(inner);
                                 if (s && !out.includes(s)) out.push(s);
                             }
                         }
                     }
                     return out;
                 }""",
-                sel,
+                [sel, tag],
             )
             return [str(s) for s in (srcs or [])][:limit]
-        # fallback: tìm mọi <img> trong last_message_selector
-        fallback = str(self.response_cfg.get("last_message_selector") or "")
+        # fallback: tìm mọi <img>/<video> trong khối tin nhắn cuối
+        fallback = self._media_fallback_selector(flow)
         if not fallback:
             return []
         srcs = await page.evaluate(
-            r"""(sel) => {
+            r"""([sel, tag]) => {
                 const els = document.querySelectorAll(sel);
                 if (!els.length) return [];
                 const el = els[els.length - 1];
-                const imgs = Array.from(el.querySelectorAll('img'));
-                if (!imgs.length && el.tagName.toLowerCase() === 'img') imgs.push(el);
-                return imgs.map(i => i.src || i.getAttribute('src') || '').filter(Boolean);
+                const nodes = Array.from(el.querySelectorAll(tag));
+                if (!nodes.length && el.tagName.toLowerCase() === tag) nodes.push(el);
+                return nodes.map(n => {
+                    if (n.currentSrc || n.src) return n.currentSrc || n.src;
+                    const source = n.querySelector('source');
+                    return (source && (source.src || source.getAttribute('src'))) || n.getAttribute('src') || '';
+                }).filter(Boolean);
             }""",
-            fallback,
+            [fallback, tag],
         )
         return [str(s) for s in (srcs or [])][:limit]
 
-    async def _wait_for_images(self, page, n: int, deadline: float) -> list[str]:
-        # Poll until at least n <img> with loaded naturalWidth
-        sel = self._image_selector()
+    async def _extract_image_srcs(self, page, limit: int) -> list[str]:
+        return await self._extract_media_srcs(page, limit, "image")
+
+    async def _wait_for_media(self, page, n: int, deadline: float,
+                              flow: str = "image") -> list[str]:
+        """Chờ đủ n ảnh/video *đã tải xong* (bỏ qua phần tử hỏng hoặc đang tải).
+
+        Ảnh xét ``complete && naturalWidth``; video xét ``readyState`` — có
+        metadata là đủ, không chờ tải hết vì file video thường rất nặng.
+        """
+        tag = "video" if flow == "video" else "img"
+        sel = self._image_selector(flow)
+        fallback = self._media_fallback_selector(flow)
         while True:
             if time.monotonic() > deadline:
-                raise TimeoutError(f"recipe '{self.slug}' image timeout")
-            srcs = await self._extract_image_srcs(page, n)
+                raise TimeoutError(f"recipe '{self.slug}' {flow} timeout")
+            srcs = await self._extract_media_srcs(page, n, flow)
             if len(srcs) >= n:
-                # ensure at least n images are loaded (skip broken)
                 loaded = await page.evaluate(
-                    r"""([sel, fallback]) => {
-                        const check = (nodes) => nodes.filter(img => {
-                            if (img.tagName.toLowerCase() !== 'img') return true;
-                            return img.complete && img.naturalWidth > 0;
-                        }).length;
+                    r"""([sel, fallback, tag]) => {
+                        const ready = (n) => {
+                            const t = n.tagName.toLowerCase();
+                            if (t === 'img') return n.complete && n.naturalWidth > 0;
+                            if (t === 'video') return n.readyState >= 1 || !!n.currentSrc;
+                            return true;
+                        };
+                        const check = (nodes) => nodes.filter(ready).length;
                         if (sel) return check(Array.from(document.querySelectorAll(sel)).flatMap(n => {
-                            if (n.tagName.toLowerCase() === 'img') return [n];
-                            return Array.from(n.querySelectorAll('img'));
+                            if (n.tagName.toLowerCase() === tag) return [n];
+                            return Array.from(n.querySelectorAll(tag));
                         }));
                         const els = document.querySelectorAll(fallback);
                         if (!els.length) return 0;
-                        return check(Array.from(els[els.length-1].querySelectorAll('img')));
+                        return check(Array.from(els[els.length-1].querySelectorAll(tag)));
                     }""",
-                    [sel, str(self.response_cfg.get("last_message_selector") or "")],
+                    [sel, fallback, tag],
                 ) if sel else len(srcs)
-                # sel branch returns count, fallback already srcs count
-                # for simplicity accept if count >= n
-                if isinstance(loaded, int) and loaded >= n:
-                    return srcs[:n]
-                if not isinstance(loaded, int):
+                # nhánh sel trả về số phần tử đã tải xong; nhánh fallback đã đếm
+                # sẵn qua srcs nên chấp nhận luôn.
+                if not isinstance(loaded, int) or loaded >= n:
                     return srcs[:n]
             await asyncio.sleep(0.7)
 
-    async def _wait_for_image_copy_buttons(self, page, n: int, deadline: float) -> bool:
+    async def _wait_for_images(self, page, n: int, deadline: float) -> list[str]:
+        return await self._wait_for_media(page, n, deadline, "image")
+
+    async def _wait_for_image_copy_buttons(self, page, n: int, deadline: float,
+                                           flow: str = "image") -> bool:
         """Đợi n nút copy ảnh xuất hiện và khả dụng (phân biệt với nút copy response)."""
-        sel = self._image_copy_selector()
+        sel = self._image_copy_selector(flow)
         if not sel:
             return True
-        scope = self._image_copy_scope()
-        exclude = self._image_copy_exclude()
-        img_sel = self._image_selector()
-        fallback = str(self.response_cfg.get("last_message_selector") or "")
+        scope = self._image_copy_scope(flow)
+        exclude = self._image_copy_exclude(flow)
+        img_sel = self._image_selector(flow)
+        fallback = self._media_fallback_selector(flow)
         while True:
             if time.monotonic() > deadline:
                 return False
@@ -1003,9 +1121,9 @@ class BrowserRecipe(Provider):
                 pass
             await asyncio.sleep(0.5)
 
-    async def _copy_single_image(self, page, index: int) -> dict | None:
-        """Bấm nút copy ảnh thứ index và đọc clipboard. Trả về {b64} | {text} | None."""
-        sel = self._image_copy_selector()
+    async def _copy_single_image(self, page, index: int, flow: str = "image") -> dict | None:
+        """Bấm nút copy ảnh/video thứ index và đọc clipboard. Trả về {b64} | {text} | None."""
+        sel = self._image_copy_selector(flow)
         if not sel:
             return None
         parsed = urlsplit(page.url)
@@ -1050,8 +1168,8 @@ class BrowserRecipe(Provider):
                 target.click();
                 return true;
             }""",
-            [sel, index, self._image_copy_scope(), self._image_copy_exclude(),
-             self._image_selector(), str(self.response_cfg.get("last_message_selector") or "")],
+            [sel, index, self._image_copy_scope(flow), self._image_copy_exclude(flow),
+             self._image_selector(flow), self._media_fallback_selector(flow)],
         )
         if not clicked:
             return None
@@ -1112,13 +1230,14 @@ class BrowserRecipe(Provider):
             applog.log(f"recipe: '{self.slug}' đọc clipboard ảnh {index} lỗi: {e}", level="warn")
         return None
 
-    async def _copy_images_via_buttons(self, page, n: int, deadline: float) -> list[dict] | None:
-        """Thử copy n ảnh qua nút copy riêng. Trả None nếu không đủ."""
-        sel = self._image_copy_selector()
+    async def _copy_images_via_buttons(self, page, n: int, deadline: float,
+                                       flow: str = "image") -> list[dict] | None:
+        """Thử copy n ảnh/video qua nút copy riêng. Trả None nếu không đủ."""
+        sel = self._image_copy_selector(flow)
         if not sel:
             return None
         # đợi nút xuất hiện
-        ok = await self._wait_for_image_copy_buttons(page, n, deadline)
+        ok = await self._wait_for_image_copy_buttons(page, n, deadline, flow)
         if not ok:
             applog.log(f"recipe: '{self.slug}' không thấy {n} nút copy ảnh ({sel}) trước deadline", level="warn")
             return None
@@ -1127,11 +1246,11 @@ class BrowserRecipe(Provider):
             # deadline tổng, bỏ qua ảnh lẻ nếu quá hạn
             if time.monotonic() > deadline:
                 break
-            item = await self._copy_single_image(page, i)
+            item = await self._copy_single_image(page, i, flow)
             if item is None:
                 # thử lại một lần sau khi chờ ngắn
                 await asyncio.sleep(0.6)
-                item = await self._copy_single_image(page, i)
+                item = await self._copy_single_image(page, i, flow)
             if item is None:
                 applog.log(f"recipe: '{self.slug}' không copy được ảnh {i+1}/{n} qua nút {sel}", level="warn")
                 return None
@@ -1182,24 +1301,65 @@ class BrowserRecipe(Provider):
                               assignment: "Assignment | None" = None,
                               response_format: str = "b64_json",
                               **kwargs) -> list[dict]:
+        return await self._generate_media("image", prompt, n, size, headed, target_account_id,
+                                          assignment, response_format, **kwargs)
+
+    async def generate_videos(self, prompt: str, n: int = 1, size: str = "1024x1024",
+                              headed: bool | None = None,
+                              target_account_id: int | None = None,
+                              assignment: "Assignment | None" = None,
+                              response_format: str = "url",
+                              **kwargs) -> list[dict]:
+        """Chạy flow video đã ghi. Mặc định trả `url` vì video base64 rất nặng.
+
+        Chưa có endpoint OpenAI gọi tới: API video của OpenAI là job bất đồng bộ
+        (tạo job -> poll -> tải file), sẽ gắn ở lớp trên sau.
+        """
+        if not self.has_flow("video"):
+            raise NotImplementedError(
+                f"recipe '{self.slug}' chưa ghi thao tác generate video")
+        return await self._generate_media("video", prompt, n, size, headed, target_account_id,
+                                          assignment, response_format, **kwargs)
+
+    async def _generate_media(self, flow: str, prompt: str, n: int, size: str,
+                              headed: bool | None, target_account_id: int | None,
+                              assignment: "Assignment | None", response_format: str,
+                              **kwargs) -> list[dict]:
         owned = assignment is None
         if owned:
             assignment = await self.assign(target_account_id)
         try:
-            return await self._run_images(prompt, n, size, assignment, headed, response_format)
+            return await self._run_media(flow, prompt, n, size, assignment, headed,
+                                         response_format, **kwargs)
         finally:
             if owned:
                 assignment.release()
 
     async def _run_images(self, prompt: str, n: int, size: str, assignment: "Assignment",
-                          headed: bool | None, response_format: str) -> list[dict]:
+                          headed: bool | None, response_format: str, **kwargs) -> list[dict]:
+        return await self._run_media("image", prompt, n, size, assignment, headed,
+                                     response_format, **kwargs)
+
+    async def _run_media(self, flow: str, prompt: str, n: int, size: str,
+                         assignment: "Assignment", headed: bool | None,
+                         response_format: str, **kwargs) -> list[dict]:
+        """Chạy một flow sinh media (ảnh/video) tới khi có đủ n kết quả.
+
+        Cùng khung với `_run` (chat): vào đúng chế độ -> chọn model -> gõ prompt
+        -> gửi. Khác ở chỗ kết quả là file chứ không phải chữ, nên chờ theo
+        `media_selector` / nút copy thay vì done_signal của text.
+        """
+        prompt_cfg = self.flow_prompt(flow)
+        ds = self.flow_done_signal(flow)
+        response_cfg = self.flow_response(flow) or self.response_cfg
         target_profile = assignment.profile
         storage_state = assignment.storage_state
         ctx_key = assignment.ctx_key
         if assignment.headed is None:
             assignment.headed = self.resolve_headed(headed, target_profile)
         effective_headed = assignment.headed
-        timeout_ms = int(self.ds.get("timeout_ms", 120000))
+        timeout_ms = int(ds.get("timeout_ms", 120000))
+        capture_html = bool(response_cfg.get("capture_html", self._capture_html))
         async with self._lock_for(ctx_key), contextlib.AsyncExitStack() as stack:
             if target_profile is not None:
                 await stack.enter_async_context(self.pool.hold(target_profile.name, ctx_key))
@@ -1210,65 +1370,54 @@ class BrowserRecipe(Provider):
             try:
                 await page.goto(self._new_chat_url or self.url, wait_until="domcontentloaded",
                                 timeout=min(timeout_ms, 60000))
-                box = page.locator(self.prompt_cfg["input_selector"]).first
+                box = page.locator(prompt_cfg["input_selector"]).first
                 await self._wait_chat_ready(page, box)
                 await _sleep_ms(self._input_delay_ms)
-                # model + mode (dropdown) — dropdown thường chọn chế độ tạo ảnh trước khi nhập prompt
-                model_id = kwargs.get("model_id") or (self._recipe["models"][0]["id"] if self._recipe.get("models") else "")
-                model = next((item for item in self._recipe["models"] if item["id"] == model_id), None)
-                cap = str((model or {}).get("capability") or "image")
-                await self._apply_mode(page, cap)
-                if model is not None and model.get("action"):
-                    await self._exec_action_steps(page, str(model["action"]), str(model.get("value") or model["id"]))
-                if self.prompt_cfg.get("input_mode", "fill") == "type":
+                # Chuyển chế độ TRƯỚC khi chọn model: dropdown model của nhiều
+                # site chỉ liệt kê model hợp lệ cho chế độ đang bật.
+                await self._enter_flow(page, flow)
+                model_id = kwargs.get("model_id") or ""
+                catalog = [m for m in self._recipe.get("models") or [] if isinstance(m, dict)]
+                model = next((item for item in catalog if item.get("id") == model_id), None)
+                if model is None:
+                    # Không chỉ đích danh thì lấy model làm được đúng việc này —
+                    # models[0] có thể là model chat và bấm nhầm sang chế độ chat.
+                    model = next((m for m in catalog if flow in flows.flows_of(m)), None)
+                await self._select_model(page, model)
+                if prompt_cfg.get("input_mode", "fill") == "type":
                     await box.click()
                     await box.type(prompt)
                 else:
                     await box.fill(prompt)
-                submit = self.prompt_cfg.get("submit", "Enter")
+                submit = prompt_cfg.get("submit", "Enter")
                 if submit.startswith("click:"):
                     await page.click(submit.split(":", 1)[1])
                 else:
                     await box.press("Enter")
-                # chờ ảnh xuất hiện (ảnh và nút copy ảnh là 2 tập riêng)
-                srcs = await self._wait_for_images(page, n, deadline)
+                # chờ media xuất hiện (media và nút copy là 2 tập riêng)
+                srcs = await self._wait_for_media(page, n, deadline, flow)
                 assignment.conversation_url = _page_url(page)
-                # capture html nếu bật
-                if self._capture_html:
+                if capture_html:
                     try:
-                        sel = self._image_selector() or self.response_cfg.get("last_message_selector", "body")
+                        sel = (self._image_selector(flow)
+                               or self._media_fallback_selector(flow) or "body")
                         html = await page.evaluate("(sel)=>{ const els=document.querySelectorAll(sel); const el=els[els.length-1]; return el?el.outerHTML:null; }", sel)
                         assignment.html = html
                         self.last_response_html = html
                     except Exception:
                         pass
-                # Ưu tiên copy qua nút riêng cho từng ảnh (mỗi ảnh 1 nút)
-                if self._image_copy_selector():
-                    copied = await self._copy_images_via_buttons(page, n, deadline)
+                # Ưu tiên copy qua nút riêng cho từng kết quả (mỗi cái 1 nút)
+                if self._image_copy_selector(flow):
+                    copied = await self._copy_images_via_buttons(page, n, deadline, flow)
                     if copied is not None and len(copied) == n:
-                        out: list[dict] = []
-                        for item in copied:
-                            if response_format == "url":
-                                if item.get("url"):
-                                    out.append({"url": item["url"]})
-                                elif item.get("b64_json"):
-                                    # có b64 nhưng client xin url → vẫn trả url nếu có, không thì fallback b64
-                                    out.append({"b64_json": item["b64_json"]})
-                                else:
-                                    out.append(item)
-                            else:
-                                if item.get("b64_json"):
-                                    out.append({"b64_json": item["b64_json"]})
-                                elif item.get("url"):
-                                    b64 = await self._image_to_b64(page, item["url"])
-                                    out.append({"b64_json": b64} if b64 else {"url": item["url"]})
-                                else:
-                                    out.append(item)
+                        out = await self._format_media(page, copied, response_format)
                         if len(out) == n:
                             return out
-                        applog.log(f"recipe: '{self.slug}' copy ảnh trả thiếu {len(out)}/{n}, fallback sang src", level="warn")
+                        applog.log(f"recipe: '{self.slug}' copy {flow} trả thiếu {len(out)}/{n}, "
+                                   "fallback sang src", level="warn")
                     else:
-                        applog.log(f"recipe: '{self.slug}' không copy đủ {n} ảnh qua nút, fallback sang src", level="warn")
+                        applog.log(f"recipe: '{self.slug}' không copy đủ {n} {flow} qua nút, "
+                                   "fallback sang src", level="warn")
                 # Fallback: lấy trực tiếp từ src / background-image
                 out: list[dict] = []
                 for src in srcs[:n]:
@@ -1276,16 +1425,34 @@ class BrowserRecipe(Provider):
                         out.append({"url": src})
                     else:
                         b64 = await self._image_to_b64(page, src)
-                        if b64:
-                            out.append({"b64_json": b64})
-                        else:
-                            out.append({"url": src})
+                        out.append({"b64_json": b64} if b64 else {"url": src})
                 return out
             finally:
                 if assignment.conversation_url is None:
                     assignment.conversation_url = _page_url(page)
                 if not self._keep_context:
                     await self._release_ctx(ctx_key)
+
+    async def _format_media(self, page, copied: list[dict], response_format: str) -> list[dict]:
+        """Đưa kết quả đọc từ clipboard về đúng định dạng client xin."""
+        out: list[dict] = []
+        for item in copied:
+            if response_format == "url":
+                if item.get("url"):
+                    out.append({"url": item["url"]})
+                elif item.get("b64_json"):
+                    # có b64 nhưng client xin url -> vẫn trả b64, hơn là trả rỗng
+                    out.append({"b64_json": item["b64_json"]})
+                else:
+                    out.append(item)
+            elif item.get("b64_json"):
+                out.append({"b64_json": item["b64_json"]})
+            elif item.get("url"):
+                b64 = await self._image_to_b64(page, item["url"])
+                out.append({"b64_json": b64} if b64 else {"url": item["url"]})
+            else:
+                out.append(item)
+        return out
 
     async def _reply(self, page) -> tuple[str, str | None]:
         """Đọc reply dưới dạng Markdown và, khi bật, outerHTML gốc."""
@@ -1543,10 +1710,10 @@ class BrowserRecipe(Provider):
                 await _sleep_ms(self._input_delay_ms)
                 model = next((item for item in self._recipe["models"]
                               if item["id"] == model_id), None)
-                cap = str((model or {}).get("capability") or "chat")
-                await self._apply_mode(page, cap)
-                if model is not None and model.get("action"):
-                    await self._exec_action_steps(page, str(model["action"]), str(model.get("value") or model["id"]))
+                # Chuyển về chế độ chat trước, rồi mới chọn model: dropdown model
+                # của nhiều site chỉ liệt kê model hợp lệ cho chế độ đang bật.
+                await self._enter_flow(page, "text")
+                await self._select_model(page, model)
                 if self.prompt_cfg.get("input_mode", "fill") == "type":
                     await box.click()
                     await box.type(prompt)
