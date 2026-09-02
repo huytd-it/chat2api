@@ -4,7 +4,10 @@
   import * as Tooltip from "$lib/components/ui/tooltip/index.js";
   import GaugeIcon from "phosphor-svelte/lib/GaugeIcon";
   import ChatCircleTextIcon from "phosphor-svelte/lib/ChatCircleTextIcon";
-  import PlugsConnectedIcon from "phosphor-svelte/lib/PlugsConnectedIcon";
+  import FileTextIcon from "phosphor-svelte/lib/FileTextIcon";
+  import BrowserIcon from "phosphor-svelte/lib/BrowserIcon";
+  import ShuffleIcon from "phosphor-svelte/lib/ShuffleIcon";
+  import StackIcon from "phosphor-svelte/lib/StackIcon";
   import ScrollIcon from "phosphor-svelte/lib/ScrollIcon";
   import GearSixIcon from "phosphor-svelte/lib/GearSixIcon";
   import { serverStatus } from "$lib/stores";
@@ -14,7 +17,10 @@
   const links = [
     { href: "/", label: "Overview", icon: GaugeIcon },
     { href: "/sessions", label: "Sessions", icon: ChatCircleTextIcon },
-    { href: "/integrations", label: "Integrations", icon: PlugsConnectedIcon },
+    { href: "/recipes", label: "Recipes", icon: FileTextIcon },
+    { href: "/providers", label: "Providers", icon: BrowserIcon },
+    { href: "/combos", label: "Combos", icon: ShuffleIcon },
+    { href: "/profiles", label: "Profiles", icon: StackIcon },
     { href: "/logs", label: "Logs", icon: ScrollIcon },
   ];
 

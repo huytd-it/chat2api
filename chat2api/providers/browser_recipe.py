@@ -475,8 +475,7 @@ class BrowserRecipe(Provider):
         # tham số: provider được dựng ở nhiều chỗ (router, analyzer, test) mà
         # không phải chỗ nào cũng cầm Config.
         mode = os.environ.get("BROWSER_PROFILE_MODE", "storage_state").strip().lower()
-        self._profile_mode = mode == "profile" and os.environ.get("BROWSER_ENGINE",
-                                                                  "playwright") != "cloak"
+        self._profile_mode = mode == "profile"
         self._profiles_dir = Path(os.environ.get("CHAT2API_DATA_DIR", "./data")) / "profiles"
         self._profile_max_tabs = max(1, int(os.environ.get("PROFILE_MAX_TABS", "4")))
         self._rotator = _AccountRotator(
@@ -572,15 +571,9 @@ class BrowserRecipe(Provider):
         return [dict(row) for row in rows]
 
     def _auto_enabled(self) -> bool:
-        """Tự gán account/profile được bật không.
-
-        Tắt khi người dùng chọn `off`, và khi engine là cloak — `launch_context_async`
-        không nhận `user_data_dir` nên không có persistent profile để gán.
-        """
+        """Tự gán account/profile được bật không. Chỉ tắt khi người dùng chọn `off`."""
         strategy = settings.current("API_ACCOUNT_STRATEGY")
-        if strategy not in ASSIGN_STRATEGIES or strategy == "off":
-            return False
-        return os.environ.get("BROWSER_ENGINE", "playwright").strip().lower() != "cloak"
+        return strategy in ASSIGN_STRATEGIES and strategy != "off"
 
     async def assign(self, account_id: int | None = None,
                      sticky_key: str = "") -> Assignment:
@@ -834,10 +827,10 @@ class BrowserRecipe(Provider):
 
         `storage_state` (mặc định): một context riêng cho mỗi ctx_key, y như cũ.
         `profile`: một persistent context dùng chung cho nhiều recipe, mỗi
-        recipe một tab — nên các recipe khác nhau chạy song song được.
-        Chế độ profile không áp dụng cho engine `cloak`
-        (`launch_context_async` không nhận `user_data_dir`) và cho request
-        headed thủ công, hai đường đó rơi về cách cũ.
+        recipe một tab — nên các recipe khác nhau chạy song song được. Cả hai
+        engine đều vào được đường này (cloak mở profile bằng
+        `launch_persistent_context_async`); chỉ request headed thủ công là rơi
+        về cách cũ vì nó cần cửa sổ riêng.
         """
         profile = None
         if self._profile_mode and not headed and self.pool is not None:

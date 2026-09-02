@@ -44,7 +44,7 @@ FIELDS: list[dict] = [
      "choices": ["storage_state", "profile"],
      "help": "storage_state: mỗi recipe một context, chỉ cookie + localStorage. "
              "profile: một Chromium profile giữ đăng nhập mọi domain, mỗi recipe một tab "
-             "chạy song song. Không áp dụng cho engine cloak."},
+             "chạy song song. Chạy được với cả engine playwright lẫn cloak."},
     {"key": "POOL_MAX_PROFILES", "type": "int", "default": "6", "group": "Browser",
      "apply": "restart", "label": "Số profile mở cùng lúc",
      "help": "Mỗi profile là một tiến trình Chromium. Chỉ dùng ở chế độ profile. "

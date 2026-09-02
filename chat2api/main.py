@@ -1230,9 +1230,6 @@ def register_admin(app: FastAPI, admin) -> None:
         cfg = request.app.state.cfg
         pool_ = request.app.state.pool
         row = await _profile_or_404(ident)
-        if (row["engine"] or cfg.browser_engine) == "cloak":
-            raise OpenAIError(400, "engine_unsupported",
-                              "Engine cloak không mở được persistent profile.")
         profile = await asyncio.to_thread(profiles.ensure_profile, row["name"], cfg.profiles_dir)
         if profile is None:
             _need_store()

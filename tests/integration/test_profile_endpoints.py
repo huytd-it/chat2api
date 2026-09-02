@@ -14,6 +14,13 @@ from chat2api.config import Config
 from chat2api.main import create_app
 
 
+class FakePage:
+    """Tab giả cho /open — không mở Chromium thật trong test API."""
+
+    async def goto(self, url, **kwargs):
+        return None
+
+
 class FakeContext:
     """Persistent context giả, chỉ cần trả về cookie cho /detect."""
 
@@ -107,6 +114,38 @@ async def test_patch_updates_fields_and_default(client):
     # Tra theo tên cũng phải ra đúng hàng đó.
     by_name = await c.patch("/admin/profiles/work", json={"notes": "máy phụ"})
     assert by_name.json()["notes"] == "máy phụ"
+
+
+async def test_engine_is_chosen_when_creating_a_profile(client):
+    """Form "Tạo profile mới" gửi engine — cả hai lựa chọn phải xuống tới DB."""
+    c, *_ = client
+    cloak = (await _create(c, "kin", engine="cloak")).json()
+    assert cloak["engine"] == "cloak"
+    # Không chọn thì mặc định là playwright, không phải NULL.
+    assert (await _create(c, "main")).json()["engine"] == "playwright"
+    # Và đổi lại được ở form sửa.
+    back = await c.patch(f"/admin/profiles/{cloak['id']}", json={"engine": "playwright"})
+    assert back.json()["engine"] == "playwright"
+
+
+async def test_open_no_longer_refuses_a_cloak_profile(client, monkeypatch):
+    """Trước đây nút Mở trả 400 'Engine cloak không mở được persistent profile'."""
+    c, app, db, cfg = client
+    created = (await _create(c, "kin", engine="cloak")).json()
+    opened = []
+
+    async def fake_page_for(profile, slug):
+        opened.append((profile.name, profile.engine, slug))
+        return FakePage()
+
+    monkeypatch.setattr(app.state.pool, "page_for", fake_page_for)
+
+    response = await c.post(f"/admin/profiles/{created['id']}/open", json={})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["profile"] == "kin"
+    # Pool nhận đúng engine của hàng DB để chọn cloakbrowser hay Chromium.
+    assert opened == [("kin", "cloak", "__manual__")]
 
 
 async def test_patch_rejects_nonsense_values(client):

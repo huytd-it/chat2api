@@ -172,7 +172,7 @@
       <Alert.Description class="text-warning/90">
         {unhealthy.length ? `${unhealthy.length} recipe lỗi liên tiếp. ` : ""}
         {domainsWithoutAccounts.length ? `${domainsWithoutAccounts.length} domain chưa có account.` : ""}
-        <a class="font-medium underline underline-offset-2" href="/integrations">Mở Integrations</a>
+        <a class="font-medium underline underline-offset-2" href="/providers">Mở Providers</a>
       </Alert.Description>
     </Alert.Root>
   {/if}

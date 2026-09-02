@@ -6,7 +6,8 @@
   import { listen } from "@tauri-apps/api/event";
   import { ModeWatcher } from "mode-watcher";
   import { Toaster } from "$lib/components/ui/sonner/index.js";
-  import * as Tooltip from "$lib/components/ui/tooltip/index.js";
+  import * as Sidebar from "$lib/components/ui/sidebar/index.js";
+  import AppSidebar from "$lib/components/AppSidebar.svelte";
   import AppHeader from "$lib/components/AppHeader.svelte";
   import { serverStatus, serverLog } from "$lib/stores";
   import { fetchHealth } from "$lib/api";
@@ -80,11 +81,12 @@ afterthought.
 <Toaster richColors closeButton />
 {@html directionContract}
 
-<Tooltip.Provider delayDuration={0}>
-  <div class="app-frame h-svh overflow-hidden">
+<Sidebar.Provider>
+  <AppSidebar />
+  <Sidebar.Inset class="h-svh overflow-hidden">
     <AppHeader />
-    <main id="main-content" class="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <main class="flex min-h-0 flex-1 flex-col overflow-hidden">
       {@render children()}
     </main>
-  </div>
-</Tooltip.Provider>
+  </Sidebar.Inset>
+</Sidebar.Provider>

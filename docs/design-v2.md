@@ -169,7 +169,7 @@ profile "main"  ──► 1 tiến trình Chromium (persistent context)
 
 **Anonymous.** Recipe chưa có account chạy như cũ: context tạm trên browser headless dùng chung, khoá `__anon__::<slug>`, không đụng profile nào.
 
-**Engine `cloak`.** `cloakbrowser.launch_context_async` không nhận `user_data_dir` — profile có `engine='cloak'` giữ đường storage_state cũ. Cột `profile.engine` là chỗ để rẽ nhánh này.
+**Engine `cloak`.** Profile mở bằng `cloakbrowser.launch_persistent_context_async(<user_data_dir>, ...)` — cùng kiểu trả về (`BrowserContext`) nên seed/chia tab/evict/khoá pid không đổi. Cột `profile.engine` quyết định từng profile mở bằng engine nào (thắng `BROWSER_ENGINE` chung); bản cloakbrowser cũ chỉ có `launch_context_async` thì pool báo một dòng warning rồi mở bằng Chromium thường thay vì bỏ luôn persistent profile. Tham số của nó không trùng Playwright (`timezone` chứ không `timezone_id`, proxy là chuỗi chứ không phải dict) và nó có `**kwargs` chuyển tiếp xuống Playwright — gửi sai tên thì không có lỗi nào cả, chỉ là lớp vân tay không khớp theo proxy/timezone nữa, nên `BrowserPool._launch_cloak_profile` chọn tên theo chữ ký thật. **Giới hạn số phiên:** binary mặc định là v146 (miễn phí vĩnh viễn, không cần `cloakbrowser login`) — đã đo 2 profile cloak mở song song bình thường, nên `POOL_MAX_PROFILES` không phải hạ xuống 1. Trần 1 phiên đồng thời là của binary mới nhất (v151) chạy bằng free key; muốn nhiều hơn thì cần license Pro.
 
 ### 3.4 Di trú account hiện có
 
@@ -407,7 +407,7 @@ Mỗi pha đứng độc lập, chạy được, và có test riêng.
 
 Pha 4 là chỗ nguy hiểm nhất: nó thay cách mọi recipe lấy trình duyệt. Cách giảm rủi ro — cờ `BROWSER_PROFILE_MODE = storage_state | profile` mặc định `storage_state`, đường mới chạy song song cho tới khi bạn tự tin lật cờ.
 
-**Đã làm xong.** `profiles.py` giữ phần trạng thái (hàng DB, thư mục, khoá pid, seed); `BrowserPool` mọc thêm `context_for_profile()` / `page_for()` sống *cạnh* `context_for()` cũ chứ không thay nó. Đường profile tự tắt trong ba trường hợp: engine `cloak` (`launch_context_async` không nhận `user_data_dir`), request headed (cần cửa sổ Chromium hiện lên), và mọi lỗi profile (khoá pid, kho chưa mở) — cả ba đều rơi về `storage_state` kèm một dòng stderr, không bao giờ để request chat chết vì một tính năng opt-in.
+**Đã làm xong.** `profiles.py` giữ phần trạng thái (hàng DB, thư mục, khoá pid, seed); `BrowserPool` mọc thêm `context_for_profile()` / `page_for()` sống *cạnh* `context_for()` cũ chứ không thay nó. Đường profile tự tắt trong hai trường hợp: request headed (cần cửa sổ Chromium hiện lên) và mọi lỗi profile (khoá pid, kho chưa mở) — cả hai rơi về `storage_state` kèm một dòng stderr, không bao giờ để request chat chết vì một tính năng opt-in. Engine `cloak` KHÔNG còn nằm trong danh sách này: nó có `launch_persistent_context_async` nên vào đường profile như playwright.
 
 **Pha 5 đã làm xong.** Nav còn 5 tab; `/recipes` và `/accounts` biến mất, ba panel
 `IntegratePanel` · `SitesPanel` · `ProfilesPanel` xếp dọc trong `/integrations`.

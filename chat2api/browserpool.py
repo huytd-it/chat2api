@@ -18,6 +18,23 @@ PROFILE_ARGS = [
 ]
 
 
+def _signature_of(fn) -> tuple[set[str], bool]:
+    """(tên tham số `fn` khai báo, nó có nhận **kwargs không).
+
+    Dùng để gọi cloakbrowser mà không đoán mò: mỗi bản đặt tên tham số một kiểu
+    (`timezone` chứ không `timezone_id`) nên cứ ném hết vào là dính TypeError,
+    mất luôn lớp chống bot vì phải rơi về Chromium thường.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return set(), True
+    extra = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    return set(params), extra
+
+
 async def _finish_cleanup(cleanup) -> None:
     task = asyncio.create_task(cleanup)
     try:
@@ -31,7 +48,9 @@ class BrowserPool:
     """Một BrowserContext dài hạn cho mỗi slug.
 
     ponytail: engine cloak tạo 1 browser riêng mỗi context (nặng hơn) —
-    chấp nhận vì cloak chỉ bật cho site bot-detect khó.
+    chấp nhận vì cloak chỉ bật cho site bot-detect khó. Đường profile bên dưới
+    chạy được với cả hai engine (`launch_persistent_context_async` của
+    cloakbrowser), nên "chống bot" và "giữ đăng nhập" không còn loại trừ nhau.
     """
 
     def __init__(self, engine: str = "playwright", max_contexts: int = 10,
@@ -210,7 +229,66 @@ class BrowserPool:
                 else:
                     self._busy_tabs[tab_key] -= 1
 
+    def profile_engine(self, profile) -> str:
+        """Engine mở profile này: cột `profile.engine` thắng cấu hình chung."""
+        return (getattr(profile, "engine", "") or self.engine or "playwright").strip().lower()
+
+    async def _ensure_pw(self):
+        """Driver Playwright, mở lần đầu khi cần.
+
+        `start()` bỏ qua bước này khi engine là cloak (đường storage_state không
+        đụng tới Playwright), nhưng profile vẫn có thể cần nó: profile
+        `engine='playwright'` nằm chung một pool cloak, và cả đường rơi về khi
+        bản cloakbrowser đang cài không mở được persistent profile.
+        """
+        if self._pw is None:
+            from playwright.async_api import async_playwright
+
+            self._pw = await async_playwright().start()
+        return self._pw
+
+    async def _launch_cloak_profile(self, profile):
+        """Persistent context bằng CloakBrowser; None nếu bản đang cài không có.
+
+        `launch_persistent_context_async` nhận thư mục profile ở tham số đầu và
+        trả về đúng một Playwright `BrowserContext`, nên phần còn lại của pool
+        (seed, chia tab, evict, khoá pid) không cần biết profile mở bằng engine
+        nào. Bản cũ chỉ có `launch_context_async`: báo một dòng rồi mở bằng
+        Chromium thường — thà mất lớp chống bot còn hơn mất luôn đăng nhập đã
+        lưu trong `user_data_dir`.
+        """
+        try:
+            import cloakbrowser
+
+            launch = cloakbrowser.launch_persistent_context_async
+        except (ImportError, AttributeError) as error:
+            logger.warning("profile '%s': cloakbrowser không mở được persistent profile "
+                           "(%s) — mở bằng Chromium thường", profile.name, error)
+            return None
+        names, extra = _signature_of(launch)
+        kwargs = {"headless": profile.headless, "args": list(PROFILE_ARGS)}
+        viewport = profile.viewport_size
+        if viewport:
+            kwargs["viewport"] = viewport
+        for key, value in (("user_agent", profile.user_agent), ("locale", profile.locale)):
+            if value:
+                kwargs[key] = value
+        if profile.timezone:
+            # Tham số riêng của cloakbrowser tên là `timezone`; kwargs dư được nó
+            # chuyển thẳng xuống Playwright, ở đó tên là `timezone_id`.
+            kwargs["timezone" if "timezone" in names else "timezone_id"] = profile.timezone
+        if profile.proxy:
+            # Cùng lý do: cloakbrowser nhận chuỗi URL, Playwright nhận dict.
+            kwargs["proxy"] = profile.proxy if "proxy" in names else {"server": profile.proxy}
+        if not extra:
+            kwargs = {k: v for k, v in kwargs.items() if k in names}
+        return await launch(profile.user_data_dir, **kwargs)
+
     async def _launch_profile(self, profile):
+        if self.profile_engine(profile) == "cloak":
+            ctx = await self._launch_cloak_profile(profile)
+            if ctx is not None:
+                return ctx
         kwargs = {
             "user_data_dir": profile.user_data_dir,
             "headless": profile.headless,
@@ -225,7 +303,8 @@ class BrowserPool:
                            ("timezone_id", profile.timezone)):
             if value:
                 kwargs[key] = value
-        return await self._pw.chromium.launch_persistent_context(**kwargs)
+        pw = await self._ensure_pw()
+        return await pw.chromium.launch_persistent_context(**kwargs)
 
     async def _seed_profile(self, profile, ctx) -> None:
         """Đổ storage_state cũ vào profile lần đầu, rồi bỏ đánh dấu.

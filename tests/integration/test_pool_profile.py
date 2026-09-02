@@ -123,6 +123,91 @@ async def test_optional_profile_fields_only_passed_when_set(pool, db, tmp_path):
     assert "user_agent" not in kwargs   # chưa đặt thì không gửi
 
 
+# ----------------------------------------------------------- engine cloak
+
+
+class FakeCloak:
+    """cloakbrowser giả — chữ ký chép đúng README của CloakHQ/cloakbrowser.
+
+    Giữ nguyên cả `**kwargs` (bản thật chuyển tiếp xuống Playwright): đó mới là
+    trường hợp thật, và là chỗ dễ sai nhất — có `**kwargs` thì ném tên nào vào
+    cũng "chạy", nên nếu pool gửi `timezone_id` hay proxy dạng dict thì
+    cloakbrowser lặng lẽ bỏ qua tham số riêng của nó chứ không báo lỗi.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    async def launch_persistent_context_async(self, user_data_dir, headless=True, proxy=None,
+                                              user_agent=None, viewport=None, locale=None,
+                                              timezone=None, color_scheme=None, geoip=False,
+                                              extension_paths=None, args=None, **kwargs):
+        self.calls.append({"user_data_dir": user_data_dir, "headless": headless,
+                           "args": args, "viewport": viewport, "user_agent": user_agent,
+                           "locale": locale, "timezone": timezone, "proxy": proxy,
+                           "extra": kwargs})
+        return FakePersistentContext()
+
+
+async def test_cloak_profile_opens_a_persistent_context(pool, db, tmp_path, monkeypatch):
+    """Bug cũ: profile engine=cloak không mở được, giờ đi qua cloakbrowser."""
+    import sys
+
+    fake = FakeCloak()
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake)
+    profile = make_profile(db, tmp_path)
+    conn = db.connection()
+    with conn:
+        conn.execute("UPDATE profile SET engine = 'cloak', proxy = ?, timezone = ? WHERE id = ?",
+                     ("http://127.0.0.1:8888", "Asia/Ho_Chi_Minh", profile.id))
+
+    ctx = await pool.context_for_profile(profiles.get_profile("main"))
+
+    assert ctx is not None
+    assert pool.launched == []           # KHÔNG rơi về Chromium thường
+    call = fake.calls[0]
+    assert call["user_data_dir"] == str(tmp_path / "profiles" / "main")
+    assert call["args"] == PROFILE_ARGS
+    assert call["viewport"] == {"width": 1280, "height": 800}
+    # cloakbrowser đặt tên `timezone` và nhận proxy dạng chuỗi — khác Playwright.
+    assert call["timezone"] == "Asia/Ho_Chi_Minh"
+    assert call["proxy"] == "http://127.0.0.1:8888"
+    # Không rơi vào **kwargs: rơi vào đó là trôi thẳng xuống Playwright và lớp
+    # vân tay của cloakbrowser không thấy proxy/timezone để khớp theo.
+    assert call["extra"] == {}
+
+
+async def test_cloak_without_persistent_api_falls_back_to_chromium(pool, db, tmp_path,
+                                                                    monkeypatch):
+    """Bản cloakbrowser cũ: mất lớp chống bot, KHÔNG được mất đăng nhập."""
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "cloakbrowser", types.ModuleType("cloakbrowser"))
+    profile = make_profile(db, tmp_path)
+    conn = db.connection()
+    with conn:
+        conn.execute("UPDATE profile SET engine = 'cloak' WHERE id = ?", (profile.id,))
+
+    ctx = await pool.context_for_profile(profiles.get_profile("main"))
+
+    assert ctx is not None
+    assert pool.launched[0]["user_data_dir"] == str(tmp_path / "profiles" / "main")
+
+
+async def test_profile_engine_beats_the_pool_engine(pool, db, tmp_path, monkeypatch):
+    """Pool chạy cloak nhưng profile khai playwright thì mở bằng Playwright."""
+    import sys
+
+    fake = FakeCloak()
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake)
+    pool.engine = "cloak"
+    await pool.context_for_profile(make_profile(db, tmp_path))
+
+    assert fake.calls == []
+    assert len(pool.launched) == 1
+
+
 # ------------------------------------------------------------ tab song song
 
 
@@ -411,8 +496,8 @@ async def test_profile_mode_routes_through_the_profile(pool, db, tmp_path, monke
     assert pool.tab_count("main") == 1
 
 
-async def test_cloak_engine_stays_on_storage_state(tmp_path, monkeypatch):
-    """cloakbrowser không nhận user_data_dir — chế độ profile phải tự tắt."""
+async def test_cloak_engine_also_uses_the_profile_path(tmp_path, monkeypatch):
+    """cloakbrowser CÓ launch_persistent_context_async — cloak không bị loại nữa."""
     from chat2api.providers.browser_recipe import BrowserRecipe
 
     monkeypatch.setenv("BROWSER_PROFILE_MODE", "profile")
@@ -423,7 +508,7 @@ async def test_cloak_engine_stays_on_storage_state(tmp_path, monkeypatch):
         "response": {"last_message_selector": ".m", "done_signal": {"type": "stable_text"}},
         "models": [{"id": "m1"}],
     }
-    assert BrowserRecipe(recipe, tmp_path, None)._profile_mode is False
+    assert BrowserRecipe(recipe, tmp_path, None)._profile_mode is True
 
 
 async def test_headed_request_falls_back_to_the_old_path(pool, db, tmp_path, monkeypatch):
