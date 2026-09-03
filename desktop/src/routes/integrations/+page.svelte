@@ -1,18 +1,18 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { get } from "svelte/store";
-import RecipeCreatePanel from "$lib/components/RecipeCreatePanel.svelte";
+  import { goto } from "$app/navigation";
 import ProvidersPanel from "$lib/components/ProvidersPanel.svelte";
 import ProfilesPanel from "$lib/components/ProfilesPanel.svelte";
 import CombosPanel from "$lib/components/CombosPanel.svelte";
   import { recipes, openaiProviders, profiles, combos, refreshIntegrations } from "$lib/sync";
   import * as Tabs from "$lib/components/ui/tabs";
 import { Badge } from "$lib/components/ui/badge";
-import { Browser, Stack, Wrench } from "phosphor-svelte";
+import { Browser, Stack } from "phosphor-svelte";
 import ShuffleIcon from "phosphor-svelte/lib/ShuffleIcon";
 
   let loadError = $state("");
-  let activeTab = $state("recipe");
+  let activeTab = $state("providers");
   let hasChosenDefault = $state(false);
   let highlightSlug = $state<string | null>(null);
 
@@ -23,22 +23,9 @@ import ShuffleIcon from "phosphor-svelte/lib/ShuffleIcon";
     try { await refreshIntegrations(); }
     catch (error) { loadError = (error as Error).message; }
     finally {
-      if (!hasChosenDefault) {
-        // Tôn trọng tab người dùng đã bấm trước khi load xong (ví dụ Profiles)
-        // chỉ auto-chọn default khi vẫn ở tab khởi tạo "recipe".
-        if (activeTab === "recipe") {
-          const count = get(recipes).length + get(openaiProviders).length;
-          activeTab = count ? "providers" : "recipe";
-        }
-        hasChosenDefault = true;
-      }
+      hasChosenDefault = true;
     }
   });
-
-  function goToSitesAndHighlight(slug: string) {
-    activeTab = "providers";
-    highlightSlug = slug;
-  }
 </script>
 
 <section class="flex h-full flex-col overflow-hidden" aria-labelledby="integrations-title">
@@ -62,7 +49,6 @@ import ShuffleIcon from "phosphor-svelte/lib/ShuffleIcon";
     <div class="shrink-0 border-b bg-background">
       <div class="mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8">
         <Tabs.List class="w-full max-w-full overflow-x-auto sm:w-fit">
-          <Tabs.Trigger value="recipe"><Wrench /> Recipe</Tabs.Trigger>
           <Tabs.Trigger value="providers">
             <Browser /> Providers
             {#if providerCount}<Badge variant="secondary">{providerCount}</Badge>{/if}
@@ -83,9 +69,6 @@ import ShuffleIcon from "phosphor-svelte/lib/ShuffleIcon";
     <!-- Full-height bodies: single page scroll, no inner Card scroll -->
     <div class="min-h-0 flex-1 overflow-y-auto">
       <div class="mx-auto flex min-h-full w-full max-w-7xl flex-col p-4 sm:p-6 lg:p-8">
-        <Tabs.Content value="recipe" class="mt-0 flex flex-1 flex-col data-[state=inactive]:hidden">
-          <RecipeCreatePanel onSuccess={goToSitesAndHighlight} onManageProfiles={() => (activeTab = "profiles")} />
-        </Tabs.Content>
         <Tabs.Content value="providers" class="mt-0 flex flex-1 flex-col data-[state=inactive]:hidden">
           <ProvidersPanel
             {highlightSlug}

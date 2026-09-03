@@ -68,11 +68,11 @@ Do not use status colors decoratively. Do not add glow, scanlines, graticules, r
 
 ## Application shell
 
-- Desktop: collapsible sidebar with icon and label for Overview, Sessions, Integrations, Logs, and Settings.
+- Desktop: collapsible sidebar with icon and label for Overview, Sessions, Flows, Providers, Combos, Profiles, Logs, and Settings. The legacy Recipes UI is hidden — `/recipes` redirects to `/flows`.
 - Narrow windows: sidebar becomes a focus-managed Sheet.
 - Header: route context, connection details, sidebar trigger, and theme control.
 - Overview and Settings use constrained content widths.
-- Sessions and Logs use the full workspace.
+- Sessions, Flows canvas, and Logs use the full workspace.
 
 ## Screen contracts
 
@@ -84,6 +84,14 @@ Lead with system health, then supporting metrics. Issues provide a related actio
 
 The conversation is primary. Session list is secondary; inspector and target workbench are tertiary panes. On narrow windows secondary panes become overlays. The composer remains visible. Keep all search, archive, pin, tags, fork, export, inspect, batch target, and rotation behaviors.
 
+### Flows
+
+Flows replace the Recipe UI. Layout: list (`/flows`) + full-screen canvas (`/flows/<slug>`) built on Svelte Flow — pan/zoom/minimap, drag nodes, connect handles, click a node to edit params in the right panel, click an edge to delete it, save, duplicate, enable/disable, and run trial (preflight per node + real run + postflight). Node `condition` exposes `true`/`false` source handles for branching.
+
+### Providers
+
+Browser providers are read-only here: Reload, open the matching Flow (`/flows/<slug>` for edits, duplication, trials), and close browsers. All selector editing moved to Flows. The legacy Recipe YAML backend still runs underneath but has no UI.
+
 ### Integrations
 
 Order follows the workflow:
@@ -93,7 +101,7 @@ Order follows the workflow:
 3. Manage integrated sites/accounts.
 4. Manage browser profiles.
 
-All destructive actions use Alert Dialog; account creation uses Dialog.
+The Recipe creation tab is removed — converted flows appear under Flows. All destructive actions use Alert Dialog; account creation uses Dialog.
 
 ### Logs
 
@@ -112,6 +120,15 @@ Every route provides appropriate loading skeletons, actionable empty states, inl
 - Respect `prefers-reduced-motion`.
 - Maintain WCAG AA contrast in both themes.
 - Icon-only controls require accessible names and tooltips when their meaning is not obvious.
+
+## Flows — canvas kiểu n8n thay UI Recipe
+
+- Mỗi flow con là một file `data/flows/<slug>/flow.json` (`{slug, kind, flow_type, capability, enabled, model, account, meta, nodes[], edges[]}`) — 1 flow = 1 model, tên flow đặt như tên model, cho phép duplicate nhanh. Theo `CHAT2API_DATA_DIR` (`config.py:flows_dir`, ghi đè bằng `FLOWS_DIR`).
+- Validate bằng `flow_store.validate_flow` (đúng 1 node `start`, ≥1 node `output`, kiểu node thuộc catalog, edges trỏ tới node có thật). Ghi atomic (temp + rename).
+- Auto-convert lúc startup: `flow_converter.migrate_all` tách mỗi `recipes/*/recipe.yaml` thành N flow con, idempotent (chỉ tạo mới, không đè flow đã sửa, không ghi ngược về recipe).
+- Thực thi: `flow_compiler.compile_flow` dựng dict recipe chuẩn → `FlowRunner` (subclass `BrowserRecipe`) tái dùng toàn bộ helpers browser (account/assign, pool/page, done_signal, media, copy). `flow_executor` đi từng node theo edges (DAG + rẽ nhánh `condition` qua `sourceHandle` true/false), fail dừng tại node đó.
+- Tương thích chat: `router.py:_flow_loaders` nạp flows **sau** recipes nên flow cùng slug **ghi đè** recipe cũ — model id giữ nguyên, Combos/Test-targets/Sessions/Domains không gãy. API: `GET /admin/flows`, `GET/PUT/DELETE /admin/flows/{slug}`, `POST .../duplicate`, `POST .../reload`, `POST .../test` (preflight từng node + run thật + postflight, theo triết lý 3 chặng của `trial.py`).
+- UI Recipe cũ (sidebar link, tab tạo, `RecipeCreatePanel/EditorSheet/Fields`, sửa/xóa/đổi tên/phân tích/ghi thao tác trong Providers) đã ẩn — backend recipe vẫn chạy ngầm.
 
 ## Trace — Ghi thao tác giàu (Phase 1-5)
 

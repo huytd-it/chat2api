@@ -15,13 +15,26 @@ class ModelNotFound(Exception):
 
 
 class Router:
-    def __init__(self, recipes_dir: Path, pool=None):
+    def __init__(self, recipes_dir: Path, pool=None, flows_dir: Path | None = None):
         self.recipes_dir = recipes_dir
         self.pool = pool
+        # Thư mục flows kiểu n8n (data/flows). None = tự suy từ recipes_dir.
+        self.flows_dir = Path(flows_dir) if flows_dir else None
         self.providers: dict[str, Provider] = {}
         self.failures: dict[str, int] = {}
         # Combo là provider ảo duy nhất trỏ tới nhiều model thật, nạp sau các provider khác
         self._combo_provider = None
+
+    def _resolve_flows_dir(self) -> Path:
+        if self.flows_dir is not None:
+            return self.flows_dir
+        import os as _os
+
+        env = _os.environ.get("FLOWS_DIR", "").strip()
+        if env:
+            return Path(env)
+        # Layout mặc định: ./recipes và ./data/flows cùng nằm dưới cwd.
+        return Path(self.recipes_dir).parent / "data" / "flows"
 
     def reload(self) -> None:
         self.providers.clear()
@@ -31,25 +44,32 @@ class Router:
         # last_ok_at / last_error / last_error_at và không bị xoá theo.
         self.failures.clear()
         self._db_execute("UPDATE recipe SET failures = 0 WHERE failures != 0")
-        if not self.recipes_dir.exists():
-            # vẫn phải khởi combo provider để /v1/models không rỗng khi chỉ có combo
-            self._ensure_combo_provider()
-            return
-        for child in sorted(self.recipes_dir.iterdir()):
-            if not child.is_dir() or child.name.startswith("."):
-                continue
-            for loader in LOADERS:
-                try:
-                    loaded = loader(child, self.pool)
-                except Exception as e:
-                    print(f"[chat2api] loader error {child.name}: {e}", file=sys.stderr)
+        if self.recipes_dir.exists():
+            for child in sorted(self.recipes_dir.iterdir()):
+                if not child.is_dir() or child.name.startswith("."):
                     continue
-                if loaded is None:
-                    continue
-                items = loaded if isinstance(loaded, list) else [loaded]
-                for p in items:
-                    self.providers[p.slug] = p
-                break
+                for loader in LOADERS:
+                    try:
+                        loaded = loader(child, self.pool)
+                    except Exception as e:
+                        print(f"[chat2api] loader error {child.name}: {e}", file=sys.stderr)
+                        continue
+                    if loaded is None:
+                        continue
+                    items = loaded if isinstance(loaded, list) else [loaded]
+                    for p in items:
+                        self.providers[p.slug] = p
+                    break
+        # Flows ghi đè recipes cùng slug — chat model id giữ nguyên,
+        # Combos/Test-targets/Sessions/Domains không gãy.
+        try:
+            for runner in _flow_loaders(
+                self._resolve_flows_dir(), self.pool,
+                accounts_root=self.recipes_dir,
+            ):
+                self.providers[runner.slug] = runner
+        except Exception as e:
+            print(f"[chat2api] flow loader error: {e}", file=sys.stderr)
         self._ensure_combo_provider()
 
     def _ensure_combo_provider(self) -> None:
@@ -154,3 +174,43 @@ def _recipe_loader(directory: Path, pool):
 
 
 LOADERS.append(_recipe_loader)
+
+
+def _flow_loaders(flows_dir: Path, pool, accounts_root: Path | None = None) -> list:
+    """Mọi FlowRunner đọc được dưới `flows_dir`. Flow hỏng/tắt bị bỏ qua."""
+    import json
+
+    from .flow_store import validate_flow
+    from .providers.flow_runner import FlowRunner
+
+    flows_dir = Path(flows_dir)
+    if not flows_dir.is_dir():
+        return []
+    out = []
+    for child in sorted(flows_dir.iterdir()):
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        path = child / "flow.json"
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[chat2api] invalid flow {child.name}: {e}", file=sys.stderr)
+            continue
+        if not isinstance(data, dict):
+            continue
+        data.setdefault("slug", child.name)
+        if not data.get("enabled", True):
+            continue
+        errs = validate_flow(data)
+        if errs:
+            print(f"[chat2api] invalid flow {child.name}: {errs}", file=sys.stderr)
+            continue
+        try:
+            out.append(FlowRunner(data, flows_dir, pool,
+                                  accounts_root=accounts_root))
+        except Exception as e:
+            print(f"[chat2api] flow compile error {child.name}: {e}", file=sys.stderr)
+            continue
+    return out

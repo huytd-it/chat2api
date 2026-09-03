@@ -203,6 +203,36 @@ class RecipeTestRequest(RecipeManualSpec):
         return data
 
 
+class FlowDuplicateRequest(BaseModel):
+    slug: str
+
+
+class FlowSaveRequest(BaseModel):
+    """Lưu toàn văn một flow (nodes/edges/meta). Slug lấy từ URL."""
+
+    flow_type: str | None = None
+    type: str | None = None
+    kind: str | None = None
+    capability: str | None = None
+    enabled: bool | None = None
+    keep_context: bool | None = None
+    model: dict | None = None
+    account: dict | None = None
+    meta: dict | None = None
+    nodes: list[dict] | None = None
+    edges: list[dict] | None = None
+
+    model_config = {"extra": "allow"}
+
+
+class FlowTestRequest(BaseModel):
+    """Chạy thử một flow đã lưu (preflight từng node + run thật)."""
+
+    headed: bool = False
+    prompt: str | None = None
+    n: int = 1
+
+
 class RecipeEditRequest(BaseModel):
     """Sửa một recipe ĐÃ có, theo một trong hai đường.
 

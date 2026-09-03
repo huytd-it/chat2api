@@ -508,6 +508,160 @@ export async function reloadRecipe(key: string, slug: string): Promise<void> {
   });
 }
 
+// ------------------------------------------------------------- Flows (n8n-style)
+// Module mới thay UI Recipe. Backend Recipe cũ vẫn chạy ngầm nhưng UI đã ẩn.
+
+export interface FlowNode {
+  id: string;
+  type: string;
+  position?: { x: number; y: number };
+  params?: Record<string, unknown>;
+  label?: string;
+}
+
+export interface FlowEdge {
+  id?: string;
+  source: string;
+  target: string;
+  sourceHandle?: string | null;
+  label?: string | null;
+}
+
+export interface FlowDoc {
+  slug: string;
+  kind?: string;
+  flow_type?: string;
+  type?: string;
+  capability?: string;
+  enabled?: boolean;
+  keep_context?: boolean;
+  model?: Record<string, unknown>;
+  account?: Record<string, unknown>;
+  meta?: Record<string, unknown>;
+  nodes: FlowNode[];
+  edges: FlowEdge[];
+  [key: string]: unknown;
+}
+
+export interface FlowSummary {
+  slug: string;
+  flow_type: string;
+  capability: string;
+  enabled: boolean;
+  display_name?: string | null;
+  description?: string | null;
+  node_count: number;
+  edge_count: number;
+  source_recipe?: string | null;
+  parse_error?: string;
+  errors?: string[];
+}
+
+export const FLOW_NODE_TYPES = [
+  "start", "goto-url", "wait-ready", "new-chat", "assign-account",
+  "check-trial-limit", "action-sequence", "select-model", "fill-input",
+  "submit-enter", "submit-click", "wait-done-signal", "wait-media",
+  "extract-text", "extract-media", "copy-button", "condition", "delay",
+  "eval-js", "set-variable", "output",
+] as const;
+
+const FLOW_NODE_LABELS: Record<string, string> = {
+  start: "Bắt đầu",
+  "goto-url": "Mở URL",
+  "wait-ready": "Chờ sẵn sàng",
+  "new-chat": "Chat mới",
+  "assign-account": "Chọn account",
+  "check-trial-limit": "Giới hạn dùng thử",
+  "action-sequence": "Chuỗi thao tác",
+  "select-model": "Chọn model",
+  "fill-input": "Nhập prompt",
+  "submit-enter": "Gửi (Enter)",
+  "submit-click": "Gửi (bấm nút)",
+  "wait-done-signal": "Chờ trả lời",
+  "wait-media": "Chờ media",
+  "extract-text": "Lấy text",
+  "extract-media": "Lấy media",
+  "copy-button": "Nút Copy",
+  condition: "Rẽ nhánh",
+  delay: "Chờ",
+  "eval-js": "Chạy JS",
+  "set-variable": "Đặt biến",
+  output: "Kết quả",
+};
+
+export function flowNodeLabel(type: string): string {
+  return FLOW_NODE_LABELS[type] ?? type;
+}
+
+export async function fetchFlows(key: string): Promise<FlowSummary[]> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/flows", { headers: headers(key) });
+  return asJson(r);
+}
+
+export async function fetchFlow(key: string, slug: string): Promise<FlowDoc> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/flows/" + encodeURIComponent(slug), {
+    headers: headers(key),
+  });
+  return asJson(r);
+}
+
+export async function saveFlow(
+  key: string,
+  slug: string,
+  flow: FlowDoc,
+): Promise<{ ok: true; slug: string; flow: FlowDoc }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/flows/" + encodeURIComponent(slug), {
+    method: "PUT",
+    headers: headers(key),
+    body: JSON.stringify(flow),
+  });
+  return asJson(r);
+}
+
+export async function deleteFlow(key: string, slug: string): Promise<void> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/flows/" + encodeURIComponent(slug), {
+    method: "DELETE",
+    headers: headers(key),
+  });
+  await asJson(r);
+}
+
+export async function duplicateFlow(
+  key: string,
+  slug: string,
+  newSlug: string,
+): Promise<{ ok: true; slug: string; flow: FlowDoc }> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/flows/" + encodeURIComponent(slug) + "/duplicate", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify({ slug: newSlug }),
+  });
+  return asJson(r);
+}
+
+export async function testFlow(
+  key: string,
+  slug: string,
+  opts: { headed?: boolean; prompt?: string; n?: number } = {},
+): Promise<TrialResult> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/flows/" + encodeURIComponent(slug) + "/test", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify({
+      headed: opts.headed ?? false,
+      prompt: opts.prompt ?? null,
+      n: opts.n ?? 1,
+    }),
+  });
+  return asJson(r);
+}
+
 export async function closeRecipeBrowser(key: string, slug: string): Promise<number> {
   const base = await apiBase();
   const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug) + "/browser/close", {

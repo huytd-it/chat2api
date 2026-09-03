@@ -240,6 +240,239 @@ def _looks_answered(reply: str, prompt: str) -> bool:
     return bool(text) and text.lower() != prompt.strip().lower()
 
 
+async def run_flow_trial(cfg, pool, flow: dict, headed: bool,
+                         prompt: str | None = None, n: int = 1) -> dict[str, Any]:
+    """Chạy thử một flow graph đã lưu: soi từng node, chạy thật, rồi soi lại.
+
+    Giữ đúng triết lý 3 chặng của `run_trial` (preflight → chạy thật →
+    postflight), nhưng preflight đi theo **nodes/edges** của graph thay vì
+    khối recipe phẳng. Chạy đúng đường production của `FlowRunner`.
+    """
+    from .flow_executor import describe_walk, order_nodes
+    from .providers.flow_runner import FlowRunner
+
+    slug = str(flow.get("slug") or "flow")
+    flow_type = str(flow.get("flow_type") or flow.get("type") or "text")
+    model_cfg = flow.get("model") if isinstance(flow.get("model"), dict) else {}
+    trial_model_id = str(model_cfg.get("id") or slug)
+    is_media = flow_type in ("image", "video")
+    text = prompt or (DEFAULT_MEDIA_PROMPT if is_media else DEFAULT_TEXT_PROMPT)
+    steps: list[dict[str, Any]] = []
+    reply, error, media = "", "", 0
+    started = time.monotonic()
+    flows_dir = getattr(cfg, "flows_dir", None) or (cfg.data_dir / "flows")
+    # Runner thử chạy trên slug tạm để không chiếm tab/ctx_key của flow thật.
+    trial_slug = f"{slug}-test-{uuid.uuid4().hex[:6]}"
+    trial_flow = {**flow, "slug": trial_slug}
+    runner = FlowRunner(trial_flow, flows_dir, pool, headed=headed,
+                        accounts_root=cfg.recipes_dir)
+    nodes, _ = order_nodes(trial_flow)
+    walk = describe_walk(trial_flow)
+    assignment = None
+    try:
+        assignment = await runner.assign(None)
+        page = await _trial_page(runner, assignment, headed)
+        # Chặng 1 — preflight từng node theo đúng thứ tự walk.
+        for label in walk:
+            nid, _, ntype = label.partition(":")
+            node = nodes.get(nid, {})
+            params = node.get("params") if isinstance(node.get("params"), dict) else {}
+            if ntype in ("start", "output", "assign-account", "check-trial-limit",
+                         "eval-js", "set-variable", "condition"):
+                steps.append(_step(f"node {nid} ({ntype})", "", SKIP, None,
+                                   "node logic, không có selector để soi"))
+                continue
+            if ntype == "wait-ready":
+                delay = params.get("delay_ms")
+                if isinstance(delay, int) and delay > 0:
+                    try:
+                        await page.wait_for_timeout(delay)
+                    except Exception:
+                        import asyncio as _asyncio
+                        await _asyncio.sleep(delay / 1000)
+                    steps.append(_step(f"node {nid} (wait-ready)", f"delay {delay}ms", OK, None, ""))
+                else:
+                    steps.append(_step(f"node {nid} (wait-ready)", "", SKIP, None,
+                                       "node logic, không có selector để soi"))
+                continue
+            if ntype == "delay":
+                ms = params.get("ms")
+                if isinstance(ms, int) and ms > 0:
+                    try:
+                        await page.wait_for_timeout(ms)
+                    except Exception:
+                        import asyncio as _asyncio
+                        await _asyncio.sleep(ms / 1000)
+                    steps.append(_step(f"node {nid} (delay)", f"{ms}ms", OK, None, ""))
+                else:
+                    steps.append(_step(f"node {nid} (delay)", "", SKIP, None,
+                                       "node logic, không có selector để soi"))
+                continue
+            if ntype == "new-chat":
+                url = str(params.get("url") or "").strip()
+                selector = str(params.get("selector") or "").strip()
+                if url:
+                    try:
+                        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                        steps.append(_step(f"node {nid} (new-chat)", url, OK))
+                    except Exception as error:
+                        steps.append(_step(f"node {nid} (new-chat)", url, FAIL, None, str(error)))
+                        break
+                    if selector:
+                        steps.append(await _check(page, f"node {nid} (new-chat)", selector))
+                        if steps[-1]["status"] == FAIL:
+                            break
+                elif selector:
+                    steps.append(await _check(page, f"node {nid} (new-chat)", selector))
+                    if steps[-1]["status"] == FAIL:
+                        break
+                else:
+                    steps.append(_step(f"node {nid} (new-chat)", "", SKIP, None,
+                                       "node logic, không có selector để soi"))
+                continue
+            if ntype == "goto-url":
+                url = str(params.get("url") or "").strip()
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    steps.append(_step(f"node {nid} (goto-url)", url, OK))
+                except Exception as error:
+                    steps.append(_step(f"node {nid} (goto-url)", url, FAIL, None,
+                                       str(error)))
+                    break
+                continue
+            if ntype == "action-sequence":
+                for i, (verb, sel) in enumerate(
+                        _split_actions(str(params.get("action") or "")), 1):
+                    steps.append(await _run_action_step(
+                        page, f"node {nid} (action-sequence)[{i}] {verb}",
+                        verb, sel, None))
+                    if steps[-1]["status"] == FAIL:
+                        break
+                if steps and steps[-1]["status"] == FAIL:
+                    break
+                continue
+            if ntype == "select-model":
+                prelude = str(params.get("prelude_action") or "")
+                model_action = str(params.get("model_action")
+                                   or params.get("action") or "")
+                value = str(params.get("value") or params.get("model") or "")
+                failed = False
+                for i, (verb, sel) in enumerate(_split_actions(prelude), 1):
+                    steps.append(await _run_action_step(
+                        page, f"node {nid} (select-model/prelude)[{i}] {verb}",
+                        verb, sel, None))
+                    if steps[-1]["status"] == FAIL:
+                        failed = True
+                        break
+                if failed:
+                    break
+                for i, (verb, sel) in enumerate(_split_actions(model_action), 1):
+                    steps.append(await _run_action_step(
+                        page, f"node {nid} (select-model/model)[{i}] {verb}",
+                        verb, sel, value))
+                    if steps[-1]["status"] == FAIL:
+                        failed = True
+                        break
+                if failed:
+                    break
+                only_selector = str(params.get("selector") or "")
+                if not prelude and not model_action and only_selector:
+                    steps.append(await _check(page, f"node {nid} (select-model)",
+                                             only_selector))
+                    if steps[-1]["status"] == FAIL:
+                        break
+                if not prelude and not model_action and not only_selector:
+                    steps.append(_step(f"node {nid} (select-model)", "", SKIP, None,
+                                       "node trống, không có gì để soi"))
+                continue
+            # Kết quả chỉ có nghĩa SAU khi gửi prompt — soi ở postflight,
+            # không phải preflight (trước lúc gửi thì 0 khớp là bình thường).
+            if ntype in ("extract-text", "extract-media", "wait-media",
+                         "wait-done-signal", "copy-button"):
+                steps.append(_step(f"node {nid} ({ntype})", "", SKIP, None,
+                                   "soi sau khi có reply (postflight)"))
+                continue
+            selector = _trial_selector(ntype, params)
+            if selector is None:
+                steps.append(_step(f"node {nid} ({ntype})", "", SKIP, None,
+                                   "node logic, không có selector để soi"))
+                continue
+            if ntype == "submit-click":
+                steps.append(await _run_action_step(
+                    page, f"node {nid} (submit-click) click", "click", selector, None))
+            else:
+                steps.append(await _check(page, f"node {nid} ({ntype})", selector,
+                                         required=ntype not in (
+                                             "copy-button", "extract-media")))
+            if steps and steps[-1]["status"] == FAIL:
+                break
+        broken = next((s for s in steps if s["status"] == FAIL), None)
+        if broken is not None:
+            error = f"dừng ở bước '{broken['label']}': {broken['detail']}"
+        else:
+            # Chặng 2 — chạy thật đúng đường production của FlowRunner.
+            if is_media:
+                items = await runner.generate_images(
+                    text, n=max(1, n), headed=headed, assignment=assignment)
+                media = len(items or [])
+            else:
+                parts: list[str] = []
+                async for delta in runner.stream(
+                        [{"role": "user", "content": text}], trial_model_id,
+                        assignment=assignment):
+                    parts.append(delta)
+                reply = "".join(parts).strip()
+            # Chặng 3 — postflight: soi lại selector kết quả sau khi có reply.
+            steps += await _postflight(runner, page, runner.flow_kind)
+    except Exception as exc:
+        error = error or str(exc)
+        applog.log(f"trial: flow '{slug}' lỗi: {exc}", level="warn")
+    finally:
+        if assignment is not None:
+            assignment.release()
+        await pool.drop(trial_slug)
+
+    failed = any(s["status"] == FAIL for s in steps)
+    clean = not failed and not error
+    if is_media:
+        ok = clean and media > 0
+    else:
+        ok = clean and _looks_answered(reply, text)
+    out: dict[str, Any] = {"ok": ok, "flow": slug, "reply": reply, "steps": steps,
+                           "ms": int((time.monotonic() - started) * 1000)}
+    if is_media:
+        out["media"] = media
+    if error:
+        out["error"] = error
+    elif not ok and not failed:
+        out["error"] = ("không nhận được media nào" if is_media
+                        else "site không trả lời (hoặc chỉ đọc lại prompt)")
+    return out
+
+
+def _trial_selector(ntype: str, params: dict) -> str | None:
+    """Selector đại diện của một node để preflight soi. None = node logic."""
+    if ntype == "goto-url":
+        return None
+    if ntype in ("fill-input", "submit-click", "extract-text"):
+        return str(params.get("selector") or "")
+    if ntype == "action-sequence":
+        return str(params.get("action") or "")
+    if ntype == "select-model":
+        return str(params.get("model_action") or params.get("action")
+                   or params.get("prelude_action") or params.get("selector") or "")
+    if ntype == "wait-done-signal":
+        dtype = str(params.get("type") or "stable_text")
+        if dtype in ("selector_appear", "selector_disappear"):
+            return str(params.get("selector") or "")
+        return None
+    if ntype in ("extract-media", "wait-media"):
+        return str(params.get("media_selector") or params.get("copy_selector") or "")
+    if ntype == "copy-button":
+        return str(params.get("selector") or "")
+    return None
+
+
 async def run_trial(cfg, pool, recipe: dict, headed: bool, flow: str = "text",
                     prompt: str | None = None) -> dict[str, Any]:
     """Chạy thử `recipe` (chưa ghi đĩa) cho đúng một flow, báo cáo từng bước."""

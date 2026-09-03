@@ -153,7 +153,7 @@ def create_app(cfg: Config) -> FastAPI:
     pool = BrowserPool(cfg.browser_engine, cfg.pool_max_contexts,
                        max_profiles=cfg.pool_max_profiles)
     login_manager = LoginSessionManager()
-    router = Router(cfg.recipes_dir, pool)
+    router = Router(cfg.recipes_dir, pool, flows_dir=getattr(cfg, "flows_dir", None))
     router.reload()
 
     @asynccontextmanager
@@ -191,6 +191,18 @@ def create_app(cfg: Config) -> FastAPI:
         migrated = accounts.migrate_legacy(cfg.recipes_dir)
         if migrated:
             applog.log(f"account: gom {len(migrated)} account vào kho chung: {', '.join(migrated)}")
+        # Auto-convert recipes/*/recipe.yaml → data/flows/*/flow.json (chỉ tạo
+        # mới, không đụng flow người dùng đã sửa; cắt đứt, không ghi ngược).
+        try:
+            from . import flow_converter as flow_converter_mod
+
+            flow_counts = await asyncio.to_thread(
+                flow_converter_mod.migrate_all, cfg.recipes_dir,
+                getattr(cfg, "flows_dir", None) or (cfg.data_dir / "flows"))
+            if flow_counts.get("flows"):
+                applog.log("flow: convert {recipes} recipe → {flows} flow".format(**flow_counts))
+        except Exception as error:
+            applog.log(f"flow: migrate thất bại: {error}", "error")
         # Mirror đĩa vào DB *sau* migrate_legacy (để account vừa gom cũng vào kho)
         # và *trước* reload cuối (để provider dựng lại đọc được state đã lưu, ví
         # dụ số lượt dùng thử ẩn danh đã tiêu).
@@ -805,7 +817,8 @@ def register_admin(app: FastAPI, admin) -> None:
     from .agents import llm
     from . import jobs, settings
     from .schemas import (AccountLoginRequest, AddAccountRequest, ApiKeyCreateRequest,
-                           ComboCreateRequest, ComboUpdateRequest, IntegrateRequest,
+                           ComboCreateRequest, ComboUpdateRequest, FlowDuplicateRequest,
+                           FlowSaveRequest, FlowTestRequest, IntegrateRequest,
                            OpenAIProviderCreateRequest, OpenAIProviderUpdateRequest,
                            ProfileAccountRequest, ProfileCreateRequest,
                            ProfileOpenRequest, ProfileUpdateRequest, RecipeAnalyzeRequest,
@@ -1785,6 +1798,111 @@ def register_admin(app: FastAPI, admin) -> None:
         closed = await provider.close_browser()
         applog.log(f"browser: đóng thủ công {slug} ({closed} context)")
         return {"ok": True, "closed": closed}
+
+    # ------------------------------------------------------------- flows
+    # Module Flows kiểu n8n: mỗi flow con là data/flows/<slug>/flow.json,
+    # 1 flow = 1 model. Backend Recipe cũ vẫn chạy ngầm nhưng UI đã ẩn.
+
+    def _flows_dir(request: Request):
+        from . import flow_store as flow_store_mod
+
+        return flow_store_mod.flows_dir_of(request.app.state.cfg)
+
+    def _flow_slug_or_400(slug: str) -> str:
+        from . import flow_store as flow_store_mod
+
+        cleaned = (slug or "").strip().lower()
+        if not flow_store_mod.slug_ok(cleaned):
+            raise OpenAIError(400, "invalid_slug",
+                              "Slug chỉ gồm chữ thường, số và dấu -")
+        return cleaned
+
+    @admin.get("/flows")
+    async def flow_list(request: Request):
+        from . import flow_store as flow_store_mod
+
+        items = await asyncio.to_thread(flow_store_mod.list_flows, _flows_dir(request))
+        return items
+
+    @admin.get("/flows/{slug}")
+    async def flow_detail(slug: str, request: Request):
+        from . import flow_store as flow_store_mod
+
+        cleaned = _flow_slug_or_400(slug)
+        data = await asyncio.to_thread(flow_store_mod.load_flow, _flows_dir(request), cleaned)
+        if data is None:
+            raise OpenAIError(404, "not_found", "Flow không tồn tại")
+        return data
+
+    @admin.put("/flows/{slug}")
+    async def flow_save(slug: str, body: FlowSaveRequest, request: Request):
+        from . import flow_store as flow_store_mod
+
+        cleaned = _flow_slug_or_400(slug)
+        payload = body.model_dump(exclude_none=True)
+        payload["slug"] = cleaned
+        try:
+            saved = await asyncio.to_thread(
+                flow_store_mod.save_flow, _flows_dir(request), cleaned, payload)
+        except ValueError as error:
+            raise OpenAIError(400, "invalid_flow", str(error)) from None
+        request.app.state.router.reload()
+        applog.log(f"flow: lưu {cleaned}")
+        return {"ok": True, "slug": cleaned, "flow": saved}
+
+    @admin.delete("/flows/{slug}")
+    async def flow_delete(slug: str, request: Request):
+        from . import flow_store as flow_store_mod
+
+        cleaned = _flow_slug_or_400(slug)
+        ok = await asyncio.to_thread(
+            flow_store_mod.delete_flow, _flows_dir(request), cleaned)
+        if not ok:
+            raise OpenAIError(404, "not_found", "Flow không tồn tại")
+        request.app.state.router.reload()
+        applog.log(f"flow: xóa {cleaned}", "warn")
+        return {"ok": True}
+
+    @admin.post("/flows/{slug}/duplicate")
+    async def flow_duplicate(slug: str, body: FlowDuplicateRequest, request: Request):
+        from . import flow_store as flow_store_mod
+
+        cleaned = _flow_slug_or_400(slug)
+        new_slug = _flow_slug_or_400(body.slug)
+        try:
+            saved = await asyncio.to_thread(
+                flow_store_mod.duplicate_flow, _flows_dir(request), cleaned, new_slug)
+        except FileNotFoundError:
+            raise OpenAIError(404, "not_found", "Flow không tồn tại") from None
+        except FileExistsError as error:
+            raise OpenAIError(409, "slug_taken", str(error)) from None
+        except ValueError as error:
+            raise OpenAIError(400, "invalid_slug", str(error)) from None
+        request.app.state.router.reload()
+        applog.log(f"flow: copy {cleaned} -> {new_slug}")
+        return {"ok": True, "slug": new_slug, "flow": saved}
+
+    @admin.post("/flows/{slug}/reload")
+    async def flow_reload(slug: str, request: Request):
+        _flow_slug_or_400(slug)
+        request.app.state.router.reload()
+        applog.log(f"flow: reload {slug}")
+        return {"ok": True}
+
+    @admin.post("/flows/{slug}/test")
+    async def flow_test(slug: str, body: FlowTestRequest, request: Request):
+        """Chạy thử flow đã lưu: preflight từng node + run thật + postflight."""
+        from . import flow_store as flow_store_mod
+        from .trial import run_flow_trial
+
+        cleaned = _flow_slug_or_400(slug)
+        data = await asyncio.to_thread(
+            flow_store_mod.load_flow, _flows_dir(request), cleaned)
+        if data is None:
+            raise OpenAIError(404, "not_found", "Flow không tồn tại")
+        n = max(1, min(int(body.n or 1), 4))
+        return await run_flow_trial(request.app.state.cfg, request.app.state.pool,
+                                    data, body.headed, body.prompt, n)
 
     # ------------------------------------------------------------- combos
 

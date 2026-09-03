@@ -18,6 +18,7 @@ export default defineConfig(async () => ({
     // 1420 falls inside Windows' Hyper-V/WSL reserved TCP range on some
     // machines (netsh interface ipv4 show excludedportrange) and silently
     // fails to bind; override via env when that happens.
+    // @ts-expect-error process is a nodejs global
     port: Number(process.env.TAURI_DEV_PORT) || 1420,
     strictPort: true,
     host: host || false,

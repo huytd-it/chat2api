@@ -2,7 +2,7 @@
   import { onDestroy } from "svelte";
   import * as Tooltip from "$lib/components/ui/tooltip/index.js";
   import { serverStatus } from "../stores";
-  import { recipes } from "../sync";
+  import { flows } from "../sync";
   import { cn } from "../utils";
 
   let seconds = $state(0);
@@ -73,7 +73,7 @@
     <div class="grid gap-1">
       <div>engine: {$serverStatus.engine}</div>
       <div>contexts: {$serverStatus.contexts}</div>
-      <div>recipes: {$recipes.length}</div>
+      <div>flows: {$flows.length}</div>
       <div>uptime: {formatUptime(seconds)}</div>
     </div>
   </Tooltip.Content>

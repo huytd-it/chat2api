@@ -4,6 +4,7 @@ import {
   fetchAccounts,
   fetchCombos,
   fetchDomains,
+  fetchFlows,
   fetchModels,
   fetchOpenAIProviders,
   fetchOverview,
@@ -12,6 +13,7 @@ import {
   type ComboInfo,
   type DomainAccounts,
   type DomainInfo,
+  type FlowSummary,
   type ModelInfo,
   type OpenAIProviderInfo,
   type Overview,
@@ -28,6 +30,24 @@ export const selectedModel = writable<string>("");
 export const recipes = writable<RecipeInfo[]>([]);
 export const recipesLoading = writable(false);
 export const recipesError = writable(false);
+
+/** Flows kiểu n8n — module thay UI Recipe (backend Recipe vẫn chạy ngầm). */
+export const flows = writable<FlowSummary[]>([]);
+export const flowsLoading = writable(false);
+export const flowsError = writable(false);
+
+export async function refreshFlows() {
+  flowsLoading.set(true);
+  try {
+    flows.set(await fetchFlows(get(apiKey)));
+    flowsError.set(false);
+  } catch {
+    flows.set([]);
+    flowsError.set(true);
+  } finally {
+    flowsLoading.set(false);
+  }
+}
 
 export async function refreshModels() {
   modelsLoading.set(true);
@@ -182,7 +202,12 @@ export async function refreshOpenAIProviders() {
  * tải đầu tiên; các thao tác đơn lẻ nên gọi refreshX() đúng phần bị ảnh hưởng
  * để tránh giật hình toàn trang (xem refreshAfterRecipeChange/Delete bên dưới). */
 export async function refreshIntegrations() {
-  await Promise.all([refreshRecipes(), refreshAccounts(), ensureProfiles(), refreshDomains(), refreshCombos(), refreshOpenAIProviders()]);
+  await Promise.all([refreshRecipes(), refreshFlows(), refreshAccounts(), ensureProfiles(), refreshDomains(), refreshCombos(), refreshOpenAIProviders()]);
+}
+
+/** Sau lưu/copy/xóa một flow: danh sách flow + model có thể đổi. */
+export async function refreshAfterFlowChange() {
+  await Promise.all([refreshFlows(), refreshModels()]);
 }
 
 /** Sau reload/tạo mới một recipe: health và model có thể đổi. */

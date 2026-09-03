@@ -1,14 +1,13 @@
 <script lang="ts">
-  import RecipeCreatePanel from "$lib/components/RecipeCreatePanel.svelte";
+  // Route Recipe cũ đã ẩn — chuyển sang Flows (module thay thế).
   import { goto } from "$app/navigation";
+  import { onMount } from "svelte";
 
-  function goToProvidersAndHighlight(slug: string) {
-    goto(`/providers#${encodeURIComponent(slug)}`);
-  }
+  onMount(() => {
+    goto("/flows", { replaceState: true });
+  });
 </script>
 
-<div class="min-h-0 flex-1 overflow-y-auto">
-  <div class="mx-auto flex min-h-full w-full max-w-7xl flex-col p-4 sm:p-6 lg:p-8">
-    <RecipeCreatePanel onSuccess={goToProvidersAndHighlight} onManageProfiles={() => goto("/profiles")} />
-  </div>
+<div class="flex min-h-0 flex-1 items-center justify-center p-8 text-sm text-muted-foreground">
+  Recipe đã chuyển thành Flows — đang chuyển hướng…
 </div>

@@ -41,6 +41,10 @@ class Config:
         self.browser_profile_mode = mode if mode in {"storage_state", "profile"} else "storage_state"
         self.traces_dir = self.data_dir / "traces"
         self.profiles_dir = self.data_dir / "profiles"
+        # Flows kiểu n8n: mỗi flow con là một file data/flows/<slug>/flow.json,
+        # 1 flow = 1 model. Ghi đè bằng FLOWS_DIR khi cần test/cách ly.
+        _flows_env = _env("FLOWS_DIR", "").strip()
+        self.flows_dir = Path(_flows_env) if _flows_env else self.data_dir / "flows"
         # Số profile (mỗi profile = 1 tiến trình Chromium) giữ mở cùng lúc.
         # Bàn test Sessions mở nhiều profile/domain/account song song, nên trần
         # 2 là quá chật — profile đang chạy sẽ bị đóng ngay giữa request.

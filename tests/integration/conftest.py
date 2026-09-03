@@ -58,6 +58,8 @@ async def app_client(tmp_path, site):
     cfg.agent_llm_model = ""
     cfg.recipes_dir = tmp_path / "recipes"
     cfg.recipes_dir.mkdir()
+    cfg.flows_dir = tmp_path / "flows"
+    cfg.flows_dir.mkdir()
     app = create_app(cfg)
     app.state.router.providers["fake"] = FakeProvider()
 

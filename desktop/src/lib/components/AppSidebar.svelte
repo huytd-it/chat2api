@@ -4,20 +4,20 @@
   import * as Tooltip from "$lib/components/ui/tooltip/index.js";
   import GaugeIcon from "phosphor-svelte/lib/GaugeIcon";
   import ChatCircleTextIcon from "phosphor-svelte/lib/ChatCircleTextIcon";
-  import FileTextIcon from "phosphor-svelte/lib/FileTextIcon";
+  import GitBranchIcon from "phosphor-svelte/lib/GitBranchIcon";
   import BrowserIcon from "phosphor-svelte/lib/BrowserIcon";
   import ShuffleIcon from "phosphor-svelte/lib/ShuffleIcon";
   import StackIcon from "phosphor-svelte/lib/StackIcon";
   import ScrollIcon from "phosphor-svelte/lib/ScrollIcon";
   import GearSixIcon from "phosphor-svelte/lib/GearSixIcon";
   import { serverStatus } from "$lib/stores";
-  import { recipes } from "$lib/sync";
+  import { flows } from "$lib/sync";
   import { cn } from "$lib/utils";
 
   const links = [
     { href: "/", label: "Overview", icon: GaugeIcon },
     { href: "/sessions", label: "Sessions", icon: ChatCircleTextIcon },
-    { href: "/recipes", label: "Recipes", icon: FileTextIcon },
+    { href: "/flows", label: "Flows", icon: GitBranchIcon },
     { href: "/providers", label: "Providers", icon: BrowserIcon },
     { href: "/combos", label: "Combos", icon: ShuffleIcon },
     { href: "/profiles", label: "Profiles", icon: StackIcon },
@@ -124,7 +124,7 @@
         <div class="grid gap-1">
           <div>engine: {$serverStatus.engine}</div>
           <div>contexts: {$serverStatus.contexts}</div>
-          <div>recipes: {$recipes.length}</div>
+          <div>flows: {$flows.length}</div>
         </div>
       </Tooltip.Content>
     </Tooltip.Root>

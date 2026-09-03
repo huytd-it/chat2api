@@ -591,9 +591,11 @@ async def test_test_recipe_edit_runs_the_merged_draft(app_client, monkeypatch):
 
     seen = {}
 
-    async def fake_trial(cfg, pool, recipe, headed):
+    async def fake_trial(cfg, pool, recipe, headed, flow="text", prompt=None):
         seen["recipe"] = recipe
         seen["headed"] = headed
+        seen["flow"] = flow
+        seen["prompt"] = prompt
         return {"ok": True, "reply": "OK"}
 
     await app_client.post("/admin/recipes", json=_manual_recipe_body())
