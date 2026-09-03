@@ -36,17 +36,48 @@ export interface LogEntry {
   message: string;
 }
 
-/** Loại thao tác trong một đoạn ghi. Khớp `chat2api/flows.py`. */
-export type FlowKind = "select_model" | "text" | "image" | "video";
+/** Loại thao tác trong một đoạn ghi. Khớp `chat2api/flows.py`.
+ *
+ * Là `string` chứ không phải union bốn giá trị: recipe đặt được flow tên riêng
+ * (`deep_research`, `canvas`…) và UI phải mang được những tên đó. Bốn tên dưới
+ * đây chỉ là các flow CÓ SẴN, dùng để gợi ý và để xếp thứ tự hiển thị. */
+export type FlowKind = string;
 
+/** Flow có sẵn, đúng thứ tự hiển thị của `flows.FLOW_KINDS`. */
 export const FLOW_KINDS: FlowKind[] = ["select_model", "text", "image", "video"];
 
-export const FLOW_LABELS: Record<FlowKind, string> = {
+/** Hình dạng kết quả mà một flow tự đặt tên phải khai qua `type`. */
+export const FLOW_TYPES = ["text", "image", "video"] as const;
+
+const BUILTIN_FLOW_LABELS: Record<string, string> = {
   select_model: "Chọn model",
   text: "Generate text",
   image: "Generate image",
   video: "Generate video",
 };
+
+/** Nhãn hiển thị; flow tự đặt tên hiện chính tên của nó. Khớp `flow_label`. */
+export function flowLabel(kind: FlowKind): string {
+  return BUILTIN_FLOW_LABELS[kind] ?? kind;
+}
+
+/** Giữ tên cũ cho code đang đọc trực tiếp — tra tên lạ sẽ ra `undefined`, nên
+ * chỗ nào hiển thị cho người dùng thì gọi `flowLabel` chứ đừng tra bảng này. */
+export const FLOW_LABELS = BUILTIN_FLOW_LABELS;
+
+/** Tên flow hợp lệ không — khớp `FLOW_NAME_RE` phía server. */
+export function flowNameOk(name: string): boolean {
+  return FLOW_KINDS.includes(name) || /^[a-z][a-z0-9_]{0,39}$/.test(name);
+}
+
+/** Flow có sẵn trước, tên tự đặt giữ thứ tự khai báo. Khớp `ordered_flows`. */
+export function orderedFlows(names: Iterable<FlowKind>): FlowKind[] {
+  const seen = [...new Set(names)];
+  return [
+    ...FLOW_KINDS.filter((k) => seen.includes(k)),
+    ...seen.filter((k) => !FLOW_KINDS.includes(k)),
+  ];
+}
 
 /** Một đoạn đã ghi trong phiên: ghi cho việc gì và bắt được bao nhiêu thao tác. */
 export interface RecordSegment {
@@ -650,34 +681,74 @@ export async function previewRecipeEdit(
   return asJson(r);
 }
 
+/** Một bước trong báo cáo chạy thử. Khớp `chat2api/trial.py`. */
+export interface TrialStep {
+  label: string;
+  selector: string;
+  /** ok = khớp đúng 1 · warn = khớp nhiều, mơ hồ · fail = 0 khớp/sai cú pháp · skip = không khai báo */
+  status: "ok" | "warn" | "fail" | "skip";
+  matches: number | null;
+  detail: string;
+}
+
+export interface TrialResult {
+  ok: boolean;
+  flow?: FlowKind;
+  reply: string;
+  steps?: TrialStep[];
+  /** Thời gian của riêng lượt thử, không tính mở/đóng browser. */
+  ms?: number;
+  /** Số ảnh/video nhận được (flow image/video). */
+  media?: number;
+  error?: string;
+}
+
+/** Tuỳ chọn cho một lượt chạy thử. `flow` mặc định là `text` ở server. */
+export interface TrialOptions {
+  headed?: boolean;
+  flow?: FlowKind;
+  /** Prompt riêng; để trống thì server dùng mặc định theo flow. */
+  testPrompt?: string;
+}
+
+function trialBody(opts: TrialOptions = {}) {
+  return {
+    headed: opts.headed ?? false,
+    flow: opts.flow ?? "text",
+    // Server đặt tên `test_prompt` chứ không phải `prompt` — `prompt` đã là
+    // khối cấu hình ô nhập của chính recipe.
+    test_prompt: opts.testPrompt || null,
+  };
+}
+
 /** Chạy thử bản đang sửa mà chưa ghi đè recipe đang chạy. */
 export async function testRecipeEdit(
   key: string,
   slug: string,
   edit: RecipeEdit,
-  headed = false,
-): Promise<{ ok: boolean; reply: string; error?: string }> {
+  opts: TrialOptions = {},
+): Promise<TrialResult> {
   const base = await apiBase();
   const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug) + "/test", {
     method: "POST",
     headers: headers(key),
-    body: JSON.stringify({ ...edit, headed }),
+    body: JSON.stringify({ ...edit, ...trialBody(opts) }),
   });
   return asJson(r);
 }
 
-/** Gửi thử một prompt cố định qua recipe CHƯA lưu — cho biết selector đúng
- * hay sai trước khi bấm tạo (form thủ công không có bước AI tự sửa). */
+/** Gửi thử một prompt qua recipe CHƯA lưu — cho biết selector nào sai trước
+ * khi bấm tạo (form thủ công không có bước AI tự sửa). */
 export async function testRecipe(
   key: string,
   spec: ManualRecipeSpec,
-  headed = false,
-): Promise<{ ok: boolean; reply: string; error?: string }> {
+  opts: TrialOptions = {},
+): Promise<TrialResult> {
   const base = await apiBase();
   const r = await fetch(base + "/admin/recipes/test", {
     method: "POST",
     headers: headers(key),
-    body: JSON.stringify({ ...spec, headed }),
+    body: JSON.stringify({ ...spec, ...trialBody(opts) }),
   });
   return asJson(r);
 }

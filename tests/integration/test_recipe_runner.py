@@ -140,6 +140,38 @@ async def test_copy_button_falls_back_to_stable_text_when_selector_never_matches
         await pool.aclose()
 
 
+async def test_use_copy_result_warns_when_clipboard_comes_back_empty(
+        fixture_recipe, tmp_path):
+    """Rơi về text DOM phải KÊU, không được im.
+
+    `_copy_button_result` trả "" mà không ném khi selector không khớp hoặc
+    clipboard rỗng, rồi `yield copied or last` lặng lẽ đưa ra text DOM. Người
+    dùng bật `use_copy_result` chính là để lấy đúng định dạng của nút Copy —
+    im lặng ở đây nghĩa là selector gãy bao lâu cũng không ai biết.
+    """
+    from chat2api import applog
+
+    recipe = _copy_button_recipe(
+        fixture_recipe, selector="button.khong-bao-gio-co",
+        fallback_quiet_ms=400, use_copy_result=True)
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    applog._entries.clear()
+    try:
+        provider = BrowserRecipe(recipe, tmp_path, pool)
+        out = []
+        async for delta in provider.stream([{"role": "user", "content": "hi"}], "fixture-web"):
+            out.append(delta)
+        # Vẫn trả lời được (giữ availability), nhưng là text DOM chứ không phải
+        # nội dung clipboard "This is the copied reply."
+        assert "".join(out).strip() == "This is the reply."
+    finally:
+        await pool.aclose()
+
+    warns = [e["message"] for e in applog.since() if e["level"] == "warn"]
+    assert any("use_copy_result" in m and "KHÔNG đúng" in m for m in warns), warns
+
+
 async def test_copy_button_ignores_button_of_earlier_message(fixture_recipe, tmp_path):
     """Nút copy của lượt TRƯỚC không được tính là lượt này đã xong."""
     pool = BrowserPool(max_contexts=1)

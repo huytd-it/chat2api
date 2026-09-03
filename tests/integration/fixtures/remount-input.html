@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+</head>
+<body>
+<!-- Tái hiện dola: Enter là lệnh gửi, và ngay sau đó site THAY ô nhập bằng một
+     node mới. Ô nhập KHÔNG có id — giống dola thật — nên cssPath phải là đường
+     dẫn neo vào #input-engine-container chứ không phải một selector id gọn. -->
+<div id="input-engine-container">
+  <div class="wrap">
+    <div contenteditable="true" role="textbox" class="tiptap ProseMirror"></div>
+  </div>
+</div>
+<script>
+function remount() {
+  const wrap = document.querySelector('.wrap');
+  const fresh = document.createElement('div');
+  fresh.setAttribute('contenteditable', 'true');
+  fresh.setAttribute('role', 'textbox');
+  fresh.className = 'tiptap ProseMirror';
+  wrap.replaceChildren(fresh);
+}
+window.__remount = remount;
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') remount();
+}, false);
+</script>
+</body>
+</html>

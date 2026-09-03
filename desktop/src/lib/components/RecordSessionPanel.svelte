@@ -3,14 +3,14 @@
   import { apiKey, showToast } from "../stores";
   import {
     fetchJob, finishRecord, jobAction, setRecordSegment, startRecord,
-    fetchTrace, FLOW_KINDS, FLOW_LABELS,
+    fetchTrace, FLOW_KINDS, flowLabel, flowNameOk, orderedFlows,
     type FlowKind, type JobStatus, type RecordSegment,
   } from "../api";
   import { refreshAfterRecipeChange } from "../sync";
   import { Button } from "$lib/components/ui/button";
   import {
-    Browser, Check, CircleNotch, Cube, Image as ImageIcon, Record as RecordIcon,
-    Stop, TextT, VideoCamera, X,
+    Browser, Check, CircleNotch, Cube, Image as ImageIcon, Plus, Record as RecordIcon,
+    Sparkle, Stop, TextT, VideoCamera, X,
   } from "phosphor-svelte";
 
   interface Props {
@@ -42,8 +42,29 @@
   let segments = $state<RecordSegment[]>([]);
   let segmentBusy = $state<FlowKind | "stop" | null>(null);
 
-  const FLOW_ICONS = { select_model: Cube, text: TextT, image: ImageIcon, video: VideoCamera };
+  const FLOW_ICONS: Record<string, typeof Cube> = {
+    select_model: Cube, text: TextT, image: ImageIcon, video: VideoCamera,
+  };
+  const iconOf = (flow: FlowKind) => FLOW_ICONS[flow] ?? Sparkle;
   const eventsOf = (flow: FlowKind) => segments.find((s) => s.flow === flow)?.events ?? 0;
+
+  /** Tên flow tự đặt người dùng đang gõ, và các tên đã dùng trong phiên này. */
+  let customFlow = $state("");
+  /** Nút đoạn ghi = flow có sẵn + mọi flow tên riêng đã ghi được đoạn. Không
+   * gộp lại thì đoạn tên riêng vừa ghi xong sẽ biến mất khỏi UI. */
+  const flowButtons = $derived(
+    orderedFlows([...FLOW_KINDS, ...segments.map((s) => s.flow), ...(segment ? [segment] : [])]),
+  );
+  const customFlowOk = $derived(
+    flowNameOk(customFlow.trim()) && !flowButtons.includes(customFlow.trim()),
+  );
+
+  async function startCustomSegment() {
+    const name = customFlow.trim();
+    if (!customFlowOk) return;
+    customFlow = "";
+    await switchSegment(name);
+  }
 
   let traceBusy = $state<null | "json" | "md">(null);
   async function downloadTrace(fmt: "json" | "md") {
@@ -92,7 +113,7 @@
       : "busy";
     if (j.status === "recording")
       statusText = segment
-        ? `Đang ghi đoạn “${FLOW_LABELS[segment]}” — thao tác trên trang, xong bấm Kết thúc đoạn.`
+        ? `Đang ghi đoạn “${flowLabel(segment)}” — thao tác trên trang, xong bấm Kết thúc đoạn.`
         : "Chromium đã sẵn sàng — chọn loại thao tác bên dưới rồi bắt đầu ghi đoạn.";
     else if (j.status === "resuming_record")
       statusText = "Đang gửi các selector vừa ghi cho AI sinh recipe…";
@@ -252,8 +273,8 @@
       <fieldset class="grid gap-2">
         <legend class="mb-1 text-xs font-medium text-muted-foreground">Đoạn ghi</legend>
         <div class="flex flex-wrap gap-2">
-          {#each FLOW_KINDS as flow (flow)}
-            {@const Icon = FLOW_ICONS[flow]}
+          {#each flowButtons as flow (flow)}
+            {@const Icon = iconOf(flow)}
             {@const count = eventsOf(flow)}
             {@const active = segment === flow}
             <Button
@@ -270,16 +291,37 @@
               {:else}
                 <Icon />
               {/if}
-              {FLOW_LABELS[flow]}
+              {flowLabel(flow)}
               {#if count > 0}
                 <span class="ml-1 rounded-full bg-foreground/10 px-1.5 text-[11px] tabular-nums">{count}</span>
               {/if}
             </Button>
           {/each}
         </div>
+
+        <!-- Site có chế độ riêng (Deep research, Canvas…) thì đặt tên đoạn ở
+             đây; analyzer sẽ dựng `flows.<tên>` từ đoạn đó. -->
+        <div class="flex flex-wrap items-center gap-2">
+          <input
+            bind:value={customFlow}
+            placeholder="flow tên riêng, vd deep_research"
+            aria-label="Tên flow tự đặt"
+            aria-invalid={customFlow.trim() !== "" && !customFlowOk}
+            spellcheck={false}
+            disabled={segmentBusy !== null || actionBusy}
+            onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); startCustomSegment(); } }}
+            class="h-8 w-56 rounded-md border border-input bg-background px-2 font-data text-sm aria-[invalid=true]:border-destructive"
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!customFlowOk || segmentBusy !== null || actionBusy}
+            onclick={startCustomSegment}
+          ><Plus /> Ghi đoạn này</Button>
+        </div>
         <p class="text-xs text-muted-foreground">
           {#if segment}
-            Đang ghi <strong>{FLOW_LABELS[segment]}</strong> — bấm lại nút đó để kết thúc đoạn, hoặc chọn việc khác để chuyển thẳng sang đoạn mới.
+            Đang ghi <strong>{flowLabel(segment)}</strong> — bấm lại nút đó để kết thúc đoạn, hoặc chọn việc khác để chuyển thẳng sang đoạn mới.
           {:else}
             Chưa ghi đoạn nào. Thao tác ngoài mọi đoạn vẫn được ghi nhận nhưng chỉ dùng làm ngữ cảnh, không thành flow.
           {/if}

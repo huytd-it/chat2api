@@ -2,15 +2,21 @@
   import { untrack } from "svelte";
   import { apiKey, showToast } from "../stores";
   import {
+    FLOW_KINDS,
     fetchRecipeSource,
+    flowLabel,
+    flowNameOk,
     previewRecipeEdit,
     testRecipeEdit,
     updateRecipe,
+    type FlowKind,
     type RecipeEdit,
+    type TrialResult,
   } from "../api";
   import { RecipeForm } from "../recipeForm.svelte";
   import { refreshAfterRecipeChange } from "../sync";
   import RecipeFields from "./RecipeFields.svelte";
+  import TrialReport from "./TrialReport.svelte";
   import { Button } from "$lib/components/ui/button";
   import { Switch } from "$lib/components/ui/switch";
   import { Textarea } from "$lib/components/ui/textarea";
@@ -41,7 +47,10 @@
   let saving = $state(false);
   let testing = $state(false);
   let headedTest = $state(false);
-  let testResult = $state<{ ok: boolean; reply: string; error?: string } | null>(null);
+  /** Flow đem ra chạy thử. `select_model` chỉ chạy tới bước chọn model rồi
+   * dừng — hữu ích khi đang dò đúng chuỗi bấm mở dropdown. */
+  let testFlow = $state<FlowKind>("text");
+  let testResult = $state<TrialResult | null>(null);
 
   /** Bản sửa hiện tại theo đúng tab đang mở — tab nào mở thì tab đó là bản gốc. */
   function edit(): RecipeEdit | null {
@@ -101,8 +110,8 @@
     const payload = edit();
     if (!payload) { showToast(form.error); return; }
     testing = true; testResult = null;
-    try { testResult = await testRecipeEdit($apiKey, slug, payload, headedTest); }
-    catch (e) { testResult = { ok: false, reply: "", error: (e as Error).message }; }
+    try { testResult = await testRecipeEdit($apiKey, slug, payload, { headed: headedTest, flow: testFlow }); }
+    catch (e) { testResult = { ok: false, reply: "", flow: testFlow, error: (e as Error).message }; }
     finally { testing = false; }
   }
 
@@ -184,18 +193,31 @@
             </Tabs.Content>
           </Tabs.Root>
 
-          {#if testResult}
-            <div class={`rounded-lg border p-3 text-sm ${testResult.ok ? "border-success/30 bg-success/5 text-success" : "border-destructive/30 bg-destructive/5 text-destructive"}`} role="status">
-              {#if testResult.ok}Kiểm tra thành công — nhận được phản hồi: "{testResult.reply}"
-              {:else}Kiểm tra thất bại{testResult.error ? `: ${testResult.error}` : testResult.reply ? ` — phản hồi: "${testResult.reply}"` : " — không nhận được phản hồi hợp lệ."}{/if}
-            </div>
-          {/if}
+          {#if testResult}<TrialReport result={testResult} />{/if}
         </div>
       {/if}
     </div>
 
     <Sheet.Footer class="flex-row flex-wrap items-center justify-between gap-3 border-t p-4 sm:p-5">
-      <label class="flex items-center gap-2 text-sm"><Switch bind:checked={headedTest} aria-label="Hiện browser khi kiểm tra" /> Hiện browser khi kiểm tra</label>
+      <div class="flex flex-wrap items-center gap-3">
+        <label class="flex items-center gap-2 text-sm"><Switch bind:checked={headedTest} aria-label="Hiện browser khi kiểm tra" /> Hiện browser khi kiểm tra</label>
+        <label class="flex items-center gap-2 text-sm">
+          Flow
+          <!-- Ô nhập chứ không phải select: recipe đặt được flow tên riêng, danh
+               sách gợi ý chỉ liệt kê các flow có sẵn. -->
+          <input
+            bind:value={testFlow}
+            list="re-flow-kinds"
+            aria-label="Flow đem ra chạy thử"
+            aria-invalid={testFlow !== "" && !flowNameOk(testFlow)}
+            spellcheck={false}
+            class="h-8 w-44 rounded-md border border-input bg-background px-2 font-data text-sm aria-[invalid=true]:border-destructive"
+          />
+          <datalist id="re-flow-kinds">
+            {#each FLOW_KINDS as kind (kind)}<option value={kind}>{flowLabel(kind)}</option>{/each}
+          </datalist>
+        </label>
+      </div>
       <div class="flex flex-wrap gap-2">
         <Button type="button" variant="ghost" size="sm" disabled={loading || busy} onclick={() => slug && load(slug)}><ArrowClockwise /> Đọc lại</Button>
         <Button type="button" variant="outline" size="sm" disabled={loading || busy} onclick={onTest}>{#if testing}<CircleNotch class="animate-spin" /> Đang kiểm tra{:else}<Check /> Kiểm tra{/if}</Button>

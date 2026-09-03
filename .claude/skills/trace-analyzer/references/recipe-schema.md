@@ -33,7 +33,8 @@ timing:
   input_delay_ms: 400
   ready_timeout_ms: 20000
 
-# Flow chia theo việc (khớp flows.FLOW_KINDS)
+# Flow chia theo việc. Bốn tên dưới đây là các flow CÓ SẴN; recipe đặt thêm
+# flow tên riêng được (xem `deep_research` bên dưới).
 flows:
   select_model:
     selector: ".model-btn"
@@ -50,6 +51,13 @@ flows:
     action: "click:[data-tab=video]"
     prompt: {input_selector: "#video-prompt", submit: "click:.send-video"}
     response: {media_selector: "video.result", done_signal: {type: copy_button, timeout_ms: 600000}}
+  # Flow tự đặt tên: chữ thường/số/gạch dưới, bắt đầu bằng chữ, ≤40 ký tự.
+  # `type` BẮT BUỘC — runtime dựa vào nó để biết chờ chữ hay chờ file.
+  deep_research:
+    type: text              # text | image | video
+    label: "Deep Research"  # nhãn hiển thị, tuỳ chọn
+    action: "click:[data-tool=deep-research]"
+    response: {last_message_selector: ".msg", done_signal: {type: copy_button, timeout_ms: 600000}}
 
 # Đăng nhập (nếu site yêu cầu)
 login:
@@ -71,6 +79,8 @@ anon_trial_limit: 20
 - **last_message_selector**: suy từ snapshot cuối (dòng `---TEXT---`) hoặc `outerHTML` của message cuối trong `snapshotDiff`.
 - **done_signal**: mặc định `copy_button`; nếu site không có nút Copy, dùng `stable_text`.
 - **flows[].action**: click chuyển tab/mode trước khi fill (thường là flow `select_model` hoặc `image`/`video`).
+- **flows[].type**: chỉ có ý nghĩa với flow tên tự đặt (tên có sẵn tự mang hình dạng trùng tên). Thiếu `type` trên tên tự đặt là lỗi validate — mặc định `text` sẽ khiến flow sinh ảnh bị chờ như chờ chữ.
+- **models[].flow**: chọn model = chọn flow. Thắng `capability`, và là cách DUY NHẤT trỏ tới flow tên tự đặt. Trỏ vào flow chưa khai (hoặc vào `select_model`) là lỗi validate.
 - **Nút icon-only (không text, không aria-label)**: event có `actionable.isSelf == false` nghĩa là element bị click chỉ là lớp phủ nới vùng bấm — lấy selector từ `actionable.cssPath` / `actionable.attributes`, đừng lấy `selectors.primary`. `icon` (viewBox + `pathD`) chỉ để NHẬN RA nút, CSS không chọn được theo nó.
 - **`done_signal` khi không bám được nút Copy**: `copy_button` bỏ trống `selector` sẽ dùng `DEFAULT_COPY_BUTTON_SELECTOR` (chỉ khớp qua `aria-label` / `title` / `data-testid` / `复制`). Site đặt nút Copy không có tên nào trong số đó thì mọi request phải chờ hết `fallback_quiet_ms` (mặc định 15000ms) rồi mới chốt — và `use_copy_result: true` khi đó vừa mất stream tăng dần vừa không đọc được clipboard. Kiểm tra `actionable.attributes` trong trace trước khi chọn `copy_button`.
 - **Iframe/shadow**: nếu `frame.chain` / `shadow.hostSelector` khác rỗng, selector phải tính trong frame/shadow đó (playwright frame locator).

@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>selector candidates</title>
+<body>
+  <!-- Ca 1: test hook — ứng viên tốt nhất, phải thắng mọi thứ khác. -->
+  <div id="composer" class="flex w-[calc(100%-2rem)] hover:bg-x px-4">
+    <textarea data-testid="prompt-input" class="grow w-[100px]" placeholder="Hỏi gì đó"></textarea>
+  </div>
+
+  <!-- Ca 2: id do framework sinh (React useId) — phải bị loại. -->
+  <div id=":r3:" class="css-1a2b3c">
+    <span id="msg-body" class="reply-text">xin chào</span>
+  </div>
+
+  <!-- Ca 3: hai nút TRÙNG aria-label — [aria-label] không duy nhất, phải leo
+       tổ tiên để neo vào #left-rail / #right-rail. -->
+  <div id="left-rail">
+    <button aria-label="Sao chép" class="btn_a8f93b21">L</button>
+  </div>
+  <div id="right-rail">
+    <button aria-label="Sao chép" class="btn_a8f93b21">R</button>
+  </div>
+
+  <!-- Ca 4: nút icon-only bọc trong lớp phủ trong suốt — click trúng div, nhưng
+       ứng viên phải sinh cho chính <button>. -->
+  <div id="toolbar">
+    <button data-testid="send" class="relative">
+      <div id="overlay" class="absolute inset-0 opacity-0"></div>
+      <svg viewBox="0 0 24 24"><path d="M2 2L22 12"></path></svg>
+    </button>
+  </div>
+
+  <!-- Ca 5: không có gì bám được ngoài vị trí (class toàn Tailwind arbitrary,
+       không id/aria/data) — chỉ còn csspath. Test lấy qua nth trong <section>. -->
+  <section id="bare-box"><div class="w-[3px]"></div><div class="w-[3px]"></div></section>
+</body>

@@ -142,6 +142,9 @@ class RecipeModelSpec(BaseModel):
     action: str | None = None       # nhiều bước ngăn bằng ;: click:<selector> | select:<selector>
     value: str | None = None        # option value, mặc định dùng id
     capability: str | None = None   # chat | image | both, mặc định chat
+    # Flow mà model này chạy — chọn model chính là chọn flow. Thắng `capability`
+    # và là cách DUY NHẤT trỏ tới flow tên tự đặt (`flows.deep_research`…).
+    flow: str | None = None
 
 
 class RecipeAnalyzeRequest(BaseModel):
@@ -184,6 +187,20 @@ class RecipeTestRequest(RecipeManualSpec):
     # Hiện browser để người dùng quan sát lúc kiểm tra selector — recipe lưu
     # xuống đĩa vẫn luôn chạy headless, cờ này chỉ áp dụng cho lượt test.
     headed: bool = False
+    # Flow đem ra thử: select_model | text | image | video. `select_model` chỉ
+    # chạy tới bước chọn model rồi dừng, không gửi prompt.
+    flow: str = "text"
+    # Prompt riêng cho lượt thử; để trống thì dùng mặc định theo flow. KHÔNG
+    # đặt tên `prompt` — khóa đó đã là `RecipePromptSpec` của chính recipe.
+    test_prompt: str | None = None
+
+    def to_recipe_dict(self) -> dict:
+        # Tuỳ chọn của lượt thử không phải một phần của recipe; để lọt vào là
+        # `validate_recipe` soi một dict không giống thứ sẽ được ghi xuống đĩa.
+        data = super().to_recipe_dict()
+        for key in ("headed", "flow", "test_prompt"):
+            data.pop(key, None)
+        return data
 
 
 class RecipeEditRequest(BaseModel):
@@ -205,6 +222,10 @@ class RecipeEditRequest(BaseModel):
 class RecipeEditTestRequest(RecipeEditRequest):
     # Chạy thử bản đang sửa mà chưa ghi xuống đĩa.
     headed: bool = False
+    # Flow đem ra thử: select_model | text | image | video.
+    flow: str = "text"
+    # Prompt riêng cho lượt thử; để trống thì dùng mặc định theo flow.
+    test_prompt: str | None = None
 
 
 class AddAccountRequest(BaseModel):

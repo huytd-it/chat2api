@@ -131,34 +131,17 @@ def llm_upstream_error(error) -> OpenAIError:
     return OpenAIError(status if status == 429 else 502, "llm_error", str(error))
 
 
-async def run_recipe_trial(cfg: Config, pool, recipe: dict, headed: bool) -> dict:
-    """Chạy đúng một prompt cố định qua `recipe` mà KHÔNG ghi nó xuống đĩa.
+async def run_recipe_trial(cfg: Config, pool, recipe: dict, headed: bool,
+                           flow: str = "text", prompt: str | None = None) -> dict:
+    """Chạy thử `recipe` mà KHÔNG ghi nó xuống đĩa, báo cáo từng bước.
 
     Dùng chung cho cả recipe tạo mới lẫn bản đang sửa: người dùng biết selector
-    đúng hay sai trước khi bấm lưu (form thủ công không có bước round-trip tự
-    sửa như analyzer AI).
+    nào sai trước khi bấm lưu (form thủ công không có bước round-trip tự sửa
+    như analyzer AI). Phần soi selector nằm ở `trial.run_trial`.
     """
-    from .providers.browser_recipe import BrowserRecipe
+    from .trial import run_trial
 
-    trial_slug = f"manual-test-{uuid.uuid4().hex[:10]}"
-    trial_recipe = {**recipe, "slug": trial_slug}
-    trial_dir = cfg.recipes_dir / ".manual-test" / trial_slug
-    runner = BrowserRecipe(trial_recipe, trial_dir, pool, headed=headed,
-                           accounts_root=cfg.recipes_dir)
-    try:
-        parts = []
-        async for delta in runner.stream(
-            [{"role": "user", "content": "Reply with exactly: OK"}],
-            trial_recipe["models"][0]["id"],
-        ):
-            parts.append(delta)
-        reply = "".join(parts).strip()
-    except Exception as error:
-        return {"ok": False, "reply": "", "error": str(error)}
-    finally:
-        await pool.drop(trial_slug)
-    ok = bool(reply) and reply.lower() != "reply with exactly: ok"
-    return {"ok": ok, "reply": reply}
+    return await run_trial(cfg, pool, recipe, headed, flow, prompt)
 
 
 def create_app(cfg: Config) -> FastAPI:
@@ -1101,9 +1084,13 @@ def register_admin(app: FastAPI, admin) -> None:
         flow = (body.flow or "").strip() or None
         if action not in {"start", "stop"}:
             raise OpenAIError(400, "invalid_request_error", "action phải là 'start' hoặc 'stop'")
-        if action == "start" and flow not in flows.FLOW_KINDS:
+        # Không chặn theo danh sách có sẵn: người dùng ghi được đoạn cho flow tự
+        # đặt tên (site có chế độ riêng), analyzer sẽ dựng `flows.<tên>` từ đó.
+        if action == "start" and not flows.flow_name_ok(flow):
             raise OpenAIError(400, "invalid_flow",
-                              f"flow phải là một trong {', '.join(flows.FLOW_KINDS)}")
+                              f"tên flow không hợp lệ: {flow!r} — chữ thường, số và "
+                              "gạch dưới, bắt đầu bằng chữ, tối đa 40 ký tự "
+                              f"(có sẵn: {', '.join(flows.FLOW_KINDS)})")
         try:
             return await jobs.set_record_segment(job_id, flow, action)
         except jobs.JobNotFound:
@@ -1468,7 +1455,7 @@ def register_admin(app: FastAPI, admin) -> None:
         if errs:
             raise OpenAIError(400, "invalid_recipe", "; ".join(errs))
         return await run_recipe_trial(request.app.state.cfg, request.app.state.pool,
-                                      recipe, body.headed)
+                                      recipe, body.headed, body.flow, body.test_prompt)
 
     @admin.post("/recipes/analyze")
     async def analyze_recipe(body: RecipeAnalyzeRequest, request: Request):
@@ -1725,7 +1712,7 @@ def register_admin(app: FastAPI, admin) -> None:
         """Chạy thử bản đang sửa mà chưa ghi đè recipe đang chạy."""
         data = _edited_recipe(request, slug, body)
         return await run_recipe_trial(request.app.state.cfg, request.app.state.pool,
-                                      data, body.headed)
+                                      data, body.headed, body.flow, body.test_prompt)
 
     @admin.post("/recipes/{slug}/reanalyze")
     async def reanalyze_recipe(slug: str, body: RecipeReanalyzeRequest, request: Request):

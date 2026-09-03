@@ -616,7 +616,7 @@ async def set_record_segment(job_id: str, flow: str | None, action: str) -> dict
         raise JobNotFound
     if action not in {"start", "stop"}:
         raise InvalidJobState
-    if action == "start" and flow not in flows.FLOW_KINDS:
+    if action == "start" and not flows.flow_name_ok(flow):
         raise InvalidJobState
     async with job["lock"]:
         if job["status"] != "recording" or job.get("record_timeout_claimed") or job.get("cancel_claimed"):

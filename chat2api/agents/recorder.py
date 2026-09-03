@@ -22,7 +22,7 @@ RECORDER_JS = (
     + r"""
 (() => {
   if (window.__c2a_recorder) return;
-  window.__c2a_recorder = {inputTimer: null, lastInputEl: null};
+  window.__c2a_recorder = {inputTimer: null, lastInputEl: null, pendingFill: null};
   function enrich(el){
     try { return __c2aEnrich(el); } catch(e){
       try { const s=__c2aSel(el); return {selector:s, selectors:{primary:s}, attributes:{}, bbox:{}, text:{}, frame:{}, shadow:{}, snapshotDiff:''}; } catch(e2){ return {selector:''}; }
@@ -37,7 +37,14 @@ RECORDER_JS = (
       ||el.placeholder|| (el.innerText||'')).trim().slice(0,120));
   }
   function push(kind, el, extra){
-    const en = enrich(el || document.activeElement);
+    // Dùng `target` cho cả ba: enrich / label / tag phải cùng mô tả một element,
+    // không thể enrich activeElement mà label lại đọc `el` rỗng.
+    const target = el || document.activeElement;
+    pushEnriched(kind, target, enrich(target), label(target), extra);
+  }
+  // Nhận sẵn `en` + `labelText` thay vì tự enrich: event `fill` phải mô tả ô
+  // nhập ở thời điểm GÕ, không phải thời điểm debounce bắn (xem handler input).
+  function pushEnriched(kind, el, en, labelText, extra){
     const p = {
       kind: kind,
       selector: en.selector || '',
@@ -53,7 +60,7 @@ RECORDER_JS = (
       icon: en.icon || null,
       ancestors: en.ancestors || [],
       url: location.href,
-      label: label(el),
+      label: labelText || '',
       tag: (el && el.tagName || '').toLowerCase(),
       ts: Date.now()
     };
@@ -82,19 +89,57 @@ RECORDER_JS = (
   }, true);
   document.addEventListener('keydown', (e) => {
     if(e.key === 'Enter'){
+      // Chốt `fill` TRƯỚC: Enter thường là lệnh gửi, ngay sau đó site xoá/dựng
+      // lại ô nhập. Đợi hết 700ms debounce thì vừa mất value, vừa cho ra trace
+      // ngược đời (press đứng trước fill).
+      flushFill();
       push('press', e.target, {key: 'Enter', value: ''});
     }
   }, true);
+  function currentValue(el){
+    try { return el.isContentEditable ? (el.innerText || '') : (el.value || ''); }
+    catch(e){ return ''; }
+  }
+  // Bắn event `fill` đang chờ. Enrich đã chụp từ lúc gõ nên vẫn đúng kể cả khi
+  // ô nhập đã bị site dựng lại; chỉ đọc lại value khi element còn sống.
+  function flushFill(){
+    const w = window.__c2a_recorder;
+    const pending = w.pendingFill;
+    if(!pending) return;
+    clearTimeout(w.inputTimer);
+    w.inputTimer = null;
+    w.pendingFill = null;
+    let alive = false;
+    try { alive = !!(pending.el && pending.el.isConnected); } catch(e){}
+    let value = pending.value;
+    if(alive){
+      const cur = currentValue(pending.el);
+      if(cur) value = cur.slice(0, 8000);
+    }
+    const extra = {value: value};
+    // Đánh dấu để người đọc trace biết enrich chụp trước lúc element biến mất,
+    // thay vì phải tự đoán từ bbox 0 / parent null.
+    if(!alive) extra.detached = true;
+    pushEnriched('fill', pending.el, pending.en,
+                 alive ? label(pending.el) : (pending.label || value.slice(0,120)),
+                 extra);
+  }
   document.addEventListener('input', (e) => {
     const el = e.target;
     if(!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && !el.isContentEditable) return;
     const w = window.__c2a_recorder;
     clearTimeout(w.inputTimer);
     w.lastInputEl = el;
-    w.inputTimer = setTimeout(() => {
-      const v = el.isContentEditable ? (el.innerText || '') : (el.value || '');
-      push('fill', el, {value: v.slice(0, 8000)});
-    }, 700);
+    // Enrich NGAY ở phím đầu tiên của một lượt gõ, không đợi debounce: gõ xong
+    // Enter luôn thì site dựng lại ô nhập, tới lúc timer bắn `el` đã lìa khỏi
+    // document — cssPath cụt còn "div", bbox toàn 0, ancestors rỗng, value mất
+    // sạch. Chỉ enrich một lần mỗi lượt (selector không đổi trong lúc gõ) nên
+    // không làm nặng trang: các phím sau chỉ cập nhật value.
+    if(!w.pendingFill || w.pendingFill.el !== el){
+      w.pendingFill = {el: el, en: enrich(el), label: label(el), value: ''};
+    }
+    w.pendingFill.value = currentValue(el).slice(0, 8000);
+    w.inputTimer = setTimeout(flushFill, 700);
   }, true);
   document.addEventListener('change', (e) => {
     const el = e.target;
@@ -116,6 +161,45 @@ RECORDER_JS = (
 RECORDER_JS_EXPR = "() => {" + chr(10) + RECORDER_JS + chr(10) + "}"
 
 
+def _clean_candidates(candidates: Any) -> list[dict[str, Any]]:
+    if not isinstance(candidates, list):
+        return []
+    return [c for c in candidates if isinstance(c, dict) and c.get("sel")]
+
+
+def _first_unique(candidates: Any) -> str:
+    """Selector đầu tiên đã verify chọn ĐÚNG 1 element, rỗng nếu không có cái nào."""
+    for c in _clean_candidates(candidates):
+        if c.get("unique"):
+            return str(c["sel"])
+    return ""
+
+
+def _best_selector(selectors: Any, candidates: Any, fallback: str) -> tuple[str, bool, list[str]]:
+    """Selector nên in ra cho LLM + có duy nhất không + vài ứng viên thay thế.
+
+    Có ứng viên duy nhất thì dùng nó. Không có thì lùi về `primary` như trace đời
+    cũ, nhưng gắn ``unique=False`` — LLM cần biết selector đó còn mơ hồ chứ không
+    phải im lặng nhận một chuỗi trúng nhiều element.
+    """
+    cands = _clean_candidates(candidates)
+    best = ""
+    if isinstance(selectors, dict):
+        best = str(selectors.get("best") or "")
+    if not best:
+        best = _first_unique(cands)
+    unique = bool(best)
+    if not best:
+        if isinstance(selectors, dict):
+            best = str(selectors.get("primary") or selectors.get("cssPath")
+                       or selectors.get("xpath") or "")
+        elif isinstance(selectors, str):
+            best = selectors
+        best = best or fallback
+    alts = [str(c["sel"]) for c in cands if str(c["sel"]) != best][:2]
+    return best[:180], unique, alts
+
+
 def enrich_event(ev: dict[str, Any]) -> dict[str, Any]:
     """Chuẩn hoá event giàu / cũ về cùng schema — giữ ``selector`` cũ, thêm các key giàu.
 
@@ -133,6 +217,15 @@ def enrich_event(ev: dict[str, Any]) -> dict[str, Any]:
     # string selector stays canonical for old readers
     if isinstance(ev.get("selectors"), str):
         ev["selectors"] = {"primary": ev["selectors"]}
+    # Trace ghi bằng recorder cũ không có ứng viên — cho default rỗng để _row /
+    # markdown đọc được cả hai đời event. `best` chỉ được điền khi thật sự có ứng
+    # viên đã verify duy nhất; rỗng nghĩa là "chưa selector nào chắc chắn", chứ
+    # không phải "không biết".
+    if not isinstance(ev.get("candidates"), list):
+        ev["candidates"] = []
+    sels = ev.get("selectors")
+    if isinstance(sels, dict) and not sels.get("best"):
+        sels["best"] = _first_unique(ev["candidates"])
     ev.setdefault("attributes", {})
     ev.setdefault("bbox", {})
     # text can be string (old) or dict (new)
@@ -174,23 +267,26 @@ def enrich_event(ev: dict[str, Any]) -> dict[str, Any]:
 
 def _row(index: int, ev: dict[str, Any]) -> str:
     kind = ev.get("kind") or ev.get("type") or "?"
-    # tương thích ngược: ưu tiên selectors.primary/cssPath/xpath, fallback selector string
-    selectors = ev.get("selectors")
-    if isinstance(selectors, dict):
-        sel = (selectors.get("primary") or selectors.get("cssPath") or selectors.get("xpath") or "")[:180]
-    elif isinstance(selectors, str):
-        sel = selectors[:180]
-    else:
-        sel = (ev.get("selector") or "")[:180]
+    # Ưu tiên ứng viên đã verify duy nhất; không có thì lùi về primary/cssPath như
+    # trace đời cũ. `unique=` là tín hiệu chính để LLM biết có tin selector được không.
+    sel, unique, alts = _best_selector(
+        ev.get("selectors"), ev.get("candidates"), ev.get("selector") or "")
     label = (ev.get("label") or "")[:60]
     extra = ""
+    if not unique and alts:
+        extra += f" alt={json.dumps(alts, ensure_ascii=False)[:200]}"
     # Nút icon-only: `sel` ở trên thường chỉ là lớp phủ vùng bấm, nên đưa luôn
     # nút thật + vân tay icon vào dòng prompt — nếu không LLM chỉ thấy `div`.
     act = ev.get("actionable")
     if isinstance(act, dict) and not act.get("isSelf"):
-        act_sel = (act.get("cssPath") or act.get("selector") or "")[:180]
+        act_sel, act_unique, act_alts = _best_selector(
+            {"best": act.get("best") or "", "primary": act.get("selector") or "",
+             "cssPath": act.get("cssPath") or ""},
+            act.get("candidates"), act.get("cssPath") or "")
         if act_sel:
-            extra += f" actionable={act_sel!r}"
+            extra += f" actionable={act_sel!r} actionableUnique={str(act_unique).lower()}"
+            if not act_unique and act_alts:
+                extra += f" actionableAlt={json.dumps(act_alts, ensure_ascii=False)[:200]}"
         act_attrs = act.get("attributes") or {}
         keep = {k: v for k, v in act_attrs.items() if k != "class"}
         if keep:
@@ -202,6 +298,8 @@ def _row(index: int, ev: dict[str, Any]) -> str:
         extra += f" icon={json.dumps(icon, ensure_ascii=False)[:160]}"
     if ev.get("name") and ev.get("name") != ev.get("label"):
         extra += f" name={json.dumps(str(ev['name'])[:60], ensure_ascii=False)}"
+    if ev.get("detached"):
+        extra += " detached=true"
     if ev.get("value") is not None:
         v = str(ev["value"])[:120]
         extra += f" value={json.dumps(v, ensure_ascii=False)}"
@@ -209,7 +307,8 @@ def _row(index: int, ev: dict[str, Any]) -> str:
         extra += f" key={ev['key']!r}"
     if ev.get("url"):
         extra += f" url~{ev['url'][:80]}"
-    return (f"{index}. {kind} sel={sel!r} tag={ev.get('tag','')} "
+    return (f"{index}. {kind} sel={sel!r} unique={str(unique).lower()} "
+            f"tag={ev.get('tag','')} "
             f"label={json.dumps(label, ensure_ascii=False)}{extra}")
 
 
@@ -288,6 +387,10 @@ def format_trace_as_markdown(
             md.append(f"- **tag:** `{ev.get('tag','')}` · **label:** `{ev.get('label','')[:120]}` · **url:** `{str(ev.get('url',''))[:120]}` · **ts:** `{ev.get('ts','')}`")
             if ev.get("name") and ev.get("name") != ev.get("label"):
                 md.append(f"- **name (accessible, leo ancestor):** `{str(ev.get('name'))[:120]}`")
+            if ev.get("detached"):
+                md.append("- ⚠️ **detached:** ô nhập đã bị site dựng lại trước khi event kịp bắn. "
+                          "`selectors`/`ancestors` là bản chụp lúc gõ nên vẫn dùng được; "
+                          "`bbox` và DOM xung quanh thì không.")
             if ev.get("value") is not None:
                 md.append(f"- **value:** `{str(ev.get('value'))[:200]}`")
             if ev.get("key"):
@@ -295,6 +398,7 @@ def format_trace_as_markdown(
             md.append("")
             md.append("| Field | Value |")
             md.append("|---|---|")
+            md.append(f"| selectors.best (verify duy nhất) | `{str(selectors.get('best',''))[:300]}` |")
             md.append(f"| selectors.primary | `{str(selectors.get('primary',''))[:300]}` |")
             md.append(f"| selectors.parent | `{str(selectors.get('parent',''))[:300]}` |")
             md.append(f"| selectors.grandparent | `{str(selectors.get('grandparent',''))[:300]}` |")
@@ -310,6 +414,7 @@ def format_trace_as_markdown(
                 # Chỗ quan trọng nhất cho nút icon-only: element bị click chỉ là
                 # lớp phủ, còn attribute chọn được nằm ở nút thật bên dưới đây.
                 md.append(f"| actionable.tag | `{str(act.get('tag',''))[:60]}` |")
+                md.append(f"| actionable.best (verify duy nhất) | `{str(act.get('best',''))[:300]}` |")
                 md.append(f"| actionable.selector | `{str(act.get('selector',''))[:300]}` |")
                 md.append(f"| actionable.cssPath | `{str(act.get('cssPath',''))[:400]}` |")
                 md.append(f"| actionable.xpath | `{str(act.get('xpath',''))[:400]}` |")
@@ -325,6 +430,23 @@ def format_trace_as_markdown(
                     continue
                 md.append(f"| ancestors[{depth}] | `{str(anc.get('tag',''))} {json.dumps(anc.get('attributes') or {}, ensure_ascii=False)[:280]}` |")
             md.append("")
+            # Bảng riêng sau bảng chính: đây là chỗ người đọc trace (và LLM) chọn
+            # selector cho recipe. `unique=true` = đã verify chọn đúng 1 element
+            # trên DOM thật lúc ghi; `csspath` là chốt chặn cuối, giòn, tránh dùng.
+            for cand_label, cand_src in (("target", ev), ("actionable", act or {})):
+                cands = _clean_candidates(cand_src.get("candidates"))
+                if not cands:
+                    continue
+                md.append(f"**Ứng viên selector — {cand_label} (verify trên DOM lúc ghi):**")
+                md.append("")
+                md.append("| # | selector | kind | unique | count |")
+                md.append("|---|---|---|---|---|")
+                for ci, cand in enumerate(cands[:10], 1):
+                    md.append(f"| {ci} | `{str(cand.get('sel',''))[:300]}` "
+                              f"| {cand.get('kind','')} "
+                              f"| {str(bool(cand.get('unique'))).lower()} "
+                              f"| {cand.get('count','')} |")
+                md.append("")
             if act and not act.get("isSelf") and act.get("openTag"):
                 md.append("**actionable openTag (thẻ mở của nút thật bọc target):**")
                 md.append("")
@@ -384,7 +506,7 @@ def format_trace_by_flow(trace: list[dict[str, Any]], max_entries: int = 60) -> 
     không phải tự đoán ranh giới — nó chỉ việc dịch từng đoạn thành một flow
     trong recipe. Event ghi ngoài mọi đoạn xếp vào nhóm ``(không gắn nhãn)``.
     """
-    from ..flows import FLOW_KINDS, FLOW_LABELS
+    from ..flows import flow_label, ordered_flows
 
     if not trace:
         return "(chưa ghi được thao tác nào — chỉ có snapshot cuối)"
@@ -394,12 +516,14 @@ def format_trace_by_flow(trace: list[dict[str, Any]], max_entries: int = 60) -> 
     if list(groups) == [""]:
         return format_trace_for_prompt(trace)
 
-    order = [k for k in FLOW_KINDS if k in groups] + ([""] if "" in groups else [])
+    # `ordered_flows` giữ cả tên tự đặt; lọc theo `FLOW_KINDS` như trước sẽ vứt
+    # im lặng mọi đoạn tên riêng — LLM không bao giờ thấy chúng để dựng flow.
+    named = ordered_flows(k for k in groups if k)
+    order = named + ([""] if "" in groups else [])
     blocks: list[str] = []
     for flow in order:
         events = groups[flow][-max_entries:]
-        title = FLOW_LABELS.get(flow, "(không gắn nhãn — thao tác phụ)") if flow else \
-            "(không gắn nhãn — thao tác phụ)"
+        title = flow_label(flow) if flow else "(không gắn nhãn — thao tác phụ)"
         header = f"[ĐOẠN: {flow or 'unlabeled'}] {title}"
         rows = "\n".join(_row(i, ev) for i, ev in enumerate(events, 1))
         blocks.append(f"{header}\n{rows}")

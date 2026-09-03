@@ -917,7 +917,28 @@ class BrowserRecipe(Provider):
 
     def supported_flows(self) -> list[str]:
         """Flow recipe này chạy được — UI ghi thao tác đọc để biết còn thiếu gì."""
-        return [k for k in flows.FLOW_KINDS if k in self.flows]
+        return flows.ordered_flows(self.flows)
+
+    def model_spec(self, model_id: str) -> dict:
+        """Khối `models[]` của một model. `model_id` nhận cả `slug/id` lẫn `id`."""
+        wanted = model_id.split("/", 1)[1] if "/" in model_id else model_id
+        for m in self._recipe.get("models") or []:
+            if isinstance(m, dict) and m.get("id") == wanted:
+                return m
+        return {}
+
+    def flow_for_model(self, model_id: str) -> str:
+        """Flow mà model này chạy — chọn model chính là chọn flow.
+
+        `models[].flow` thắng; không khai thì suy từ `capability`. Trả về flow
+        recipe thật sự có, nếu không thì `text` — model trỏ vào flow chưa khai
+        đã bị `validate_flows` chặn từ lúc lưu, đây chỉ là chốt chặn cuối cho
+        recipe cũ nạp từ đĩa trước khi có kiểm tra đó.
+        """
+        for name in flows.ordered_flows(flows.flows_of(self.model_spec(model_id))):
+            if self.has_flow(name):
+                return name
+        return "text"
 
     # ------------------------------- media (image/video) -------------------------------
     # Ảnh và video khác nhau ở selector và cách đọc file, phần còn lại (chờ
@@ -1447,11 +1468,57 @@ class BrowserRecipe(Provider):
                 out.append(item)
         return out
 
-    async def _reply(self, page) -> tuple[str, str | None]:
-        """Đọc reply dưới dạng Markdown và, khi bật, outerHTML gốc."""
-        sel = self.response_cfg["last_message_selector"]
-        result = await page.evaluate(
-            r"""([sel, captureHtml, structuredMarkdown]) => {
+    def _last_message_selector(self, flow: str = "text") -> str:
+        """Khối trả lời của một flow; rơi về cấu hình phẳng như recipe đời cũ.
+
+        `__init__` dựng `self.response_cfg` TỪ chính flow `text`, nên với recipe
+        cũ hai đường này cho ra cùng một chuỗi — flow tự đặt tên mới cần tới
+        nhánh đầu.
+        """
+        return str((self.flow_response(flow) or self.response_cfg)
+                   .get("last_message_selector") or "")
+
+    async def _reply(self, page, flow: str = "text") -> tuple[str | None, str | None]:
+        """Đọc reply dưới dạng Markdown và, khi bật, outerHTML gốc.
+
+        Trả ``(None, None)`` khi KHÔNG đọc được vì trang đang điều hướng — khác
+        hẳn ``("", None)`` nghĩa là đọc được nhưng chưa có chữ nào. Vòng poll
+        phải phân biệt hai cái: coi lỗi điều hướng thành chuỗi rỗng sẽ xoá mất
+        ``last``, rồi lần đọc sau text quay lại đầy đủ và bị yield lại từ đầu —
+        client nhận nội dung nhân đôi.
+        """
+        sel = self._last_message_selector(flow)
+        result = await self._evaluate_reply(page, sel, flow)
+        if result is None:
+            return None, None
+        return str(result[0] or ""), result[1]
+
+    def _reply_flags(self, flow: str = "text") -> tuple[bool, bool]:
+        """`(capture_html, structured_markdown)` của một flow.
+
+        Cả hai nằm trong `_TEXT_RESPONSE_KEYS` nên flow khai riêng được; đọc
+        `self._*` phẳng ở đây sẽ khiến flow tự đặt tên khai `format: markdown`
+        bị đọc như text thường.
+        """
+        resp = self.flow_response(flow) or self.response_cfg
+        capture = bool(resp.get("capture_html", self._capture_html))
+        fmt = resp.get("format")
+        markdown = fmt == "markdown" if fmt is not None else self._structured_markdown
+        return capture, markdown
+
+    async def _evaluate_reply(self, page, sel, flow: str = "text"):
+        """Chạy JS đọc reply; None khi context bị huỷ giữa chừng.
+
+        Cùng lý do với `_copy_button_ready`: page.goto / SPA điều hướng đúng nhịp
+        poll thì `page.evaluate` ném "Execution context was destroyed" và giết cả
+        request. dola đổi URL ba lần ngay sau khi gửi prompt
+        (/chat?channel=g -> /chat/local_… -> /chat/<id>) nên đây là chuyện xảy ra
+        thật, không phải phòng xa. Nuốt lỗi, vòng poll sau hỏi lại, hết giờ đã có
+        `deadline` lo.
+        """
+        try:
+            return await page.evaluate(
+                r"""([sel, captureHtml, structuredMarkdown]) => {
                  const els = document.querySelectorAll(sel);
                  if (!els.length) return ["", null];
                  const el = els[els.length - 1];
@@ -1519,17 +1586,18 @@ class BrowserRecipe(Provider):
                  const markdown = clean(Array.from(el.childNodes).map(node => block(node)).join(""));
                  return [markdown || el.innerText || "", captureHtml ? el.outerHTML : null];
                }""",
-            [sel, self._capture_html, self._structured_markdown],
-        )
-        return str(result[0] or ""), result[1]
+                [sel, *self._reply_flags(flow)],
+            )
+        except Exception:
+            return None
 
-    async def _reply_text(self, page) -> str:
+    async def _reply_text(self, page, flow: str = "text") -> str:
         """Compatibility helper cho code/test ngoài module chỉ cần nội dung."""
-        text, _ = await self._reply(page)
-        return text
+        text, _ = await self._reply(page, flow)
+        return text or ""
 
     async def _copy_button_ready(self, page, selector: str, scope: str,
-                                 exclude: str) -> bool:
+                                 exclude: str, flow: str = "text") -> bool:
         """Nút Copy của câu trả lời CUỐI đã hiện và bấm được chưa.
 
         Không dùng `count()` toàn trang như `selector_appear`: hội thoại cũ (và
@@ -1573,7 +1641,7 @@ class BrowserRecipe(Provider):
                                  Node.DOCUMENT_POSITION_FOLLOWING);
                      });
                    }""",
-                [self.response_cfg["last_message_selector"], selector, scope, exclude],
+                [self._last_message_selector(flow), selector, scope, exclude],
             ))
         except Exception:
             # Trang đang điều hướng/đóng tab: coi như chưa xong, vòng poll sau
@@ -1581,7 +1649,7 @@ class BrowserRecipe(Provider):
             return False
 
     async def _copy_button_result(self, page, selector: str, scope: str,
-                                  exclude: str) -> str:
+                                  exclude: str, flow: str = "text") -> str:
         """Bấm đúng nút Copy của reply cuối và đọc nội dung clipboard."""
         parsed = urlsplit(page.url)
         await page.context.grant_permissions(
@@ -1624,7 +1692,7 @@ class BrowserRecipe(Provider):
                  target.click();
                  return true;
                }""",
-            [self.response_cfg["last_message_selector"], selector, scope, exclude],
+            [self._last_message_selector(flow), selector, scope, exclude],
         )
         if not clicked:
             return ""
@@ -1656,14 +1724,25 @@ class BrowserRecipe(Provider):
         if owned:
             assignment = await self.assign(target_account_id)
         try:
-            async for delta in self._run(prompt, model_id, assignment, headed):
+            async for delta in self._run(prompt, model_id, assignment, headed,
+                                         self.flow_for_model(model_id)):
                 yield delta
         finally:
             if owned:
                 assignment.release()
 
     async def _run(self, prompt: str, model_id: str, assignment: "Assignment",
-                   headed: bool | None) -> AsyncIterator[str]:
+                   headed: bool | None, flow: str = "text") -> AsyncIterator[str]:
+        # Cấu hình đọc theo flow đang chạy, không đọc `self.*` phẳng: một
+        # instance provider phục vụ nhiều flow, ghi vào self là flow sau đè lên
+        # flow trước. Với recipe đời cũ `flow_prompt("text")` / `flow_done_signal
+        # ("text")` trả về đúng `self.prompt_cfg` / `self.ds`, nên hành vi không đổi.
+        prompt_cfg = self.flow_prompt(flow)
+        ds = self.flow_done_signal(flow)
+        resp_cfg = self.flow_response(flow) or self.response_cfg
+        structured_markdown = (resp_cfg.get("format") == "markdown"
+                               if resp_cfg.get("format") is not None
+                               else self._structured_markdown)
         target_profile = assignment.profile
         storage_state = assignment.storage_state
         ctx_key = assignment.ctx_key
@@ -1672,20 +1751,20 @@ class BrowserRecipe(Provider):
         if assignment.headed is None:
             assignment.headed = self.resolve_headed(headed, target_profile)
         effective_headed = assignment.headed
-        timeout_ms = int(self.ds.get("timeout_ms", 120000))
-        dtype = self.ds.get("type", "stable_text")
+        timeout_ms = int(ds.get("timeout_ms", 120000))
+        dtype = ds.get("type", "stable_text")
         # copy_button có tín hiệu dứt khoát nên chỉ cần chống nhiễu vài trăm ms,
         # không phải chờ hết khoảng "im lặng" dài như stable_text.
-        quiet_ms = int(self.ds.get("quiet_ms", 600 if dtype == "copy_button" else 3000))
-        copy_sel = str(self.ds.get("selector") or DEFAULT_COPY_BUTTON_SELECTOR)
-        copy_scope = str(self.ds.get("scope") or "after")
-        copy_exclude = str(self.ds.get("exclude") or "")
-        use_copy_result = bool(self.ds.get("use_copy_result", False))
+        quiet_ms = int(ds.get("quiet_ms", 600 if dtype == "copy_button" else 3000))
+        copy_sel = str(ds.get("selector") or DEFAULT_COPY_BUTTON_SELECTOR)
+        copy_scope = str(ds.get("scope") or "after")
+        copy_exclude = str(ds.get("exclude") or "")
+        use_copy_result = bool(ds.get("use_copy_result", False))
         # Selector nút copy sai (site đổi giao diện) mà không có lối thoát thì
         # MỌI request đều chạy tới timeout rồi hỏng — mất luôn câu trả lời đã
         # nhận đủ. Nên vẫn giữ đường lùi: text đứng yên đủ lâu thì chốt và ghi
         # log cảnh báo. Đặt `fallback_quiet_ms: 0` để tắt hẳn.
-        copy_fallback_ms = int(self.ds.get("fallback_quiet_ms", 15000))
+        copy_fallback_ms = int(ds.get("fallback_quiet_ms", 15000))
         # Page dùng chung cho mỗi ctx_key nên hai request cùng account phải nối
         # đuôi nhau, không chen ngang vào cùng một ô input.
         async with self._lock_for(ctx_key), contextlib.AsyncExitStack() as stack:
@@ -1698,21 +1777,21 @@ class BrowserRecipe(Provider):
             try:
                 await page.goto(self._new_chat_url or self.url, wait_until="domcontentloaded",
                                 timeout=min(timeout_ms, 60000))
-                box = page.locator(self.prompt_cfg["input_selector"]).first
+                box = page.locator(prompt_cfg["input_selector"]).first
                 await self._wait_chat_ready(page, box)
                 await _sleep_ms(self._input_delay_ms)
                 model = next((item for item in self._recipe["models"]
                               if item["id"] == model_id), None)
                 # Chuyển về chế độ chat trước, rồi mới chọn model: dropdown model
                 # của nhiều site chỉ liệt kê model hợp lệ cho chế độ đang bật.
-                await self._enter_flow(page, "text")
+                await self._enter_flow(page, flow)
                 await self._select_model(page, model)
-                if self.prompt_cfg.get("input_mode", "fill") == "type":
+                if prompt_cfg.get("input_mode", "fill") == "type":
                     await box.click()
                     await box.type(prompt)
                 else:
                     await box.fill(prompt)
-                submit = self.prompt_cfg.get("submit", "Enter")
+                submit = prompt_cfg.get("submit", "Enter")
                 if submit.startswith("click:"):
                     await page.click(submit.split(":", 1)[1])
                 else:
@@ -1729,12 +1808,19 @@ class BrowserRecipe(Provider):
                 while True:
                     if time.monotonic() > deadline:
                         raise TimeoutError(f"recipe '{self.slug}' timeout sau {timeout_ms}ms")
-                    text, reply_html = await self._reply(page)
+                    text, reply_html = await self._reply(page, flow)
+                    if text is None:
+                        # Trang đang điều hướng nên chưa đọc được gì. Giữ nguyên
+                        # `last` / `stable_since`: coi đây là "text đổi thành
+                        # rỗng" sẽ reset đồng hồ im lặng và làm lần đọc sau yield
+                        # lại toàn bộ câu trả lời từ đầu.
+                        await asyncio.sleep(0.5)
+                        continue
                     if reply_html is not None:
                         captured_html = reply_html
                         self.last_response_html = reply_html
                     if text != last:
-                        if (not use_copy_result and not self._structured_markdown and text.startswith(last)
+                        if (not use_copy_result and not structured_markdown and text.startswith(last)
                                 and text.strip() != prompt.strip()):
                             yield text[len(last):]
                         last = text
@@ -1765,7 +1851,7 @@ class BrowserRecipe(Provider):
                                 level="warn")
                             done = True
                     else:
-                        count = await page.locator(self.ds["selector"]).count()
+                        count = await page.locator(ds["selector"]).count()
                         appear = dtype == "selector_appear"
                         done = (((count > 0) == appear) and stable_since is not None
                                 and quiet_for >= min(quiet_ms, 1000))
@@ -1782,8 +1868,20 @@ class BrowserRecipe(Provider):
                                     f"{error}; dùng text từ DOM",
                                     level="warn")
                                 copied = ""
+                            if not copied:
+                                # `_copy_button_result` trả "" mà KHÔNG ném khi
+                                # không bấm được nút hoặc clipboard rỗng. Rơi về
+                                # text DOM thì request vẫn chạy, nhưng nội dung
+                                # trả ra không còn đúng định dạng của nút Copy —
+                                # im lặng ở đây nghĩa là selector gãy bao lâu
+                                # cũng không ai biết.
+                                applog.log(
+                                    f"recipe: '{self.slug}' bật use_copy_result nhưng không lấy "
+                                    f"được nội dung từ nút Copy — đang trả text DOM, KHÔNG đúng "
+                                    f"format Copy; kiểm tra response.done_signal.selector",
+                                    level="warn")
                             yield copied or last
-                        elif self._structured_markdown:
+                        elif structured_markdown:
                             yield last
                         return
                     await asyncio.sleep(0.5)

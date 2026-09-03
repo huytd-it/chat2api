@@ -1,11 +1,21 @@
 <script lang="ts">
   import { apiKey, showToast } from "../stores";
-  import { analyzeRecipeDraft, createRecipe, testRecipe } from "../api";
+  import {
+    FLOW_KINDS,
+    analyzeRecipeDraft,
+    createRecipe,
+    flowLabel,
+    flowNameOk,
+    testRecipe,
+    type FlowKind,
+    type TrialResult,
+  } from "../api";
   import { RecipeForm } from "../recipeForm.svelte";
   import { refreshAfterRecipeChange } from "../sync";
   import { profiles } from "../sync";
   import RecipeFields from "./RecipeFields.svelte";
   import RecordSessionPanel from "./RecordSessionPanel.svelte";
+  import TrialReport from "./TrialReport.svelte";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Switch } from "$lib/components/ui/switch";
@@ -43,7 +53,10 @@
   let analyzing = $state(false);
   let creating = $state(false);
   let testing = $state(false);
-  let testResult = $state<{ ok: boolean; reply: string; error?: string } | null>(null);
+  /** Flow đem ra chạy thử. `select_model` chỉ chạy tới bước chọn model rồi
+   * dừng — hữu ích khi đang dò đúng chuỗi bấm mở dropdown. */
+  let testFlow = $state<FlowKind>("text");
+  let testResult = $state<TrialResult | null>(null);
   let analyzeError = $state("");
   let analyzeLog = $state<string[]>([]);
   let logOpen = $state(false);
@@ -116,8 +129,8 @@
     const spec = buildSpec();
     if (!spec) { showToast(form.error); return; }
     testing = true; testResult = null;
-    try { testResult = await testRecipe($apiKey, spec, headedTest); }
-    catch (e) { testResult = { ok: false, reply: "", error: (e as Error).message }; }
+    try { testResult = await testRecipe($apiKey, spec, { headed: headedTest, flow: testFlow }); }
+    catch (e) { testResult = { ok: false, reply: "", flow: testFlow, error: (e as Error).message }; }
     finally { testing = false; }
   }
 
@@ -239,16 +252,29 @@
     <!-- Detailed form -->
     <RecipeFields {form} idPrefix="rcp" bind:advancedOpen />
 
-    {#if testResult}
-      <div class={`rounded-lg border p-3 text-sm ${testResult.ok ? "border-success/30 bg-success/5 text-success" : "border-destructive/30 bg-destructive/5 text-destructive"}`} role="status">
-        {#if testResult.ok}Kiểm tra thành công — nhận được phản hồi: "{testResult.reply}"
-        {:else}Kiểm tra thất bại{testResult.error ? `: ${testResult.error}` : testResult.reply ? ` — phản hồi: "${testResult.reply}"` : " — không nhận được phản hồi hợp lệ."}{/if}
-      </div>
-    {/if}
+    {#if testResult}<TrialReport result={testResult} />{/if}
   </Card.Content>
 
   <Card.Footer class="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t bg-muted/10 p-4 sm:px-6">
-    <label class="flex items-center gap-2 text-sm"><Switch bind:checked={headedTest} aria-label="Hiện browser khi kiểm tra" /> Hiện browser khi kiểm tra</label>
+    <div class="flex flex-wrap items-center gap-3">
+      <label class="flex items-center gap-2 text-sm"><Switch bind:checked={headedTest} aria-label="Hiện browser khi kiểm tra" /> Hiện browser khi kiểm tra</label>
+      <label class="flex items-center gap-2 text-sm">
+        Flow
+        <!-- Ô nhập chứ không phải select: recipe đặt được flow tên riêng, danh
+             sách gợi ý chỉ liệt kê các flow có sẵn. -->
+        <input
+          bind:value={testFlow}
+          list="rc-flow-kinds"
+          aria-label="Flow đem ra chạy thử"
+          aria-invalid={testFlow !== "" && !flowNameOk(testFlow)}
+          spellcheck={false}
+          class="h-8 w-44 rounded-md border border-input bg-background px-2 font-data text-sm aria-[invalid=true]:border-destructive"
+        />
+        <datalist id="rc-flow-kinds">
+          {#each FLOW_KINDS as kind (kind)}<option value={kind}>{flowLabel(kind)}</option>{/each}
+        </datalist>
+      </label>
+    </div>
     <div class="flex flex-wrap gap-2">
       <Button type="button" variant="ghost" size="sm" disabled={testing || creating || analyzing} onclick={() => { resetForm(); form.error=""; testResult=null; analyzeError=""; analyzeLog=[]; }}><Sliders /> Đặt lại</Button>
       <Button type="button" variant="outline" size="sm" disabled={testing || creating || analyzing} onclick={onTest}>{#if testing}<CircleNotch class="animate-spin" /> Đang kiểm tra{:else}<Check /> Kiểm tra kết nối{/if}</Button>

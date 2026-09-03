@@ -67,6 +67,16 @@ DOM SNAPSHOT CUỐI (lúc user bấm Hoàn tất):
 QUY TẮC SỬ DỤNG TRACE:
 - Selector xuất hiện trong TRACE là bằng chứng ĐÃ click/gõ được — ƯU TIÊN dùng chính
   nó cho input_selector / submit selector / new_chat.
+- Mỗi dòng có `unique=true|false` (và `actionableUnique=` cho nút thật). `unique=true`
+  nghĩa là selector đó ĐÃ được chạy thử `querySelectorAll` trên DOM thật lúc ghi và
+  trúng ĐÚNG MỘT element. Ưu tiên tuyệt đối các selector này — không cần tự chế lại.
+- `unique=false` nghĩa là selector còn trúng NHIỀU element. KHÔNG dùng thẳng; phải bọc
+  thêm ngữ cảnh cha (id/data-testid của khối bao ngoài, xem `ancestors`) cho hết mơ hồ.
+  Đừng trông vào việc tool sẽ lấy phần tử đầu tiên — đó là nguồn lỗi "bấm nhầm nút".
+- `alt=[...]` / `actionableAlt=[...]` là các ứng viên thay thế đã thử; dùng khi ứng viên
+  đầu không hợp lý về mặt ngữ nghĩa.
+- Chuỗi `nth-of-type` dài (ứng viên `kind=csspath` trong trace .md) là chốt chặn cuối,
+  rất giòn — chỉ dùng khi không còn ứng viên nào khác.
 - Mỗi dòng trace có thể kèm `actionable=...` / `actionableAttrs=...` / `actionableName=...`:
   đó là NÚT THẬT bọc chỗ bị click (web app hay phủ một div trong suốt lên nút để
   nới vùng bấm). Khi có `actionable`, dùng nó làm selector — `sel=` khi đó chỉ là
@@ -93,6 +103,12 @@ Người dùng đã tự gắn nhãn từng đoạn khi ghi, mỗi đoạn là M
   text          Gửi prompt và đọc câu trả lời dạng chữ   -> /v1/chat/completions
   image         Gửi prompt và lấy ẢNH kết quả            -> /v1/images/generations
   video         Gửi prompt và lấy VIDEO kết quả
+
+Bốn cái tên trên chỉ là các đoạn CÓ SẴN. Người dùng đặt được tên riêng cho chế
+độ riêng của site (`deep_research`, `canvas`, `dich_thuat`…). Gặp đoạn tên lạ thì
+tạo đúng một mục `flows.<tên đó>` — giữ NGUYÊN tên, không quy về text/image —
+và bắt buộc thêm `type:` nói kết quả là gì (`text` | `image` | `video`), vì
+runtime dựa vào đó để biết chờ chữ hay chờ file.
 
 Vì vậy KHÔNG được tự đoán ranh giới: dịch ĐÚNG từng đoạn thành một mục trong
 khóa `flows` của recipe. Các đoạn đã ghi: {declared_flows}
@@ -126,9 +142,19 @@ flows:
     response:
       media_selector: "<css thẻ video kết quả>"
       done_signal: {{type: copy_button, timeout_ms: 600000}}
+  deep_research:                      # VÍ DỤ đoạn tên riêng — chỉ tạo khi có ghi
+    type: text                        # BẮT BUỘC với tên riêng
+    label: "Deep Research"            # nhãn hiện trong UI, tuỳ chọn
+    action: "click:<nút bật chế độ đó>"
+    response:
+      last_message_selector: "<css khối trả lời>"
+      done_signal: {{type: copy_button, timeout_ms: 600000}}
 
 QUY TẮC CHIA FLOW:
 - CHỈ tạo flow cho những đoạn có trong danh sách trên. Không bịa flow chưa ghi.
+- Đoạn tên riêng: giữ nguyên tên làm khóa trong `flows`, thêm `type` (bắt buộc)
+  và `label` (nhãn dễ đọc). Model nào chạy chế độ đó thì đặt `models[].flow` bằng
+  đúng cái tên ấy — đó là cách duy nhất để gọi tới flow tên riêng.
 - Đoạn select_model: click mở menu là `flows.select_model.action`; click vào ĐÚNG
   một model cụ thể là `models[].action` của model đó, kèm `models[].id` đặt theo
   tên model người dùng đã chọn.
@@ -136,7 +162,9 @@ QUY TẮC CHIA FLOW:
   là `media_selector`; nút copy riêng từng ảnh là `copy_selector` (KHÁC nút copy
   câu trả lời chữ).
 - models[].capability phải khớp việc model đó làm được: `chat`, `image`, `video`,
-  hoặc nhiều giá trị ngăn bằng dấu phẩy (`chat,image`).
+  hoặc nhiều giá trị ngăn bằng dấu phẩy (`chat,image`). Model chạy flow tên riêng
+  thì dùng `models[].flow: <tên flow>` thay cho `capability` — chọn model chính
+  là chọn flow.
 - Đoạn `(không gắn nhãn)` là thao tác phụ (cuộn, đóng popup, đăng nhập) — chỉ
   dùng để hiểu ngữ cảnh, KHÔNG dựng thành flow.
 """
@@ -338,7 +366,7 @@ async def build_recipe_from_trace(url: str, trace: list[dict], snapshot: str,
 
     slug = forced_slug or _domain_slug(url)
     analyze_key = analyze_key or f"{slug}__trace"
-    declared = [s for s in (segments or []) if s in flows.FLOW_KINDS]
+    declared = flows.ordered_flows(s for s in (segments or []) if flows.flow_name_ok(s))
     trace_block = format_trace_by_flow(trace) if declared else format_trace_for_prompt(trace)
     snapshot_block = snapshot or "(không có snapshot cuối)"
     if declared:
