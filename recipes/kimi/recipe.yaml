@@ -1,0 +1,27 @@
+slug: kimi
+url: https://www.kimi.ai/
+prompt:
+  input_selector: '[data-lexical-editor="true"]'
+  input_mode: type
+  submit: Enter
+response:
+  last_message_selector: 'div.chat-content-item-assistant'
+  format: markdown
+  capture_html: true
+  done_signal:
+    type: copy_button
+    selector: '.segment-assistant-actions-content .icon-button:first-child'
+    scope: inside
+    use_copy_result: true
+    quiet_ms: 800
+    fallback_quiet_ms: 15000
+    timeout_ms: 120000
+timing:
+  ready_delay_ms: 1500
+  input_delay_ms: 500
+models:
+- id: default
+login:
+  strategy: round_robin
+  quota: 50
+keep_context: true

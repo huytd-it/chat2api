@@ -1,7 +1,5 @@
 <script lang="ts">
   import "../app.css";
-  import "../sessions.css";
-  import "../session-inspector.css";
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { ModeWatcher } from "mode-watcher";

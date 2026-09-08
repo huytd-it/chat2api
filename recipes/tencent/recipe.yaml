@@ -1,0 +1,23 @@
+slug: tencent
+url: https://aistudio.tencent.ai/
+prompt:
+  input_selector: .tiptap.ProseMirror
+  input_mode: fill
+  submit: Enter
+response:
+  last_message_selector: test
+  done_signal:
+    type: copy_button
+    scope: after
+    use_copy_result: true
+models:
+- id: default
+mode:
+  selector: default
+flows:
+  select_model:
+    selector: default
+login:
+  strategy: round_robin
+  quota: 50
+keep_context: true

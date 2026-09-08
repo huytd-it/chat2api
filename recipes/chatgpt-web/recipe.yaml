@@ -1,0 +1,21 @@
+slug: chatgpt-web
+url: https://chatgpt.com/
+prompt:
+  input_selector: '#prompt-textarea'
+  input_mode: fill
+  submit: Enter
+response:
+  last_message_selector: 'section[data-turn="assistant"] div.markdown.prose'
+  done_signal:
+    type: copy_button
+    selector: '[data-testid="copy-turn-action-button"]'
+    scope: after
+    use_copy_result: true
+models:
+- id: default
+login:
+  strategy: round_robin
+  quota: 50
+new_chat:
+  selector: 'li.list-none [data-testid="create-new-chat-button"]'
+keep_context: true

@@ -76,6 +76,17 @@ async def _check(page, label: str, selector: str, *, required: bool = True) -> d
     if not selector:
         return _step(label, "", SKIP, None, "recipe không khai báo")
     n = await _count(page, selector)
+    if n == 0:
+        # SPA hydrate chậm: đếm ngay sau domcontentloaded là 0 dù selector đúng
+        # (chatgpt.com dựng composer vài giây sau). Chờ element gắn vào DOM như
+        # `_run_action_step` đã làm, rồi đếm lại trước khi kết luận fail.
+        from .selectors import resolve_locator as _resolve_wait
+        try:
+            await _resolve_wait(page, selector).first.wait_for(
+                state="attached", timeout=10000)
+            n = await _count(page, selector)
+        except Exception:
+            pass
     if n < 0:
         return _step(label, selector, FAIL, None, "selector sai cú pháp")
     if n == 0:

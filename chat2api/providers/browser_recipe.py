@@ -2181,6 +2181,11 @@ class BrowserRecipe(Provider):
             else:
                 page = await self._acquire_page(ctx_key, storage_state, effective_headed)
             deadline = time.monotonic() + timeout_ms / 1000
+            # Khởi tạo TRƯỚC try: finally ở cuối đọc biến này, mà exception có
+            # thể ném ngay ở goto/_wait_chat_ready trước khi vòng poll gán nó —
+            # UnboundLocalError ở đây đã che mất lỗi thật (selector gãy, trang
+            # chặn...) khiến log chỉ thấy lỗi biến cục bộ.
+            captured_html: str | None = None
             try:
                 await page.goto(self._new_chat_url or self.url, wait_until="domcontentloaded",
                                 timeout=min(timeout_ms, 60000))
@@ -2211,7 +2216,6 @@ class BrowserRecipe(Provider):
                 # HTML gốc giữ ở biến cục bộ chứ không phải trên self: hai
                 # request song song (hai account) dùng chung một instance
                 # provider, ghi vào self là cái sau đè lên cái trước.
-                captured_html: str | None = None
                 while True:
                     if time.monotonic() > deadline:
                         raise TimeoutError(f"recipe '{self.slug}' timeout sau {timeout_ms}ms")

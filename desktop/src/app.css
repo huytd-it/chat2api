@@ -275,6 +275,59 @@
     to { opacity: 1; transform: translateY(0); }
   }
 
+  /* Rendered markdown from `renderMarkdown()`. Injected with {@html}, so Svelte
+     scoped styles never reach it — these rules have to stay global. Selectors
+     use :where() to keep specificity at 0, letting Tailwind utilities on the
+     container win without !important. */
+  .md-body {
+    overflow-wrap: anywhere;
+  }
+  .md-body :where(p, ul, ol, pre, blockquote, table) {
+    margin: 0 0 0.625rem;
+  }
+  .md-body :where(h1, h2, h3, h4, h5, h6) {
+    margin: 1rem 0 0.5rem;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+  .md-body :where(h1) { font-size: 1.2em; }
+  .md-body :where(h2) { font-size: 1.1em; }
+  .md-body :where(h3, h4, h5, h6) { font-size: 1em; }
+  .md-body > :first-child { margin-top: 0; }
+  .md-body > :last-child { margin-bottom: 0; }
+  .md-body :where(ul, ol) { padding-left: 1.25rem; }
+  .md-body :where(ul) { list-style: disc; }
+  .md-body :where(ol) { list-style: decimal; }
+  .md-body :where(li) { margin: 0.15rem 0; }
+  .md-body :where(pre) {
+    overflow-x: auto;
+    border-radius: var(--radius-lg);
+    background: var(--muted);
+    padding: 0.75rem;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+  }
+  .md-body :where(code) {
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+  }
+  .md-body :where(:not(pre) > code) {
+    border-radius: 4px;
+    background: var(--muted);
+    padding: 0.1em 0.35em;
+  }
+  .md-body :where(a) {
+    color: var(--primary);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .md-body :where(hr) {
+    margin: 1rem 0;
+    border: 0;
+    border-top: 1px solid var(--border);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
