@@ -293,10 +293,18 @@ def _action_errors(label: str, value) -> list[str]:
     if not value.strip():
         return []
     steps = [s.strip() for s in value.split(";") if s.strip()]
-    ok = steps and all(
-        (s.startswith("click:") or s.startswith("select:")) and s.split(":", 1)[1].strip()
-        for s in steps)
-    return [] if ok else [f"invalid field: {label} (click:<selector> | select:<selector>)"]
+    def _step_ok(s: str) -> bool:
+        if s.startswith("click:") or s.startswith("select:") or s.startswith("press:"):
+            return bool(s.split(":", 1)[1].strip())
+        if s.startswith("wait:"):
+            raw = s.split(":", 1)[1].strip()
+            try:
+                return int(raw) >= 0
+            except Exception:
+                return False
+        return False
+    ok = steps and all(_step_ok(s) for s in steps)
+    return [] if ok else [f"invalid field: {label} (click:<selector> | select:<selector> | press:<key> | wait:<ms>)"]
 
 
 def validate_flows(recipe: dict, done_signals, copy_scopes) -> list[str]:

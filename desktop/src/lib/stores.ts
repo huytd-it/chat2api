@@ -18,6 +18,22 @@ function createApiKeyStore() {
 /** Bearer key dùng cho mọi request chat + admin, lưu cục bộ trên máy này. */
 export const apiKey = createApiKeyStore();
 
+const PICKER_PROFILE_KEY = "c2a_recipe_picker_profile";
+function createPickerProfileStore() {
+  const initial = typeof localStorage !== "undefined" ? (localStorage.getItem(PICKER_PROFILE_KEY) ?? "__anon__") : "__anon__";
+  const { subscribe, set, update } = writable(initial);
+  return {
+    subscribe,
+    set(value: string) {
+      set(value);
+      if (typeof localStorage !== "undefined") localStorage.setItem(PICKER_PROFILE_KEY, value);
+    },
+    update,
+  };
+}
+/** Profile dùng chung cho mọi Inline picker trong workbench — chọn một lần, dùng xuyên suốt. */
+export const pickerProfileId = createPickerProfileStore();
+
 /** Khi bật, request chat từ trang Sessions yêu cầu server hiện cửa sổ
  * Chromium (không headless) thay vì chạy ẩn ở nền. */
 export const headedBrowser = writable(false);

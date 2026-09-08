@@ -330,6 +330,7 @@ GET    /admin/profiles                     danh sách + số domain + account + 
 POST   /admin/profiles                     {name, engine, headless, max_tabs, proxy, ...}
 PATCH  /admin/profiles/{ident}             cột sửa được + is_default
 DELETE /admin/profiles/{ident}?purge=      từ chối khi còn recipe dùng; purge xoá cả thư mục
+POST   /admin/profiles/{ident}/clone       {name, engine?, ...} — copy user_data_dir + account
 POST   /admin/profiles/{ident}/open        mở cửa sổ để thao tác tay (trả watch_id)
 POST   /admin/profiles/{ident}/detect      quét cookie → domain đã đăng nhập chưa khai báo
 POST   /admin/profiles/{ident}/accounts    {domain, label} — nút "thêm luôn" sau khi dò
@@ -343,6 +344,13 @@ DELETE /admin/accounts/{domain}/{name}
 ```
 
 Bộ `/admin/sessions*` đã xong ở pha 3. Bộ `/admin/recipes/{slug}/accounts*` giữ nguyên đường dẫn.
+
+**`/clone` không phải cách đổi engine.** Đổi `engine` bằng `PATCH` đã giữ nguyên
+mọi đăng nhập rồi — playwright và cloak dùng chung một `user_data_dir`, chỉ khác
+tiến trình mở nó. `/clone` là để có **đường lui**: bản sao mang theo cả thư mục
+Chromium lẫn hàng `account`, nên thử engine mới trên bản sao mà bản gốc vẫn chạy
+được. Điều kiện: profile nguồn phải đóng (copy lúc Chromium đang ghi WAL ra bản
+sao mất cookie), và cache không được copy — Chromium tự dựng lại.
 
 **Khác thiết kế ở hai chỗ, có chủ ý.** Account vẫn đánh địa chỉ bằng
 `(domain, name)` chứ không phải `id`: nguồn sự thật của một account **đang chạy**

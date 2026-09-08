@@ -5,6 +5,7 @@ mục, khoá pid, và việc chọn profile cho một recipe.
 """
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -240,6 +241,106 @@ def test_list_profiles_reports_domain_count_and_lock(db, profiles_dir, monkeypat
     assert items["work"]["domains"] == 0 and items["work"]["locked"] is False
     # Profile mặc định đứng đầu danh sách.
     assert profiles.list_profiles()[0]["name"] == "main"
+
+
+# ------------------------------------------------------------ nhân bản
+
+def _seed_dir(profile, *, cache=True):
+    """Giả lập một user_data_dir đã dùng: có đăng nhập, có cache, có khoá."""
+    root = Path(profile.user_data_dir)
+    (root / "Default").mkdir(parents=True, exist_ok=True)
+    (root / "Default" / "Cookies").write_text("cookie-thật", encoding="utf-8")
+    (root / "Local State").write_text("{}", encoding="utf-8")
+    if cache:
+        (root / "Default" / "Cache").mkdir(exist_ok=True)
+        (root / "Default" / "Cache" / "data_0").write_text("rác", encoding="utf-8")
+        (root / "SingletonLock").write_text("máy-cũ", encoding="utf-8")
+    return root
+
+
+def test_clone_copies_logins_but_not_cache_or_lock_files(db, profiles_dir):
+    source = profiles.ensure_profile("main", profiles_dir, make_default=True)
+    _seed_dir(source)
+
+    copy = profiles.clone(source.id, "main-cloak", profiles_dir, {"engine": "cloak"})
+
+    target = Path(copy["user_data_dir"])
+    assert target == profiles_dir / "main-cloak"
+    assert (target / "Default" / "Cookies").read_text(encoding="utf-8") == "cookie-thật"
+    assert (target / "Local State").is_file()
+    # Cache tự dựng lại được; khoá mang theo là Chromium tưởng profile đang bị giữ.
+    assert not (target / "Default" / "Cache").exists()
+    assert not (target / "SingletonLock").exists()
+    # Bản gốc không được đụng tới.
+    assert (Path(source.user_data_dir) / "Default" / "Cache" / "data_0").is_file()
+
+
+def test_clone_inherits_settings_except_the_overridden_ones(db, profiles_dir):
+    source = profiles.create("main", profiles_dir,
+                             {"engine": "playwright", "max_tabs": 7, "headless": False,
+                              "notes": "máy chính", "viewport": "1600x900"})
+    copy = profiles.clone(source["id"], "main-cloak", profiles_dir, {"engine": "cloak"})
+
+    assert copy["engine"] == "cloak"
+    assert copy["max_tabs"] == 7 and copy["headless"] == 0
+    assert copy["viewport"] == "1600x900" and copy["notes"] == "máy chính"
+    # Bản sao không cướp cờ mặc định, không mang theo khoá của bản gốc.
+    assert copy["is_default"] == 0 and copy["lock_pid"] is None
+    assert profiles.get_by_id(source["id"])["engine"] == "playwright"
+
+
+def test_clone_carries_the_accounts_so_the_router_can_see_it(db, profiles_dir, tmp_path):
+    source = profiles.ensure_profile("main", profiles_dir)
+    state = tmp_path / "codex1.json"
+    state.write_text("{}", encoding="utf-8")
+    _account(db, source.id, "chat.qwen.ai", "codex1", state)
+    _account(db, source.id, "chatgpt.com", "work", None)
+
+    copy = profiles.clone(source.id, "main-cloak", profiles_dir)
+
+    got = [(a["host"], a["label"]) for a in profiles.accounts_of(copy["id"])]
+    assert got == [("chat.qwen.ai", "codex1"), ("chatgpt.com", "work")]
+    # Seed còn dở của nguồn theo sang, để bản sao cũng tự nạp cookie lần mở đầu.
+    assert [p.name for _, p in profiles.pending_seeds(copy["id"])] == ["codex1.json"]
+    # Account của nguồn vẫn nguyên, không bị "chuyển" đi.
+    assert len(profiles.accounts_of(source.id)) == 2
+
+
+def test_clone_of_a_profile_never_opened_still_works(db, profiles_dir):
+    """Hàng do importer tạo chưa có thư mục thật — clone không được nổ vì thế."""
+    source = profiles.ensure_profile("main", profiles_dir)
+    import shutil
+
+    shutil.rmtree(source.user_data_dir)
+    copy = profiles.clone(source.id, "main-2", profiles_dir)
+    assert (profiles_dir / "main-2").is_dir()
+    assert copy["name"] == "main-2"
+
+
+def test_clone_refuses_duplicate_and_invalid_names(db, profiles_dir):
+    source = profiles.ensure_profile("main", profiles_dir)
+    profiles.ensure_profile("work", profiles_dir)
+    with pytest.raises(ValueError):
+        profiles.clone(source.id, "work", profiles_dir)
+    with pytest.raises(ValueError):
+        profiles.clone(source.id, "Tên Sai", profiles_dir)
+    assert len(profiles.list_profiles()) == 2
+
+
+def test_clone_refuses_while_chromium_still_holds_the_source(db, profiles_dir, monkeypatch):
+    source = profiles.ensure_profile("main", profiles_dir)
+    _seed_dir(source)
+    profiles.acquire_lock(source)
+    monkeypatch.setattr(profiles, "_pid_alive", lambda pid: True)
+
+    with pytest.raises(profiles.ProfileLocked):
+        profiles.clone(source.id, "main-cloak", profiles_dir)
+    # Không để lại thư mục dở dang.
+    assert not (profiles_dir / "main-cloak").exists()
+
+
+def test_clone_of_unknown_profile_returns_none(db, profiles_dir):
+    assert profiles.clone(999, "moi", profiles_dir) is None
 
 
 def test_viewport_size_parsing():

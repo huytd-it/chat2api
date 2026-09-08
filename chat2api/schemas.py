@@ -134,6 +134,7 @@ class RecipeModeSpec(BaseModel):
     selector: str | None = None            # selector của nút/select chính (để chờ visible)
     image_action: str | None = None        # vd: click:.mode-btn;click:[data-value='image']
     chat_action: str | None = None         # vd: click:.mode-btn;click:[data-value='chat']
+    model_action: str | None = None        # action chung mở dropdown model (legacy, giờ ưu tiên flows.select_model)
 
 
 class RecipeModelSpec(BaseModel):
@@ -168,6 +169,7 @@ class RecipeManualSpec(BaseModel):
     response: RecipeResponseSpec
     models: list[RecipeModelSpec]
     mode: RecipeModeSpec | None = None
+    flows: dict | None = None
     new_chat: RecipeNewChatSpec | None = None
     timing: RecipeTimingSpec | None = None
     login: RecipeLoginSpec | None = None
@@ -304,6 +306,11 @@ class ProfileCreateRequest(BaseModel):
 class ProfileUpdateRequest(ProfileCreateRequest):
     name: str | None = None
     is_default: bool | None = None
+
+
+class ProfileCloneRequest(ProfileCreateRequest):
+    """Nhân bản một profile. `name` là tên bản sao; cột nào bỏ trống thì thừa
+    kế từ profile nguồn (thường chỉ đổi mỗi `engine`)."""
 
 
 class ProfileOpenRequest(BaseModel):

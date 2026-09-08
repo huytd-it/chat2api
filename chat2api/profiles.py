@@ -388,6 +388,102 @@ def create(name: str, profiles_dir: Path, values: dict | None = None) -> dict:
     return find(name)
 
 
+# Thư mục user_data_dir to gấp nhiều lần phần thực sự giữ đăng nhập: cache HTTP,
+# code cache của V8, shader GPU — Chromium tự dựng lại nên copy làm gì cho chậm.
+# Nhóm Singleton*/lockfile thì BẮT BUỘC phải bỏ: mang sang bản sao là Chromium
+# tưởng còn tiến trình khác đang giữ profile và từ chối mở.
+_CLONE_SKIP_DIRS = frozenset({
+    "Cache", "Code Cache", "GPUCache", "GrShaderCache", "ShaderCache",
+    "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache", "Crashpad",
+    "component_crx_cache", "optimization_guide_model_store",
+})
+_CLONE_SKIP_FILES = frozenset({
+    "SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile",
+})
+
+
+def _copy_user_data_dir(source: Path, target: Path) -> None:
+    """Copy thư mục Chromium, bỏ cache và file khoá. Dọn sạch nếu copy dở dang."""
+    import shutil
+
+    def ignore(_directory: str, names: list[str]) -> set[str]:
+        return {name for name in names
+                if name in _CLONE_SKIP_DIRS or name in _CLONE_SKIP_FILES}
+
+    try:
+        shutil.copytree(source, target, ignore=ignore, dirs_exist_ok=True,
+                        ignore_dangling_symlinks=True)
+    except Exception:
+        # Nửa vời còn tệ hơn không có: hàng DB sẽ trỏ vào một profile hỏng mà
+        # nhìn từ UI không phân biệt được với profile lành.
+        shutil.rmtree(target, ignore_errors=True)
+        raise
+
+
+def clone(source_id: int, name: str, profiles_dir: Path,
+          values: dict | None = None) -> dict | None:
+    """Nhân bản profile: copy cả user_data_dir lẫn account đã khai báo.
+
+    Đây là cách "dùng lại đăng nhập" mà không đụng vào bản gốc — ví dụ muốn thử
+    engine `cloak` trên một profile Playwright đang chạy tốt. (Đổi thẳng
+    `engine` bằng PATCH cũng giữ nguyên đăng nhập vì cùng một `user_data_dir`;
+    clone chỉ cần khi muốn giữ lại đường lui.)
+
+    `values` ghi đè các cột sửa được; cột nào không nói thì thừa kế từ nguồn.
+    Bản sao không bao giờ là default và không mang theo khoá pid.
+    """
+    if not valid_name(name):
+        raise ValueError("tên profile chỉ gồm chữ thường, số và dấu -")
+    db = store.default()
+    if db is None:
+        raise RuntimeError("kho dữ liệu chưa mở")
+    source = get_by_id(source_id)
+    if source is None:
+        return None
+    conn = db.connection()
+    if conn.execute("SELECT 1 FROM profile WHERE name = ?", (name,)).fetchone():
+        raise ValueError(f"profile '{name}' đã tồn tại")
+    # Chromium ghi SQLite (Cookies, Local Storage) theo kiểu WAL: copy trong lúc
+    # nó đang chạy ra một bản sao mất cookie hoặc hỏng hẳn.
+    if source["lock_pid"] and _pid_alive(int(source["lock_pid"])):
+        raise ProfileLocked(
+            f"profile '{source['name']}' đang mở ở tiến trình {source['lock_pid']}. "
+            "Đóng nó rồi nhân bản lại.")
+
+    target_dir = Path(profiles_dir) / name
+    if target_dir.exists() and any(target_dir.iterdir()):
+        raise ValueError(f"thư mục '{target_dir}' đã có dữ liệu — chọn tên khác")
+    source_dir = Path(source["user_data_dir"]) if source["user_data_dir"] else None
+    if source_dir is not None and source_dir.is_dir():
+        _copy_user_data_dir(source_dir, target_dir)
+    else:
+        # Nguồn chưa mở lần nào (hàng do importer tạo): không có gì để copy,
+        # bản sao vẫn hợp lệ và sẽ tự seed từ storage_state như nguồn.
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+    inherited = {key: source[key] for key in EDITABLE}
+    inherited.update(_clean(values or {}))
+    columns = ["name", "user_data_dir", "created_at", *inherited]
+    placeholders = ", ".join("?" * len(columns))
+    with conn:
+        cursor = conn.execute(
+            f"INSERT INTO profile({', '.join(columns)}) VALUES ({placeholders})",
+            (name, str(target_dir), store.now_ms(), *inherited.values()))
+        new_id = int(cursor.lastrowid)
+        # Account đi kèm, nếu không thì router không biết bản sao phục vụ domain
+        # nào và mọi đăng nhập vừa copy thành vô hình. `used_*` không copy: đó là
+        # lịch sử dùng của bản gốc, quota của bản sao bắt đầu lại từ 0.
+        conn.execute(
+            "INSERT INTO account(profile_id, domain_id, label, display_name, plan, "
+            "                    status, storage_state_path, quota, cookie_expires_at, "
+            "                    disabled, created_at) "
+            "SELECT ?, domain_id, label, display_name, plan, status, storage_state_path, "
+            "       quota, cookie_expires_at, disabled, ? "
+            "  FROM account WHERE profile_id = ?",
+            (new_id, store.now_ms(), int(source["id"])))
+    return get_by_id(new_id)
+
+
 def update(profile_id: int, values: dict) -> dict | None:
     row = get_by_id(profile_id)
     if row is None:

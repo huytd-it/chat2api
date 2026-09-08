@@ -1,4 +1,4 @@
-slug: grok
+slug: grok-web
 url: https://grok.com/
 prompt:
   input_selector: '#textarea'

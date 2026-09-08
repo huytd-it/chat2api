@@ -1,16 +1,18 @@
 <script lang="ts">
   import { discoverRecipeModels } from "../api";
   import { DONE_TYPE_LABEL, type RecipeForm } from "../recipeForm.svelte";
-  import { apiKey, showToast } from "../stores";
+  import { apiKey, pickerProfileId, showToast } from "../stores";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Switch } from "$lib/components/ui/switch";
   import * as Select from "$lib/components/ui/select";
   import {
     ArrowClockwise, Browser, ChatCircleDots, CircleNotch, Clock,
-    Copy, Database, PaperPlaneTilt, PlusCircle, Robot, Trash, Crosshair,
+    Copy, Database, PaperPlaneTilt, PlusCircle, Robot, Trash,
   } from "phosphor-svelte";
-  import SelectorPicker from "./SelectorPicker.svelte";
+  import ActionStepsEditor from "./ActionStepsEditor.svelte";
+  import InlineSelectorPicker from "./InlineSelectorPicker.svelte";
+  import { profiles } from "../sync";
 
   interface Props {
     form: RecipeForm;
@@ -43,6 +45,21 @@
 </script>
 
 <div class="recipe-workbench">
+  <!-- Persistent picker profile bar — chọn một lần, mọi Inline picker dùng chung -->
+  {#if $profiles.length}
+    <div class="picker-profile-bar">
+      <span class="picker-label">Profile cho Pick (xuyên suốt)</span>
+      <Select.Root type="single" bind:value={$pickerProfileId}>
+        <Select.Trigger class="h-8 w-56 text-xs">{$profiles.find(p=>String(p.id)===$pickerProfileId)?.name ?? "Không dùng — ẩn danh"}</Select.Trigger>
+        <Select.Content>
+          <Select.Item value="__anon__" label="Không dùng — ẩn danh">Không dùng — ẩn danh</Select.Item>
+          {#each $profiles as p (p.id)}<Select.Item value={String(p.id)} label={p.name}>{p.name}</Select.Item>{/each}
+        </Select.Content>
+      </Select.Root>
+      <span class="picker-hint">Chọn một lần, mọi nút <b>Pick</b> bên dưới dùng chung — không cần chọn lại, không modal.</span>
+    </div>
+  {/if}
+
   <section class="recipe-section recipe-identity" aria-labelledby={id("identity-title")}>
     <div class="recipe-section-head">
       <span class="recipe-section-icon"><Browser aria-hidden="true" /></span>
@@ -71,7 +88,7 @@
           <span>Selector ô nhập <b>*</b></span>
           <div class="flex gap-1.5">
             <Input id={id("input-sel")} class="font-data flex-1" placeholder="#prompt-textarea" bind:value={form.inputSelector} />
-            <SelectorPicker url={form.url} bind:value={form.inputSelector} label="ô nhập" />
+            <InlineSelectorPicker url={form.url} bind:value={form.inputSelector} label="ô nhập" />
           </div>
         </label>
         <label class="recipe-field" for={id("input-mode")}>
@@ -87,7 +104,7 @@
           <span>Selector nút gửi {form.submitMode === "click" ? "*" : ""}</span>
           <div class="flex gap-1.5">
             <Input id={id("submit-sel")} class="font-data flex-1" disabled={form.submitMode !== "click"} placeholder="button[data-testid='send-button']" bind:value={form.submitSelector} />
-            <SelectorPicker url={form.url} bind:value={form.submitSelector} label="nút gửi" disabled={form.submitMode !== "click"} />
+            <InlineSelectorPicker url={form.url} bind:value={form.submitSelector} label="nút gửi" disabled={form.submitMode !== "click"} />
           </div>
         </label>
         <label class="recipe-field" for={id("submit-mode")}>
@@ -109,7 +126,7 @@
         <span>Selector tin nhắn AI <b>*</b></span>
         <div class="flex gap-1.5">
           <Input id={id("reply-sel")} class="font-data flex-1" placeholder=".message.assistant" bind:value={form.lastMessageSelector} />
-          <SelectorPicker url={form.url} bind:value={form.lastMessageSelector} label="tin nhắn AI" />
+          <InlineSelectorPicker url={form.url} bind:value={form.lastMessageSelector} label="tin nhắn AI" />
         </div>
         <small>Luôn đọc phần tử cuối cùng khớp selector.</small>
       </label>
@@ -130,7 +147,7 @@
           <span>Selector tín hiệu {form.doneType === "copy_button" ? "(tùy chọn)" : form.doneType === "stable_text" ? "(không dùng)" : "*"}</span>
           <div class="flex gap-1.5">
             <Input id={id("done-sel")} class="font-data flex-1" disabled={form.doneType === "stable_text"} placeholder={form.doneType === "copy_button" ? "để trống dùng bộ đếm Copy" : ".typing-indicator"} bind:value={form.doneSelector} />
-            <SelectorPicker url={form.url} bind:value={form.doneSelector} label="tín hiệu" disabled={form.doneType === "stable_text"} />
+            <InlineSelectorPicker url={form.url} bind:value={form.doneSelector} label="tín hiệu" disabled={form.doneType === "stable_text"} />
           </div>
         </label>
       </div>
@@ -166,22 +183,55 @@
     <section class="recipe-section" aria-labelledby={id("models-title")}>
       <div class="recipe-section-head">
         <span class="recipe-section-icon"><Robot aria-hidden="true" /></span>
-        <div><h3 id={id("models-title")}>Models</h3><p>Public ID và action chọn model trước khi paste/send.</p></div>
+        <div><h3 id={id("models-title")}>Chọn model — chuỗi bước</h3><p>Dropdown chung + bước riêng từng model. Chèn thêm bước bất kỳ, có <b>press:Enter</b> và <b>wait:ms</b>.</p></div>
       </div>
-      <Button type="button" variant="outline" size="sm" class="w-full" disabled={discoveringModels} onclick={fetchModels}>
-        {#if discoveringModels}<CircleNotch class="animate-spin" /> Đang đọc trang{:else}<ArrowClockwise /> Lấy danh sách từ website{/if}
-      </Button>
+
+      <div class="grid gap-2">
+        <label class="recipe-field" for={id("sel-sel")}>
+          <span>Selector dropdown (chờ hiện trước khi bấm)</span>
+          <div class="flex gap-1.5">
+            <Input id={id("sel-sel")} class="font-data flex-1" placeholder="#model-dropdown" bind:value={form.selectModelSelector} />
+            <InlineSelectorPicker url={form.url} bind:value={form.selectModelSelector} label="dropdown model" />
+          </div>
+          <small>Để trống nếu site không có dropdown riêng.</small>
+        </label>
+        <div class="recipe-field">
+          <span>Bước mở dropdown (chung cho mọi model)</span>
+          <ActionStepsEditor bind:value={form.selectModelAction} url={form.url} label="dropdown" />
+          <small>Ví dụ: <span class="font-data">click:#model-btn;wait:300</span> rồi mỗi model bấm tiếp option riêng.</small>
+        </div>
+      </div>
+
+      <div class="mt-2 flex gap-2">
+        <Button type="button" variant="outline" size="sm" class="flex-1" disabled={discoveringModels} onclick={fetchModels}>
+          {#if discoveringModels}<CircleNotch class="animate-spin" /> Đang đọc trang{:else}<ArrowClockwise /> Lấy danh sách từ website{/if}
+        </Button>
+      </div>
+
       <div class="model-list">
         {#each form.models as _, i}
           <div class="model-row">
             <div class="model-row-head"><span>Model {i + 1}</span>{#if form.models.length > 1}<Button type="button" variant="ghost" size="icon-sm" aria-label="Xóa model" onclick={() => form.removeModel(i)}><Trash /></Button>{/if}</div>
             <Input class="h-9 font-data" aria-label="Model id" placeholder="chat-web" bind:value={form.models[i]} />
-            <Input class="h-9 font-data" aria-label="Action chọn model" placeholder="click:#menu;click:.model-max" bind:value={form.modelActions[i]} />
+            <div class="grid gap-1.5">
+              <span class="model-sublabel">Bước riêng sau khi mở dropdown — có thể để trống = giữ mặc định rồi Enter</span>
+              <ActionStepsEditor bind:value={form.modelActions[i]} url={form.url} label="model {i+1}" compact />
+            </div>
             <Input class="h-9 font-data" aria-label="Giá trị model" placeholder="option value · tùy chọn" bind:value={form.modelValues[i]} />
+            {#if !form.modelActions[i].trim()}
+              <p class="recipe-note">Trống = không bấm thêm, site giữ model mặc định. Thêm <span class="font-data">press:Enter</span> nếu dropdown cần Enter để xác nhận.</p>
+            {/if}
           </div>
         {/each}
       </div>
       <Button type="button" variant="ghost" size="sm" class="w-full" onclick={() => form.addModel()}><PlusCircle /> Thêm model</Button>
+      <div class="model-templates">
+        <span class="model-sublabel">Mẫu nhanh:</span>
+        <div class="flex flex-wrap gap-1.5">
+          <Button type="button" variant="outline" size="sm" onclick={()=>{ form.selectModelSelector="#model-dropdown"; form.selectModelAction="click:#model-dropdown;wait:300"; if(!form.modelActions[0]?.trim()) form.modelActions[0]="click:[data-value='gpt-4'];press:Enter"; }}>Dropdown → chọn → Enter</Button>
+          <Button type="button" variant="outline" size="sm" onclick={()=>{ form.selectModelAction="press:Enter"; form.modelActions[0]=""; }}>Mặc định + Enter</Button>
+        </div>
+      </div>
     </section>
 
     <section class="recipe-section" aria-labelledby={id("session-title")}>
@@ -223,7 +273,7 @@
           <Select.Content><Select.Item value="none" label="Không thao tác">Không thao tác</Select.Item><Select.Item value="selector" label="Bấm selector">Bấm selector</Select.Item><Select.Item value="url" label="Mở URL">Mở URL</Select.Item></Select.Content>
         </Select.Root>
       </label>
-      {#if form.newChatMode === "selector"}<label class="recipe-field" for={id("newchat-sel")}><span>Selector chat mới *</span><Input id={id("newchat-sel")} class="font-data" placeholder="#new-chat" bind:value={form.newChatSelector} /></label>{/if}
+      {#if form.newChatMode === "selector"}<label class="recipe-field" for={id("newchat-sel")}><span>Selector chat mới *</span><div class="flex gap-1.5"><Input id={id("newchat-sel")} class="font-data flex-1" placeholder="#new-chat" bind:value={form.newChatSelector} /><InlineSelectorPicker url={form.url} bind:value={form.newChatSelector} label="chat mới" /></div></label>{/if}
       {#if form.newChatMode === "url"}<label class="recipe-field" for={id("newchat-url")}><span>URL chat mới *</span><Input id={id("newchat-url")} class="font-data" placeholder="https://chat.example.com/new" bind:value={form.newChatUrl} /></label>{/if}
       <div class="recipe-fields cols-3 timing-grid">
         <label class="recipe-field" for={id("ready-delay")}><span>ready delay</span><Input id={id("ready-delay")} type="number" min="0" placeholder="1200" bind:value={form.readyDelayMs} /><small>ms</small></label>
@@ -237,6 +287,9 @@
 <style>
   .recipe-workbench { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(20rem, .85fr); gap: 1rem; align-items: start; }
   .recipe-identity { grid-column: 1 / -1; }
+  .picker-profile-bar{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:.6rem;padding:.6rem .75rem;border:1px solid var(--border);border-radius:.6rem;background:color-mix(in oklch, var(--primary) 6%, var(--card));}
+  .picker-label{font-size:.72rem;font-weight:650}
+  .picker-hint{font-size:.68rem;color:var(--muted-foreground)}
   .recipe-main-flow, .recipe-side-config { display: grid; gap: 1rem; min-width: 0; }
   .recipe-section { display: grid; gap: .9rem; padding: 1rem; border: 1px solid var(--border); border-radius: .75rem; background: color-mix(in oklch, var(--card) 94%, var(--muted)); }
   .recipe-section-head { display: flex; align-items: flex-start; gap: .7rem; min-width: 0; }
@@ -254,7 +307,9 @@
   .recipe-toggle { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .75rem; border: 1px solid var(--border); border-radius: .6rem; background: var(--background); }
   .recipe-toggle > span { display: flex; align-items: flex-start; gap: .55rem; min-width: 0; }.recipe-toggle > span > span, .recipe-toggle.compact > span { display: grid; gap: .15rem; }
   .recipe-toggle strong { font-size: .76rem; font-weight: 600; }.recipe-toggle small { color: var(--muted-foreground); font-size: .68rem; line-height: 1.35; }.recipe-toggle :global(svg) { width: 1rem; height: 1rem; color: var(--primary); }
-  .model-list, .account-list { display: grid; gap: .6rem; }.model-row { display: grid; gap: .45rem; padding: .7rem; border: 1px solid var(--border); border-radius: .6rem; background: var(--background); }.model-row-head { display: flex; align-items: center; justify-content: space-between; color: var(--muted-foreground); font-size: .68rem; font-weight: 600; }
+  .model-list, .account-list { display: grid; gap: .6rem; }.model-row { display: grid; gap: .55rem; padding: .7rem; border: 1px solid var(--border); border-radius: .6rem; background: var(--background); }.model-row-head { display: flex; align-items: center; justify-content: space-between; color: var(--muted-foreground); font-size: .68rem; font-weight: 600; }
+  .model-sublabel{font-size:.68rem;font-weight:600;color:var(--muted-foreground)}
+  .model-templates{display:grid;gap:.35rem}
   .account-row { display: grid; grid-template-columns: minmax(7rem, .65fr) minmax(0, 1.35fr) auto; gap: .4rem; align-items: center; }.timing-grid .recipe-field { position: relative; }.timing-grid .recipe-field small { position: absolute; right: .55rem; bottom: .6rem; }
   .recipe-note { margin: -.2rem 0 0; }
   @media (max-width: 1000px) { .recipe-workbench { grid-template-columns: 1fr; }.recipe-identity { grid-column: auto; }.recipe-side-config { grid-template-columns: repeat(2, minmax(0, 1fr)); }.recipe-side-config > :last-child { grid-column: 1 / -1; } }

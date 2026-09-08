@@ -822,7 +822,7 @@ def register_admin(app: FastAPI, admin) -> None:
     from .schemas import (AccountLoginRequest, AddAccountRequest, ApiKeyCreateRequest,
                            ComboCreateRequest, ComboUpdateRequest, IntegrateRequest,
                            OpenAIProviderCreateRequest, OpenAIProviderUpdateRequest,
-                           ProfileAccountRequest, ProfileCreateRequest,
+                           ProfileAccountRequest, ProfileCloneRequest, ProfileCreateRequest,
                            ProfileOpenRequest, ProfileUpdateRequest, RecipeAnalyzeRequest,
                            RecipeManualSpec, RecordRequest, RecordSegmentRequest,
                            RecipeModelDiscoveryRequest, RecipeReanalyzeRequest,
@@ -1183,6 +1183,40 @@ def register_admin(app: FastAPI, admin) -> None:
             raise OpenAIError(400, "invalid_profile", str(error))
         applog.log(f"profile: tạo '{row['name']}'")
         return row
+
+    @admin.post("/profiles/{ident}/clone")
+    async def profile_clone(ident: str, body: ProfileCloneRequest, request: Request):
+        """Bản sao đầy đủ của một profile: thư mục Chromium + account đã khai báo.
+
+        Dùng khi muốn thử engine khác (playwright ⇄ cloak) mà vẫn giữ đường lui.
+        Đổi thẳng `engine` bằng PATCH cũng không mất đăng nhập — cùng một
+        `user_data_dir` — nên clone chỉ cần khi không muốn đụng bản gốc.
+        """
+        cfg = request.app.state.cfg
+        pool_ = request.app.state.pool
+        row = await _profile_or_404(ident)
+        # Copy trong lúc Chromium đang ghi ra bản sao mất cookie. Không tự đóng
+        # hộ: đóng profile là đá người dùng ra khỏi cửa sổ họ đang đăng nhập.
+        if row["name"] in set(pool_.open_profiles):
+            raise OpenAIError(409, "profile_open",
+                              f"Profile '{row['name']}' đang mở. Bấm Đóng rồi nhân bản lại — "
+                              "copy thư mục Chromium khi nó còn chạy sẽ ra bản sao hỏng.")
+        try:
+            created = await asyncio.to_thread(
+                profiles.clone, row["id"], (body.name or "").strip().lower(),
+                cfg.profiles_dir, body.model_dump(exclude_none=True))
+        except ValueError as error:
+            raise OpenAIError(400, "invalid_profile", str(error))
+        except profiles.ProfileLocked as error:
+            raise OpenAIError(409, "profile_locked", str(error))
+        except OSError as error:
+            raise OpenAIError(500, "clone_failed",
+                              f"Không copy được thư mục profile: {error}")
+        if created is None:
+            _need_store()
+            raise OpenAIError(404, "not_found", f"Profile '{ident}' không tồn tại")
+        applog.log(f"profile: nhân bản '{row['name']}' -> '{created['name']}'")
+        return created
 
     @admin.patch("/profiles/{ident}")
     async def profile_update(ident: str, body: ProfileUpdateRequest):

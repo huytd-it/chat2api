@@ -290,6 +290,53 @@ async def test_domains_endpoint_merges_disk_and_recipes(client):
     assert domains["chat.qwen.ai"]["accounts"] == 1
 
 
+async def test_clone_duplicates_logins_and_accounts_into_a_new_engine(client):
+    """Đường "đổi sang CloakBrowser mà vẫn giữ bản Playwright đang chạy tốt"."""
+    c, app, db, cfg = client
+    source = (await _create(c, "main", engine="playwright", max_tabs=6)).json()
+    await c.post(f"/admin/profiles/{source['id']}/accounts",
+                 json={"domain": "chat.qwen.ai", "label": "codex1"})
+    (cfg.profiles_dir / "main" / "Default").mkdir(parents=True, exist_ok=True)
+    (cfg.profiles_dir / "main" / "Default" / "Cookies").write_text("phiên", encoding="utf-8")
+
+    response = await c.post(f"/admin/profiles/{source['id']}/clone",
+                            json={"name": "main-cloak", "engine": "cloak"})
+
+    assert response.status_code == 200, response.text
+    copy = response.json()
+    assert copy["engine"] == "cloak" and copy["max_tabs"] == 6 and copy["is_default"] == 0
+    assert (cfg.profiles_dir / "main-cloak" / "Default" / "Cookies").read_text(
+        encoding="utf-8") == "phiên"
+
+    listing = {p["name"]: p for p in (await c.get("/admin/profiles")).json()["profiles"]}
+    assert [(a["host"], a["label"]) for a in listing["main-cloak"]["accounts"]] == \
+        [("chat.qwen.ai", "codex1")]
+    # Bản gốc giữ nguyên engine lẫn cờ mặc định.
+    assert listing["main"]["engine"] == "playwright" and listing["main"]["is_default"] == 1
+
+
+async def test_clone_refuses_while_the_source_profile_is_open(client):
+    c, app, db, cfg = client
+    source = (await _create(c, "main")).json()
+    # `open_profiles` là property đọc từ đây — giả lập profile đang chạy.
+    app.state.pool._profiles["main"] = None
+
+    response = await c.post(f"/admin/profiles/{source['id']}/clone", json={"name": "main-2"})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "profile_open"
+    assert not (cfg.profiles_dir / "main-2").exists()
+
+
+async def test_clone_rejects_a_name_already_taken(client):
+    c, *_ = client
+    source = (await _create(c, "main")).json()
+    await _create(c, "work")
+    response = await c.post(f"/admin/profiles/{source['id']}/clone", json={"name": "work"})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_profile"
+
+
 async def test_rename_is_refused_instead_of_ignored(client):
     c, *_ = client
     created = (await _create(c, "main")).json()

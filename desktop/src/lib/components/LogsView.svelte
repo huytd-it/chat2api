@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { apiKey, serverLog } from "../stores";
   import { fetchLogs, type LogEntry } from "../api";
   import PageShell from "./PageShell.svelte";
@@ -15,7 +16,6 @@
   let entries = $state<LogEntry[]>([]);
   let cursor = 0;
   let paused = $state(false);
-  let timer: ReturnType<typeof setTimeout> | null = null;
   let pollError = $state("");
   let clearOpen = $state(false);
 
@@ -41,25 +41,31 @@
     });
   }
 
-  async function poll() {
-    try {
-      const fresh = await fetchLogs($apiKey, cursor);
-      if (fresh.length > 0) {
-        cursor = fresh[fresh.length - 1].id;
-        entries = [...entries.slice(-499), ...fresh];
-        pollError = "";
-        stickToBottom(appLogEl);
-      }
-    } catch (e) {
-      pollError = "poll lỗi: " + e;
-    } finally {
-      timer = setTimeout(poll, 1500);
-    }
-  }
+  onMount(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
-  $effect(() => {
+    async function poll() {
+      try {
+        if (document.visibilityState === "hidden") return;
+        const fresh = await fetchLogs($apiKey, cursor);
+        if (!active) return;
+        pollError = "";
+        if (fresh.length > 0) {
+          cursor = fresh[fresh.length - 1].id;
+          entries = [...entries, ...fresh].slice(-500);
+          stickToBottom(appLogEl);
+        }
+      } catch (e) {
+        if (active) pollError = "poll lỗi: " + e;
+      } finally {
+        if (active) timer = setTimeout(poll, 1500);
+      }
+    }
+
     poll();
     return () => {
+      active = false;
       if (timer !== null) clearTimeout(timer);
       timer = null;
     };

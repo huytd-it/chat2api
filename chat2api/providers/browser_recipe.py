@@ -157,14 +157,21 @@ def validate_recipe(d: dict) -> list[str]:
         if not isinstance(mode, dict):
             errs.append("invalid field: mode (phải là mapping)")
         else:
-            for key in ("selector", "image_action", "chat_action"):
+            for key in ("selector", "image_action", "chat_action", "model_action"):
                 v = mode.get(key)
                 if v is not None and not isinstance(v, str):
                     errs.append(f"invalid field: mode.{key} (phải là string)")
                 if key.endswith("_action") and isinstance(v, str) and v:
-                    steps = v.split(";")
-                    if not all(((s.strip().startswith("click:") or s.strip().startswith("select:")) and s.strip().split(":",1)[1].strip()) for s in steps):
-                        errs.append(f"invalid field: mode.{key} (click:<selector> | select:<selector>)")
+                    steps = [s.strip() for s in v.split(";") if s.strip()]
+                    def _ok(s: str) -> bool:
+                        if s.startswith("click:") or s.startswith("select:") or s.startswith("press:"):
+                            return bool(s.split(":",1)[1].strip())
+                        if s.startswith("wait:"):
+                            try: return int(s.split(":",1)[1].strip()) >= 0
+                            except: return False
+                        return False
+                    if not (steps and all(_ok(s) for s in steps)):
+                        errs.append(f"invalid field: mode.{key} (click:<selector> | select:<selector> | press:<key> | wait:<ms>)")
 
     models = d.get("models")
     need("models", isinstance(models, list) and len(models) > 0
@@ -179,12 +186,17 @@ def validate_recipe(d: dict) -> list[str]:
                     f"invalid field: models[{i}].capability "
                     f"({' | '.join(flows.CAPABILITIES)}; nhiều giá trị ngăn bằng dấu phẩy)")
             action = model.get("action")
-            steps = action.split(";") if isinstance(action, str) else []
-            if action is not None and not (steps and all(
-                    (step.strip().startswith("click:") or step.strip().startswith("select:"))
-                    and step.strip().split(":", 1)[1].strip() for step in steps)):
+            raw_steps = [s.strip() for s in action.split(";") if s.strip()] if isinstance(action, str) else []
+            def _aok(s: str) -> bool:
+                if s.startswith("click:") or s.startswith("select:") or s.startswith("press:"):
+                    return bool(s.split(":",1)[1].strip())
+                if s.startswith("wait:"):
+                    try: return int(s.split(":",1)[1].strip()) >= 0
+                    except: return False
+                return False
+            if action is not None and not (raw_steps and all(_aok(s) for s in raw_steps)):
                 errs.append(
-                    f"invalid field: models[{i}].action (click:<selector> | select:<selector>)")
+                    f"invalid field: models[{i}].action (click:<selector> | select:<selector> | press:<key> | wait:<ms>)")
 
     login = d.get("login") or {}
     if login.get("strategy", "round_robin") not in LOGIN_STRATEGIES:
@@ -735,18 +747,41 @@ class BrowserRecipe(Provider):
         return lock
 
     async def _exec_action_steps(self, page, action_str: str, value: str | None = None) -> None:
-        """Thực thi chuỗi `click:`/`select:` cho dropdown/chuyển mode."""
+        """Thực thi chuỗi `click:`/`select:`/`press:`/`wait:` cho dropdown/chuyển mode."""
         if not action_str:
             return
-        for step in action_str.split(";"):
-            step = step.strip()
+        for raw_step in action_str.split(";"):
+            step = raw_step.strip()
             if not step:
                 continue
             if ":" not in step:
                 continue
-            action, selector = step.split(":", 1)
-            action = action.strip()
-            selector = selector.strip()
+            action, arg = step.split(":", 1)
+            action = action.strip().lower()
+            arg = arg.strip()
+            if action in {"wait", "sleep"}:
+                try:
+                    ms = int(arg)
+                except Exception:
+                    continue
+                await asyncio.sleep(max(0, ms) / 1000)
+                continue
+            if action == "press":
+                if not arg:
+                    continue
+                # Nhấn phím trên bàn phím toàn cục (hữu ích cho Enter sau khi chọn model).
+                # Nếu page đang focus vào dropdown, Enter sẽ xác nhận lựa chọn.
+                try:
+                    await page.keyboard.press(arg)
+                except Exception:
+                    # fallback: thử press trên locator đang focus
+                    try:
+                        await page.keyboard.press(arg)
+                    except Exception:
+                        pass
+                await asyncio.sleep(0.2)
+                continue
+            selector = arg
             if not selector:
                 continue
             try:
@@ -763,7 +798,7 @@ class BrowserRecipe(Provider):
                 # chờ UI ổn định giữa các bước dropdown
                 await asyncio.sleep(0.35)
             except Exception as e:
-                applog.log(f"recipe: '{self.slug}' action '{action}:{selector}' lỗi: {e}", level="warn")
+                applog.log(f"recipe: '{self.slug}' action '{action}:{arg}' lỗi: {e}", level="warn")
                 raise
 
     # ------------------------------- flows -------------------------------

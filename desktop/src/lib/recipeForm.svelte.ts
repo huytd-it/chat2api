@@ -68,6 +68,10 @@ export class RecipeForm {
   readyDelayMs = $state<NumField>("");
   inputDelayMs = $state<NumField>("");
   readyTimeoutMs = $state<NumField>("");
+  /** Dùng chung cho mọi model: mở dropdown trước khi bấm option riêng. Lưu vào
+   * `flows.select_model` (ưu tiên) và `mode` (fallback cho recipe cũ). */
+  selectModelSelector = $state("");
+  selectModelAction = $state("");
 
   /** Lỗi của lần `validate()` gần nhất, rỗng khi biểu mẫu hợp lệ. */
   error = $state("");
@@ -133,6 +137,8 @@ export class RecipeForm {
     this.readyDelayMs = "";
     this.inputDelayMs = "";
     this.readyTimeoutMs = "";
+    this.selectModelSelector = "";
+    this.selectModelAction = "";
     this.error = "";
   }
 
@@ -145,6 +151,9 @@ export class RecipeForm {
     const newChat = dict(recipe.new_chat);
     const timing = dict(recipe.timing);
     const login = dict(recipe.login);
+    const mode = dict(recipe.mode);
+    const flows = dict(recipe.flows);
+    const selFlow = dict(flows.select_model ?? mode);
 
     this.url = str(recipe.url);
     this.inputSelector = str(prompt.input_selector);
@@ -193,6 +202,9 @@ export class RecipeForm {
     this.setModels(items.length
       ? items.map((m) => ({ id: str(m.id), action: str(m.action), value: str(m.value) }))
       : [{ id: "" }]);
+    // select_model chung: ưu tiên flows.select_model, fallback mode.selector/mode.model_action
+    this.selectModelSelector = str(selFlow.selector ?? mode.selector);
+    this.selectModelAction = str(selFlow.action ?? (mode as Record<string, unknown>).model_action ?? selFlow.model_action);
   }
 
   /** Ô trống -> undefined; số hợp lệ -> number; chuỗi hỏng -> NaN (validate bắt lỗi). */
@@ -258,9 +270,15 @@ export class RecipeForm {
       && !this.doneSelector.trim())
       return fail("Nhập CSS selector cho tín hiệu hoàn tất.");
     if (!this.modelSpecs().length) return fail("Cần ít nhất một model id.");
+    const validStep = (s: string) => /^(click|select|press):.+/.test(s) || /^wait:\d+$/.test(s);
     if (this.modelActions.some((action) => action.trim()
-      && action.split(";").some((step) => !/^(click|select):.+/.test(step.trim()))))
-      return fail('Action model phải có dạng "click:<selector>" hoặc "select:<selector>".');
+      && action.split(";").map(s=>s.trim()).filter(Boolean).some((step) => !validStep(step))))
+      return fail('Action model phải có dạng "click:<selector> | select:<selector> | press:<key> | wait:<ms>".');
+    if (this.selectModelAction.trim()
+      && this.selectModelAction.split(";").map(s=>s.trim()).filter(Boolean).some((step)=>!validStep(step)))
+      return fail('Chuỗi bước chọn model phải là click/select/press/wait ngăn bằng ";".');
+    if (this.selectModelSelector.trim() && !this.selectModelSelector.trim())
+      return fail("Selector dropdown model không hợp lệ.");
     if (this.newChatMode === "selector" && !this.newChatSelector.trim())
       return fail("Nhập selector nút tạo chat mới.");
     if (this.newChatMode === "url" && !this.newChatUrl.trim()) return fail("Nhập URL mở chat mới.");
@@ -275,9 +293,30 @@ export class RecipeForm {
     return true;
   }
 
+  private buildFlows() {
+    const sel = this.selectModelSelector.trim();
+    const act = this.selectModelAction.trim();
+    if (!sel && !act) return undefined;
+    return {
+      select_model: {
+        ...(sel ? { selector: sel } : {}),
+        ...(act ? { action: act } : {}),
+      },
+    } as Record<string, Record<string, string>>;
+  }
+
+  private buildModeLegacy() {
+    const sel = this.selectModelSelector.trim();
+    const act = this.selectModelAction.trim();
+    if (!sel && !act) return undefined;
+    // giữ `mode` để recipe cũ đọc được khi chưa có `flows`
+    return { selector: sel || undefined, image_action: undefined, chat_action: undefined } as unknown as Record<string,string>;
+  }
+
   /** Recipe đầy đủ để TẠO MỚI — bỏ hẳn những khóa người dùng để trống. */
   toSpec(slug: string): ManualRecipeSpec {
     const n = this.nums();
+    const flowsSpec = this.buildFlows();
     const spec: ManualRecipeSpec = {
       slug,
       url: this.url.trim(),
@@ -310,6 +349,9 @@ export class RecipeForm {
       models: this.modelSpecs(),
       keep_context: this.keepContext,
       ...(n.anon_trial_limit !== undefined ? { anon_trial_limit: n.anon_trial_limit } : {}),
+      ...(flowsSpec ? { flows: flowsSpec } : {}),
+      // giữ mode cho tương thích đọc cũ — BrowserRecipe đọc cả hai
+      ...(flowsSpec ? { mode: { selector: this.selectModelSelector.trim() || undefined, model_action: this.selectModelAction.trim() || undefined } as unknown as ManualRecipeSpec["mode"] } : {}),
       login: {
         strategy: this.loginStrategy,
         quota: n.login_quota ?? 50,
@@ -317,6 +359,10 @@ export class RecipeForm {
         ...(this.accountSpecs().length ? { accounts: this.accountSpecs() } : {}),
       },
     };
+    // xóa khóa mode rỗng
+    if ((spec as unknown as Record<string, unknown>).mode && !(spec as unknown as Record<string, unknown>).mode) delete (spec as unknown as Record<string, unknown>).mode;
+    const m = (spec as unknown as Record<string, unknown>).mode as Record<string, unknown> | undefined;
+    if (m && !m.selector && !m.model_action) delete (spec as unknown as Record<string, unknown>).mode;
     if (this.newChatMode === "selector") spec.new_chat = { selector: this.newChatSelector.trim() };
     else if (this.newChatMode === "url") spec.new_chat = { url: this.newChatUrl.trim() };
     if (n.ready_delay_ms !== undefined || n.input_delay_ms !== undefined
@@ -337,6 +383,15 @@ export class RecipeForm {
     const n = this.nums();
     const orNull = (value: number | undefined) => (value === undefined ? null : value);
     const copy = this.doneType === "copy_button";
+    const sel = this.selectModelSelector.trim();
+    const act = this.selectModelAction.trim();
+    // Chỉ chạm tới `select_model` — không xóa cả khối `flows` nếu recipe có flow khác
+    const flowsPatch = (!sel && !act)
+      ? { select_model: null }
+      : { select_model: { selector: sel || null, action: act || null } };
+    const modePatch = (!sel && !act)
+      ? { selector: null, model_action: null }
+      : { selector: sel || null, model_action: act || null };
     return {
       url: this.url.trim(),
       prompt: {
@@ -361,6 +416,8 @@ export class RecipeForm {
       },
       models: this.modelSpecs(),
       keep_context: this.keepContext,
+      flows: flowsPatch,
+      mode: modePatch,
       new_chat:
         this.newChatMode === "selector"
           ? { selector: this.newChatSelector.trim(), url: null }

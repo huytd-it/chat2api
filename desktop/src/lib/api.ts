@@ -565,6 +565,8 @@ export interface ManualRecipeSpec {
     };
   };
   models: { id: string; action?: string; value?: string }[];
+  flows?: Record<string, { selector?: string; action?: string; [k:string]: unknown }>;
+  mode?: { selector?: string; model_action?: string; image_action?: string; chat_action?: string };
   new_chat?: { url?: string; selector?: string } | null;
   timing?: { ready_delay_ms?: number; input_delay_ms?: number; ready_timeout_ms?: number } | null;
   login?: {
@@ -1176,6 +1178,24 @@ export async function updateProfile(
     method: "PATCH",
     headers: headers(key),
     body: JSON.stringify(values),
+  });
+  return asJson(r);
+}
+
+/** Nhân bản profile: copy thư mục Chromium (mọi đăng nhập) + account đã khai
+ * báo sang một profile mới. `values` ghi đè cột nào muốn khác nguồn — thường
+ * chỉ là `engine`. Server trả 409 khi profile nguồn đang mở. */
+export async function cloneProfile(
+  key: string,
+  ident: string | number,
+  name: string,
+  values: ProfileValues = {},
+): Promise<ProfileInfo> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/profiles/" + encodeURIComponent(String(ident)) + "/clone", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify({ name, ...values }),
   });
   return asJson(r);
 }
