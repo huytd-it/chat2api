@@ -1,12 +1,9 @@
-import json
-
+"""Flows đã xoá — /admin/flows trả 410, recipe là nguồn duy nhất."""
 import yaml
 from httpx import ASGITransport, AsyncClient
 
-from chat2api import flow_converter
 from chat2api.config import Config
 from chat2api.main import create_app
-
 
 RECIPE = {
     "slug": "sitea",
@@ -21,12 +18,6 @@ RECIPE = {
 }
 
 
-def _flow_doc():
-    flows = flow_converter.convert_recipe(RECIPE)
-    assert len(flows) == 1
-    return flows[0]
-
-
 async def _client(tmp_path):
     cfg = Config()
     cfg.agent_llm_base_url = ""
@@ -35,68 +26,42 @@ async def _client(tmp_path):
     (cfg.recipes_dir / "sitea").mkdir()
     (cfg.recipes_dir / "sitea" / "recipe.yaml").write_text(
         yaml.safe_dump(RECIPE, allow_unicode=True), encoding="utf-8")
+    # compat: flows_dir còn tồn tại trên đĩa cũ nhưng không được nạp
     cfg.flows_dir = tmp_path / "flows"
     cfg.flows_dir.mkdir(parents=True)
-    doc = _flow_doc()
-    path = cfg.flows_dir / doc["slug"] / "flow.json"
-    path.parent.mkdir(parents=True)
-    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
     app = create_app(cfg)
     transport = ASGITransport(app=app)
     client = AsyncClient(transport=transport, base_url="http://t")
     return client, app
 
 
-async def test_flow_crud(tmp_path):
+async def test_flow_endpoints_gone(tmp_path):
     client, _ = await _client(tmp_path)
-    r = await client.get("/admin/flows")
-    assert r.status_code == 200
-    assert [f["slug"] for f in r.json()] == ["sitea"]
-
-    r = await client.get("/admin/flows/sitea")
-    assert r.status_code == 200
-    assert r.json()["slug"] == "sitea"
-
-    doc = r.json()
-    doc["enabled"] = False
-    r = await client.put("/admin/flows/sitea", json=doc)
-    assert r.status_code == 200
-
-    r = await client.post("/admin/flows/sitea/duplicate", json={"slug": "sitea-2"})
-    assert r.status_code == 200
-    assert r.json()["slug"] == "sitea-2"
-
-    r = await client.post("/admin/flows/sitea/reload")
-    assert r.status_code == 200
-
-    r = await client.delete("/admin/flows/sitea-2")
-    assert r.status_code == 200
-    r = await client.get("/admin/flows/sitea-2")
-    assert r.status_code == 404
+    for path, method in [
+        ("/admin/flows", "get"),
+        ("/admin/flows/sitea", "get"),
+        ("/admin/flows/sitea", "put"),
+        ("/admin/flows/sitea/duplicate", "post"),
+        ("/admin/flows/sitea/reload", "post"),
+        ("/admin/flows/sitea/test", "post"),
+    ]:
+        if method == "get":
+            r = await client.get(path)
+        elif method == "put":
+            r = await client.put(path, json={"slug": "sitea", "nodes": []})
+        else:
+            r = await client.post(path, json={})
+        assert r.status_code == 410, f"{method} {path} expected 410 got {r.status_code}: {r.text}"
+        assert "Flows" in r.text or "gone" in r.text.lower()
 
 
-async def test_flow_save_rejects_invalid(tmp_path):
-    client, _ = await _client(tmp_path)
-    r = await client.put("/admin/flows/sitea", json={"nodes": [], "edges": []})
-    assert r.status_code == 400
-    r = await client.put("/admin/flows/Bad_Slug!", json=_flow_doc())
-    assert r.status_code == 400
-
-
-async def test_flow_overrides_recipe_in_models(tmp_path):
+async def test_flow_overrides_recipe_now_resolves_browser_recipe(tmp_path):
     client, app = await _client(tmp_path)
     r = await client.get("/v1/models")
     assert r.status_code == 200
     ids = [m["id"] for m in r.json()["data"]]
     assert "sitea/web" in ids
-    # Chỉ một provider slug sitea (flow ghi đè recipe), resolve ra FlowRunner.
     provider, local = app.state.router.resolve("sitea/web")
     assert provider.slug == "sitea"
-    assert type(provider).__name__ == "FlowRunner"
+    assert type(provider).__name__ == "BrowserRecipe"
     assert local == "web"
-
-
-async def test_flow_test_endpoint_validation(tmp_path):
-    client, _ = await _client(tmp_path)
-    r = await client.post("/admin/flows/nope/test", json={})
-    assert r.status_code == 404

@@ -9,9 +9,32 @@ import pytest
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+UNSAFE_PORTS = {
+    1,7,9,11,13,15,17,19,20,21,22,23,25,37,42,43,53,77,79,87,95,101,102,103,104,
+    109,110,111,113,115,117,119,123,135,139,143,179,389,465,512,513,514,515,526,530,531,532,540,556,
+    587,601,636,989,1000,1067,1068,1069,1085,1719,1720,1723,2049,3659,4045,5060,5061,6000,6566,6665,6666,6667,6668,6669,6697,10080,
+}
+
 @pytest.fixture
 def site():
     handler = partial(http.server.SimpleHTTPRequestHandler, directory=str(FIXTURES))
+    for _ in range(20):
+        httpd = socketserver.TCPServer(("127.0.0.1", 0), handler, bind_and_activate=False)
+        httpd.allow_reuse_address = True
+        httpd.server_bind()
+        port = httpd.server_address[1]
+        if port in UNSAFE_PORTS:
+            httpd.server_close()
+            continue
+        httpd.server_activate()
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            yield f"http://127.0.0.1:{port}"
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+        return
+    # fallback: use whatever port (let Chromium flag allow it)
     with socketserver.TCPServer(("127.0.0.1", 0), handler) as httpd:
         port = httpd.server_address[1]
         threading.Thread(target=httpd.serve_forever, daemon=True).start()

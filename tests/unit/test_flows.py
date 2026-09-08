@@ -128,6 +128,7 @@ def test_describe_walk_linear():
 
 
 def test_router_flow_overrides_recipe(tmp_path):
+    """Flows đã xoá — recipe là nguồn duy nhất, resolve ra BrowserRecipe."""
     import yaml as yaml_mod
 
     from chat2api.router import Router
@@ -137,10 +138,11 @@ def test_router_flow_overrides_recipe(tmp_path):
     (recipes_dir / "recipe.yaml").write_text(
         yaml_mod.safe_dump(MINIMAL_RECIPE, allow_unicode=True), encoding="utf-8")
     flows_dir = tmp_path / "flows"
+    # migrate_all vẫn chạy (compat) nhưng Router không nạp flows nữa
     flow_converter.migrate_all(tmp_path / "recipes", flows_dir)
     r = Router(tmp_path / "recipes", pool=None, flows_dir=flows_dir)
     r.reload()
     provider, local = r.resolve("demo/demo-web")
     assert provider.slug == "demo"
-    assert type(provider).__name__ == "FlowRunner"
+    assert type(provider).__name__ == "BrowserRecipe"
     assert local == "demo-web"

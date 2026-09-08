@@ -1,0 +1,13 @@
+<!doctype html>
+<html><body>
+<button id="innerBtn">innerBtn</button>
+<button data-testid="innerTest" id="innerTestBtn">innerTest</button>
+<button id="dupBtn">inner dup</button>
+<div>Inner frame content</div>
+<iframe id="nested" src="picker_inner_nested.html" style="width:400px;height:120px;border:1px solid #999"></iframe>
+<script>
+// safe-click test: count clicks
+window.__clicked = 0;
+document.getElementById("innerBtn").addEventListener("click", ()=>{ window.__clicked++; parent.postMessage(JSON.stringify({pickerInnerClick: true, id: "innerBtn"}), "*"); });
+</script>
+</body></html>

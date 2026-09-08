@@ -236,8 +236,6 @@ function __c2aStableValue(v){
   return true;
 }
 function __c2aVerify(sel, el){
-  // count===1 CHƯA đủ: selector có thể trúng đúng một element KHÁC. `index` cho
-  // biết `.first` của Playwright có ăn may được không.
   var r = {count: 0, unique: false, index: -1};
   if(!sel) return r;
   try{
@@ -245,6 +243,18 @@ function __c2aVerify(sel, el){
     r.count = els.length;
     for(var i=0;i<els.length;i++){ if(els[i] === el){ r.index = i; break; } }
     r.unique = (els.length === 1 && r.index === 0);
+    if(r.count===0 || r.index===-1){
+      try{
+        const rn = el.getRootNode();
+        if(rn instanceof ShadowRoot){
+          const pr = __c2aVerifyPierce(sel, el);
+          if(pr.count>0) return pr;
+        } else {
+          const pr = __c2aVerifyPierce(sel, el);
+          if(pr.count>0 && pr.index!==-1 && (r.index===-1 || pr.count !== r.count)) return pr;
+        }
+      }catch(e){}
+    }
   }catch(e){}
   return r;
 }
@@ -403,7 +413,10 @@ FRAME_CHAIN_FN_JS = """function __c2aFrameChain(){
     while(w.frameElement){
       const fe=w.frameElement;
       let sel='';
-      try{ sel=fe.id?'#'+CSS.escape(fe.id):fe.tagName.toLowerCase(); }catch(e){ sel=fe.tagName?fe.tagName.toLowerCase():'iframe'; }
+      try{
+        if(fe.id && __c2aStableId(fe.id)) sel='#'+CSS.escape(fe.id);
+        else{ const anc=__c2aLocalSel(fe); sel=anc||fe.tagName.toLowerCase(); }
+      }catch(e){ sel=fe.tagName?fe.tagName.toLowerCase():'iframe'; }
       chain.unshift(sel);
       w=w.parent;
       if(chain.length>8) break;
@@ -413,15 +426,67 @@ FRAME_CHAIN_FN_JS = """function __c2aFrameChain(){
 }
 function __c2aShadowInfo(el){
   try{
-    const root=el.getRootNode();
-    if(root instanceof ShadowRoot){
-      const host=root.host;
+    let cur=el, depth=0, firstHost=null, lastMode=null;
+    while(cur){
+      let root=null; try{ root=cur.getRootNode(); }catch(e){ root=null; }
+      if(root instanceof ShadowRoot){
+        depth++;
+        if(!firstHost) firstHost=root.host;
+        try{ lastMode=root.mode||lastMode||'open'; }catch(e){}
+        cur=root.host;
+        // continue to detect nested shadow hosts
+        continue;
+      }
+      break;
+    }
+    if(depth>0){
       let hostSel='';
-      try{ hostSel=host.id?'#'+CSS.escape(host.id):host.tagName.toLowerCase(); }catch(e){ hostSel=host.tagName.toLowerCase(); }
-      return {hostSelector: hostSel, depth: 1};
+      try{
+        const h=firstHost;
+        if(h.id && __c2aStableId(h.id)) hostSel='#'+CSS.escape(h.id);
+        else {
+          const anc=__c2aLocalSel(h);
+          hostSel=anc||h.tagName.toLowerCase();
+        }
+      }catch(e){ try{ hostSel=firstHost.tagName.toLowerCase(); }catch(_){ hostSel='host'; } }
+      let mode='open'; try{ if(cur===null) mode=lastMode||'open'; else mode=lastMode||'open'; }catch(e){}
+      // closed detection: ShadowRoot unreachable => depth reported as 0 earlier, but if we got here it's open.
+      // For closed host, getRootNode() returns document, so we never enter branch. Detect via element.closest trick handled by caller (outer).
+      // Try to probe closed by checking if element is inside a shadow that we cannot pierce: we already know depth==0 means not in open shadow.
+      return {hostSelector: hostSel, depth: depth, mode: mode, closed: mode==='closed'};
     }
   }catch(e){}
-  return {hostSelector: null, depth: 0};
+  // Heuristic closed detection: if element's parent chain contains a shadow host whose shadowRoot is null but we suspect encapsulation (closed)
+  // We cannot reliably detect closed from outside; return closed false with warning caller can surface via missing pierce mismatch.
+  try{
+    // if verify via pierce finds 0 but querySelectorAll 0 and element is not in light DOM => likely closed
+    // Do not false-positive; let Python authoritative check via verify counts handle warning.
+  }catch(e){}
+  return {hostSelector: null, depth: 0, mode: null, closed: false};
+}
+function __c2aPierceAll(root, sel){
+  const out=[];
+  function pierce(r){
+    try{ for(const el of r.querySelectorAll(sel)) out.push(el); }catch(e){}
+    try{ for(const el of r.querySelectorAll('*')){ if(el.shadowRoot) pierce(el.shadowRoot); } }catch(e){}
+  }
+  try{ pierce(root); }catch(e){}
+  return out;
+}
+function __c2aVerifyPierce(sel, el){
+  try{
+    const all=__c2aPierceAll(document, sel);
+    let idx=-1; for(let i=0;i<all.length;i++) if(all[i]===el) idx=i;
+    return {count: all.length, unique: all.length===1 && idx===0, index: idx};
+  }catch(e){ return {count:0, unique:false, index:-1}; }
+}
+function __c2aLocatorFor(el, best){
+  try{
+    const fc=__c2aFrameChain(); const chain=fc.chain||[]; const sel=best||__c2aSel(el)||'';
+    if(!sel) return '';
+    if(chain.length) return chain.join(' >> internal:control=enter-frame >> ') + ' >> internal:control=enter-frame >> ' + sel;
+    return sel;
+  }catch(e){ return best||''; }
 }
 function __c2aOuterHTML(el){ try{ return (el.outerHTML||'').slice(0,2000); }catch(e){ return ''; } }
 function __c2aInnerText(el){ try{ return (el.innerText||'').slice(0,500); }catch(e){ return ''; } }
@@ -465,15 +530,20 @@ ENRICH_FN_JS = """function __c2aEnrich(el){
   // `best` là ứng viên ĐẦU TIÊN đã verify chọn đúng 1 element, rỗng nếu không có.
   let cands=[];
   try{ cands=__c2aCandidates(el); }catch(e){}
+  let best=""; try{ best=__c2aBest(cands); }catch(e){}
+  let locator=""; try{ locator=__c2aLocatorFor(el, best||primary); }catch(e){ locator=best||primary; }
+  let sh=null; try{ sh=__c2aShadowInfo(el); }catch(e){ sh={hostSelector:null, depth:0, mode:null, closed:false}; }
   return {
     selector: primary,
+    best: best,
+    locator: locator,
     candidates: cands,
-    selectors: {primary: primary, best: __c2aBest(cands), parent: parentSel, grandparent: grandparentSel, cssPath: __c2aCssPath(el), xpath: __c2aXPath(el)},
+    selectors: {primary: primary, best: best, locator: locator, parent: parentSel, grandparent: grandparentSel, cssPath: __c2aCssPath(el), xpath: __c2aXPath(el)},
     attributes: __c2aAttrs(el),
     bbox: __c2aBbox(el),
     text: {innerText: __c2aInnerText(el), outerHTML: __c2aOuterHTML(el)},
     frame: __c2aFrameChain(),
-    shadow: __c2aShadowInfo(el),
+    shadow: sh,
     snapshotDiff: __c2aSnapshotDiff(el),
     // Bốn trường dưới đây là thứ cứu được nút icon-only: `actionable` mang
     // attribute/selector của NÚT thật khi el chỉ là lớp phủ bên trong nó,

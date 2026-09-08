@@ -44,11 +44,22 @@ RECORDER_JS = (
   }
   // Nhận sẵn `en` + `labelText` thay vì tự enrich: event `fill` phải mô tả ô
   // nhập ở thời điểm GÕ, không phải thời điểm debounce bắn (xem handler input).
+  function isSensitive(el){
+    try{
+      if(!el) return false;
+      const t=(el.getAttribute('type')||'').toLowerCase();
+      if(t==='password') return true;
+      if(el.getAttribute('autocomplete')==='current-password') return true;
+      if(el.matches && el.matches('[data-sensitive="true"]')) return true;
+    }catch(e){}
+    return false;
+  }
   function pushEnriched(kind, el, en, labelText, extra){
     const p = {
       kind: kind,
       selector: en.selector || '',
       selectors: en.selectors || {},
+      candidates: en.candidates || [],
       attributes: en.attributes || {},
       bbox: en.bbox || {},
       text: en.text || {},
@@ -120,12 +131,14 @@ RECORDER_JS = (
     // Đánh dấu để người đọc trace biết enrich chụp trước lúc element biến mất,
     // thay vì phải tự đoán từ bbox 0 / parent null.
     if(!alive) extra.detached = true;
+    if(isSensitive(pending.el)) extra.value = '';
     pushEnriched('fill', pending.el, pending.en,
                  alive ? label(pending.el) : (pending.label || value.slice(0,120)),
                  extra);
   }
   document.addEventListener('input', (e) => {
     const el = e.target;
+    if(isSensitive(el)) return;
     if(!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && !el.isContentEditable) return;
     const w = window.__c2a_recorder;
     clearTimeout(w.inputTimer);

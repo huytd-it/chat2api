@@ -14,6 +14,10 @@ from .. import accounts, applog, flows, settings, store
 from ..prompt import flatten_messages
 from .base import ModelInfo, Provider
 
+
+from ..selectors import split_frame_selector as _split_frame_selector  # noqa: F401
+from ..selectors import resolve_locator as _resolve_locator  # noqa: F401
+
 DONE_SIGNALS = {"stable_text", "selector_appear", "selector_disappear", "copy_button"}
 COPY_SCOPES = {"after", "inside", "page"}
 # Gần như web chat nào cũng gắn nút "Copy" ngay dưới câu trả lời và CHỈ gắn khi
@@ -746,7 +750,7 @@ class BrowserRecipe(Provider):
             if not selector:
                 continue
             try:
-                loc = page.locator(selector).first
+                loc = _resolve_locator(page, selector).first
                 # chờ selector hiện ra trong 10s (dropdown option thường xuất hiện sau click trước)
                 try:
                     await loc.wait_for(state="visible", timeout=10000)
@@ -798,7 +802,7 @@ class BrowserRecipe(Provider):
         selector = str(self.flow(kind).get("selector") or self._select_model_selector)
         if selector:
             try:
-                await page.locator(selector).first.wait_for(state="visible", timeout=8000)
+                await _resolve_locator(page, selector).first.wait_for(state="visible", timeout=8000)
             except Exception:
                 pass
         await self._exec_action_steps(page, action)
@@ -813,7 +817,7 @@ class BrowserRecipe(Provider):
         if self._select_model_action:
             if self._select_model_selector:
                 try:
-                    await page.locator(self._select_model_selector).first.wait_for(
+                    await _resolve_locator(page, self._select_model_selector).first.wait_for(
                         state="visible", timeout=8000)
                 except Exception:
                     pass
@@ -977,10 +981,70 @@ class BrowserRecipe(Provider):
         Video hay để URL thật ở ``<source>`` con hoặc ``data-src`` chứ không phải
         ``video.src``, nên nhánh JS đọc cả hai; ảnh thì thêm đường
         ``background-image`` vì nhiều site render ảnh kết quả bằng CSS.
+        Frame-chain selector (FRAME_TOKEN) đi qua resolve_locator nên đúng ngay cả
+        khi media nằm trong iframe lồng nhau; shadow open được Playwright pierce
+        sẵn qua locator.
         """
         tag = "video" if flow == "video" else "img"
         sel = self._image_selector(flow)
         if sel:
+            # frame-aware path: locator pierces shadow + respects FRAME_TOKEN
+            frames, _inner = _split_frame_selector(sel)
+            if frames:
+                loc = _resolve_locator(page, sel)
+                try:
+                    srcs = await loc.evaluate_all(
+                        r"""(nodes, tag) => {
+                    const srcOf = (n) => {
+                        let src = n.getAttribute('src') || n.getAttribute('data-src') || '';
+                        if (!src && n.tagName.toLowerCase() === tag) src = n.currentSrc || n.src || '';
+                        if (!src) {
+                            const source = n.querySelector && n.querySelector('source');
+                            if (source) src = source.getAttribute('src') || source.src || '';
+                        }
+                        if (!src && tag === 'img') {
+                            const bg = getComputedStyle(n).backgroundImage;
+                            const m = bg && bg.match(/url\(["']?(.*?)["']?\)/);
+                            if (m) src = m[1];
+                        }
+                        return src;
+                    };
+                    const out = [];
+                    for (const n of nodes) {
+                        const src = srcOf(n);
+                        if (src && !out.includes(src)) out.push(src);
+                        if (n.tagName.toLowerCase() !== tag) {
+                            for (const inner of n.querySelectorAll(tag)) {
+                                const s = srcOf(inner);
+                                if (s && !out.includes(s)) out.push(s);
+                            }
+                        }
+                    }
+                    return out;
+                }""",
+                        tag,
+                    )
+                except Exception:
+                    # playwright <1.40 uses evaluateAll; fallback to evaluate per node
+                    try:
+                        srcs = await loc.evaluate_all(
+                            r"""(nodes, tag) => {
+                        const srcOf = (n) => {
+                            let src = n.getAttribute('src') || n.getAttribute('data-src') || '';
+                            if (!src && n.tagName.toLowerCase() === tag) src = n.currentSrc || n.src || '';
+                            if (!src) { const source = n.querySelector && n.querySelector('source'); if (source) src = source.getAttribute('src') || source.src || ''; }
+                            if (!src && tag === 'img') { const bg = getComputedStyle(n).backgroundImage; const m = bg && bg.match(/url\(["']?(.*?)["']?\)/); if (m) src = m[1]; }
+                            return src;
+                        };
+                        const out=[];
+                        for(const n of nodes){ const src=srcOf(n); if(src&&!out.includes(src)) out.push(src); if(n.tagName.toLowerCase()!==tag){ for(const inner of n.querySelectorAll(tag)){ const s=srcOf(inner); if(s&&!out.includes(s)) out.push(s); } } }
+                        return out;
+                    }""",
+                            tag,
+                        )
+                    except Exception:
+                        srcs = []
+                return [str(s) for s in (srcs or [])][:limit]
             srcs = await page.evaluate(
                 r"""([sel, tag]) => {
                     const srcOf = (n) => {
@@ -1014,10 +1078,33 @@ class BrowserRecipe(Provider):
                 [sel, tag],
             )
             return [str(s) for s in (srcs or [])][:limit]
-        # fallback: tìm mọi <img>/<video> trong khối tin nhắn cuối
+        # fallback: tìm mọi <img>/<video> trong khối tin nhắn cuối (frame-aware if chain)
         fallback = self._media_fallback_selector(flow)
         if not fallback:
             return []
+        fb_frames, _ = _split_frame_selector(fallback)
+        if fb_frames:
+            loc = _resolve_locator(page, fallback)
+            try:
+                cnt = await loc.count()
+                if not cnt:
+                    return []
+                last = loc.last
+                srcs = await last.evaluate(
+                    r"""(el, tag) => {
+                const nodes = Array.from(el.querySelectorAll(tag));
+                if (!nodes.length && el.tagName.toLowerCase() === tag) nodes.push(el);
+                return nodes.map(n => {
+                    if (n.currentSrc || n.src) return n.currentSrc || n.src;
+                    const source = n.querySelector('source');
+                    return (source && (source.src || source.getAttribute('src'))) || n.getAttribute('src') || '';
+                }).filter(Boolean);
+            }""",
+                    tag,
+                )
+                return [str(s) for s in (srcs or [])][:limit]
+            except Exception:
+                pass
         srcs = await page.evaluate(
             r"""([sel, tag]) => {
                 const els = document.querySelectorAll(sel);
@@ -1053,8 +1140,44 @@ class BrowserRecipe(Provider):
                 raise TimeoutError(f"recipe '{self.slug}' {flow} timeout")
             srcs = await self._extract_media_srcs(page, n, flow)
             if len(srcs) >= n:
-                loaded = await page.evaluate(
-                    r"""([sel, fallback, tag]) => {
+                if sel:
+                    _frames, _inner = _split_frame_selector(sel)
+                    if _frames:
+                        try:
+                            loc = _resolve_locator(page, sel)
+                            cnt = await loc.count()
+                            if cnt:
+                                loaded_nodes = await loc.evaluate_all(
+                                    r"""(nodes, tag) => {
+                                const ready = (n) => {
+                                    const t = n.tagName.toLowerCase();
+                                    if (t === 'img') return n.complete && n.naturalWidth > 0;
+                                    if (t === 'video') return n.readyState >= 1 || !!n.currentSrc;
+                                    return true;
+                                };
+                                let check=[];
+                                for(const n of nodes){ if(n.tagName.toLowerCase()===tag) check.push(n); else for(const inner of n.querySelectorAll(tag)) check.push(inner); }
+                                return check.filter(ready).length;
+                            }""",
+                                    tag,
+                                )
+                                loaded = int(loaded_nodes or 0)
+                            else:
+                                loaded = 0
+                        except Exception:
+                            loaded = None
+                        if loaded is None:
+                            loaded = await page.evaluate(
+                                r"""([sel, fallback, tag]) => {
+                                    const ready = (n) => { const t=n.tagName.toLowerCase(); if(t==='img') return n.complete&&n.naturalWidth>0; if(t==='video') return n.readyState>=1||!!n.currentSrc; return true; };
+                                    const check=(nodes)=>nodes.filter(ready).length;
+                                    return check(Array.from(document.querySelectorAll(sel)).flatMap(n=>{ if(n.tagName.toLowerCase()===tag) return [n]; return Array.from(n.querySelectorAll(tag)); }));
+                                }""",
+                                [sel, fallback, tag],
+                            )
+                    else:
+                        loaded = await page.evaluate(
+                            r"""([sel, fallback, tag]) => {
                         const ready = (n) => {
                             const t = n.tagName.toLowerCase();
                             if (t === 'img') return n.complete && n.naturalWidth > 0;
@@ -1070,8 +1193,10 @@ class BrowserRecipe(Provider):
                         if (!els.length) return 0;
                         return check(Array.from(els[els.length-1].querySelectorAll(tag)));
                     }""",
-                    [sel, fallback, tag],
-                ) if sel else len(srcs)
+                            [sel, fallback, tag],
+                        )
+                else:
+                    loaded = len(srcs)
                 # nhánh sel trả về số phần tử đã tải xong; nhánh fallback đã đếm
                 # sẵn qua srcs nên chấp nhận luôn.
                 if not isinstance(loaded, int) or loaded >= n:
@@ -1091,10 +1216,30 @@ class BrowserRecipe(Provider):
         exclude = self._image_copy_exclude(flow)
         img_sel = self._image_selector(flow)
         fallback = self._media_fallback_selector(flow)
+        # frame-aware fast path: any frame-chained selector uses locator
+        is_frame = bool(_split_frame_selector(sel)[0] or _split_frame_selector(img_sel)[0] or _split_frame_selector(fallback)[0])
         while True:
             if time.monotonic() > deadline:
                 return False
             try:
+                if is_frame:
+                    # frame chain: count via locator (pierces shadow); scope containment
+                    # cross-frame is ambiguous — count usable buttons and require scope presence.
+                    try:
+                        btn_loc = _resolve_locator(page, sel)
+                        cnt = await btn_loc.count()
+                        if cnt < n:
+                            raise ValueError("not enough")
+                        if scope == "page":
+                            return True
+                        scope_sel = img_sel or fallback
+                        scope_cnt = await _resolve_locator(page, scope_sel).count() if scope_sel else 0
+                        if not scope_cnt:
+                            return True if cnt >= n else False
+                        # best effort: presence of both is sufficient when framed
+                        return cnt >= n
+                    except Exception:
+                        return False
                 count = await page.evaluate(
                     r"""([btnSel, scope, excludeSel, imgSel, fallback]) => {
                         let btns;
@@ -1139,6 +1284,47 @@ class BrowserRecipe(Provider):
         """Bấm nút copy ảnh/video thứ index và đọc clipboard. Trả về {b64} | {text} | None."""
         sel = self._image_copy_selector(flow)
         if not sel:
+            return None
+        # frame-aware path: use locator click (respects FRAME_TOKEN + shadow)
+        is_frame = bool(_split_frame_selector(sel)[0])
+        if is_frame:
+            try:
+                loc = _resolve_locator(page, sel).nth(index)
+                await loc.wait_for(state="visible", timeout=5000)
+                await loc.click(timeout=10000)
+                clicked = True
+            except Exception:
+                clicked = False
+            if not clicked:
+                return None
+            await asyncio.sleep(0.4)
+            try:
+                result = await page.evaluate(
+                    r"""async () => {
+                        const toB64 = async (blob) => { const buf=await blob.arrayBuffer(); const bytes=new Uint8Array(buf); let binary=''; for(let i=0;i<bytes.length;i++) binary+=String.fromCharCode(bytes[i]); return btoa(binary); };
+                        try{
+                          if(navigator.clipboard.read){
+                            try{
+                              const items=await navigator.clipboard.read();
+                              for(const item of items){ for(const type of item.types){ if(type.startsWith('image/')){ const blob=await item.getType(type); const b64=await toB64(blob); return {b64, mime:type}; } } }
+                            }catch(e){}
+                          }
+                          try{ const t=await navigator.clipboard.readText(); if(t&&t.trim()) return {text:t.trim()}; }catch(e){}
+                        }catch(e){ return {error:String(e)}; }
+                        return null;
+                    }""",
+                )
+                if not result: return None
+                if result.get("b64"): return {"b64_json": str(result["b64"]), "mime": result.get("mime")}
+                if result.get("text"):
+                    txt=str(result["text"]).strip()
+                    if txt.startswith("data:"):
+                        comma=txt.find(","); return {"b64_json": txt[comma+1:] if comma!=-1 else txt}
+                    if txt.startswith("http"): return {"url": txt}
+                    if len(txt)>100 and all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=" for c in txt[:200]): return {"b64_json": txt}
+                    return {"url": txt}
+            except Exception as e:
+                applog.log(f"recipe: '{self.slug}' đọc clipboard ảnh {index} lỗi: {e}", level="warn")
             return None
         parsed = urlsplit(page.url)
         try:
@@ -1384,7 +1570,7 @@ class BrowserRecipe(Provider):
             try:
                 await page.goto(self._new_chat_url or self.url, wait_until="domcontentloaded",
                                 timeout=min(timeout_ms, 60000))
-                box = page.locator(prompt_cfg["input_selector"]).first
+                box = _resolve_locator(page, prompt_cfg["input_selector"]).first
                 await self._wait_chat_ready(page, box)
                 await _sleep_ms(self._input_delay_ms)
                 # Chuyển chế độ TRƯỚC khi chọn model: dropdown model của nhiều
@@ -1405,7 +1591,7 @@ class BrowserRecipe(Provider):
                     await box.fill(prompt)
                 submit = prompt_cfg.get("submit", "Enter")
                 if submit.startswith("click:"):
-                    await page.click(submit.split(":", 1)[1])
+                    await _resolve_locator(page, submit.split(":", 1)[1]).first.click(timeout=10000)
                 else:
                     await box.press("Enter")
                 # chờ media xuất hiện (media và nút copy là 2 tập riêng)
@@ -1415,7 +1601,15 @@ class BrowserRecipe(Provider):
                     try:
                         sel = (self._image_selector(flow)
                                or self._media_fallback_selector(flow) or "body")
-                        html = await page.evaluate("(sel)=>{ const els=document.querySelectorAll(sel); const el=els[els.length-1]; return el?el.outerHTML:null; }", sel)
+                        if _split_frame_selector(sel)[0]:
+                            try:
+                                sel_loc = _resolve_locator(page, sel)
+                                cnt = await sel_loc.count()
+                                html = await sel_loc.last.evaluate("(el)=> el?el.outerHTML:null") if cnt else None
+                            except Exception:
+                                html = await page.evaluate("(sel)=>{ const els=document.querySelectorAll(sel); const el=els[els.length-1]; return el?el.outerHTML:null; }", sel)
+                        else:
+                            html = await page.evaluate("(sel)=>{ const els=document.querySelectorAll(sel); const el=els[els.length-1]; return el?el.outerHTML:null; }", sel)
                         assignment.html = html
                         self.last_response_html = html
                     except Exception:
@@ -1515,7 +1709,58 @@ class BrowserRecipe(Provider):
         (/chat?channel=g -> /chat/local_… -> /chat/<id>) nên đây là chuyện xảy ra
         thật, không phải phòng xa. Nuốt lỗi, vòng poll sau hỏi lại, hết giờ đã có
         `deadline` lo.
+        Frame-chain selector dùng locator (frame_locator) để pierce đúng iframe/shadow.
         """
+        # frame-aware path: locator respects FRAME_TOKEN and shadow piercing
+        fr, _ = _split_frame_selector(sel)
+        if fr:
+            try:
+                loc = _resolve_locator(page, sel)
+                cnt = await loc.count()
+                if not cnt:
+                    return ["", None]
+                last = loc.last
+                return await last.evaluate(
+                    r"""(el, args) => {
+                  const captureHtml=args[0], structuredMarkdown=args[1];
+                  if (!el) return ["", null];
+                  if (!structuredMarkdown) return [el.innerText || "", captureHtml ? el.outerHTML : null];
+                  const clean = value => value.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+                  const inline = node => {
+                    if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
+                    if (node.nodeType !== Node.ELEMENT_NODE) return "";
+                    const tag = node.tagName.toLowerCase();
+                    const body = Array.from(node.childNodes).map(inline).join("");
+                    if (tag === "br") return "  \n";
+                    if (tag === "strong" || tag === "b") return `**${body}**`;
+                    if (tag === "em" || tag === "i") return `*${body}*`;
+                    if (tag === "code") return `\`${body}\``;
+                    if (tag === "a") { const href=node.getAttribute("href"); return href?`[${body}](${href})`:body; }
+                    return body;
+                  };
+                  const block = (node, depth=0) => {
+                    if (node.nodeType===Node.TEXT_NODE) return (node.nodeValue||"").trim()?node.nodeValue:"";
+                    if (node.nodeType!==Node.ELEMENT_NODE) return "";
+                    const tag=node.tagName.toLowerCase();
+                    if (/^h[1-6]$/.test(tag)) return `${"#".repeat(Number(tag[1]))} ${clean(inline(node))}\n\n`;
+                    if (tag==="p" || node.classList.contains("qwen-markdown-paragraph")) return `${clean(inline(node))}\n\n`;
+                    if (tag==="hr") return "---\n\n";
+                    if (tag==="pre") return `\`\`\`\n${node.innerText||""}\n\`\`\`\n\n`;
+                    if (tag==="ul"||tag==="ol"){ const items=Array.from(node.children).filter(c=>c.tagName.toLowerCase()==="li");
+                      return items.map((item,index)=>{ const marker=tag==="ol"?`${index+1}.`:"-";
+                        const text=clean(Array.from(item.childNodes).map(c=>c.nodeType===Node.ELEMENT_NODE&&["ul","ol"].includes(c.tagName.toLowerCase())?"":inline(c)).join(""));
+                        const nested=Array.from(item.children).filter(c=>["ul","ol"].includes(c.tagName.toLowerCase())).map(c=>block(c,depth+1).trimEnd()).join("\n");
+                        return `${"  ".repeat(depth)}${marker} ${text}${nested?`\n${nested}`:""}`; }).join("\n")+"\n\n"; }
+                    if (tag==="blockquote") return clean(Array.from(node.childNodes).map(c=>block(c,depth)).join("")).split("\n").map(l=>`> ${l}`).join("\n")+"\n\n";
+                    return Array.from(node.childNodes).map(c=>block(c,depth)).join("");
+                  };
+                  const markdown=clean(Array.from(el.childNodes).map(n=>block(n)).join(""));
+                  return [markdown||el.innerText||"", captureHtml?el.outerHTML:null];
+                }""",
+                    list(self._reply_flags(flow)),
+                )
+            except Exception:
+                return None
         try:
             return await page.evaluate(
                 r"""([sel, captureHtml, structuredMarkdown]) => {
@@ -1604,7 +1849,71 @@ class BrowserRecipe(Provider):
         cả tin nhắn của người dùng) cũng có nút copy, đếm cả trang thì vừa gửi
         prompt đã thấy "xong". Ở đây nút phải nằm TRONG hoặc SAU khối câu trả
         lời cuối theo thứ tự DOM — đúng chỗ web chat gắn thanh hành động.
+        Frame-chain được tôn trọng qua resolve_locator; shadow open được pierce
+        bởi Playwright.
         """
+        msg_sel = self._last_message_selector(flow)
+        # frame-aware fast path: if either selector is frame-chained, use locator
+        try:
+            m_frames, m_inner = _split_frame_selector(msg_sel)
+            b_frames, b_inner = _split_frame_selector(selector)
+            if m_frames or b_frames:
+                # Same-frame case (most common): both inside same iframe chain
+                if m_frames == b_frames:
+                    # evaluate inside that frame document via locator
+                    _base = _resolve_locator(page, (FRAME_TOKEN.join(m_frames + [":root"]) if m_frames else ":root"))  # noqa: F841 - keep frame resolution warm
+                    # use frame locator's underlying page evaluate via resolved locators
+                    # fallback: count via locators and verify position via evaluate on that frame
+                    btn_loc = _resolve_locator(page, selector)
+                    msg_loc = _resolve_locator(page, msg_sel)
+                    if scope == "page":
+                        try:
+                            c = await btn_loc.count()
+                            return c > 0
+                        except Exception:
+                            pass
+                    # need position check inside same frame: evaluate there
+                    try:
+                        # get frame's last msg element and check contains / following
+                        cnt_msg = await msg_loc.count()
+                        cnt_btn = await btn_loc.count()
+                        if not cnt_msg or not cnt_btn:
+                            return False
+                        last_msg = msg_loc.last
+                        # evaluate button existence relative to last_msg inside frame
+                        res = await last_msg.evaluate(
+                            r"""(msgEl, args) => {
+                                const btnSel=args[0], scope=args[1], excludeSel=args[2];
+                                const doc = msgEl.ownerDocument;
+                                let btns; try{ btns=Array.from(doc.querySelectorAll(btnSel)); }catch(e){ return false; }
+                                const nameOf=b=>[b.getAttribute("aria-label"),b.getAttribute("title"),b.textContent].join(" ").toLowerCase();
+                                const usable=btns.filter(b=>{
+                                  if(b.disabled||b.getAttribute('aria-disabled')==='true') return false;
+                                  if(b.closest("pre")) return false;
+                                  if(/code|mã nguồn|代码/.test(nameOf(b))) return false;
+                                  if(excludeSel){ try{ if(b.closest(excludeSel)) return false; }catch(e){} }
+                                  if(!b.getClientRects().length) return false;
+                                  const st=getComputedStyle(b); return st.visibility!=="hidden"&&st.display!=="none";
+                                });
+                                if(!usable.length) return false;
+                                if(scope==="page") return true;
+                                return usable.some(b=>{ if(msgEl.contains(b)) return true; if(scope==="inside") return false; return !!(msgEl.compareDocumentPosition(b)&Node.DOCUMENT_POSITION_FOLLOWING); });
+                            }""",
+                            [b_inner, scope, exclude],
+                        )
+                        return bool(res)
+                    except Exception:
+                        pass
+                # different frames: cannot compare positions across documents — treat as page scope
+                try:
+                    if scope == "page":
+                        return (await _resolve_locator(page, selector).count()) > 0
+                    # best effort: both locators must have at least one
+                    return (await _resolve_locator(page, selector).count()) > 0 and (await _resolve_locator(page, msg_sel).count()) > 0
+                except Exception:
+                    return False
+        except Exception:
+            pass
         try:
             return bool(await page.evaluate(
                 r"""([msgSel, btnSel, scope, excludeSel]) => {
@@ -1615,7 +1924,7 @@ class BrowserRecipe(Provider):
                                           b.getAttribute("title"),
                                           b.textContent].join(" ").toLowerCase();
                      const usable = btns.filter(b => {
-                       if (b.disabled || b.getAttribute("aria-disabled") === "true") return false;
+                       if (b.disabled || b.getAttribute('aria-disabled') === 'true') return false;
                        // "Copy code" mọc lên NGAY khi code block bắt đầu stream,
                        // còn lâu mới xong câu trả lời — không được tính.
                        if (b.closest("pre")) return false;
@@ -1649,8 +1958,71 @@ class BrowserRecipe(Provider):
             return False
 
     async def _copy_button_result(self, page, selector: str, scope: str,
-                                  exclude: str, flow: str = "text") -> str:
+                                   exclude: str, flow: str = "text") -> str:
         """Bấm đúng nút Copy của reply cuối và đọc nội dung clipboard."""
+        msg_sel = self._last_message_selector(flow)
+        m_frames, m_inner = _split_frame_selector(msg_sel)
+        b_frames, b_inner = _split_frame_selector(selector)
+        # frame-aware click via locator (FRAME_TOKEN / shadow pierce) — try first
+        if m_frames or b_frames:
+            try:
+                # same-frame case: precise contains/after inside that frame
+                if m_frames == b_frames:
+                    btn_loc = _resolve_locator(page, selector)
+                    msg_loc = _resolve_locator(page, msg_sel)
+                    # use locator counts + element evaluate for position
+                    cnt_msg = await msg_loc.count()
+                    cnt_btn = await btn_loc.count()
+                    if cnt_msg and cnt_btn:
+                        last_msg = msg_loc.last
+                        # find target inside frame and click via locator nth()
+                        # evaluate to find target index inside frame
+                        idx = await last_msg.evaluate(
+                            r"""(msgEl, args) => {
+                                const btnSel=args[0], scope=args[1], excludeSel=args[2];
+                                const doc=msgEl.ownerDocument;
+                                let btns; try{ btns=Array.from(doc.querySelectorAll(btnSel)); }catch(e){ return -1; }
+                                const nameOf=b=>[b.getAttribute("aria-label"),b.getAttribute("title"),b.textContent].join(" ").toLowerCase();
+                                const usable=btns.filter(b=>{
+                                  if(b.disabled||b.getAttribute('aria-disabled')==='true') return false;
+                                  if(b.closest("pre")||/code|mã nguồn|代码/.test(nameOf(b))) return false;
+                                  if(excludeSel){ try{ if(b.closest(excludeSel)) return false; }catch(e){} }
+                                  if(!b.getClientRects().length) return false;
+                                  const st=getComputedStyle(b); return st.visibility!=="hidden"&&st.display!=="none";
+                                });
+                                const msgs=doc.querySelectorAll(args[3]);
+                                // fallback: find index of target in filtered usable relative to msgEl
+                                let targetIdx=-1, target=null;
+                                if(scope==="page") { target=usable[usable.length-1]; targetIdx=btns.indexOf(target); }
+                                else {
+                                  const inside=usable.filter(b=>msgEl.contains(b));
+                                  if(inside.length){ target=inside[inside.length-1]; }
+                                  else if(scope==="after"){ const after=usable.filter(b=>msgEl.compareDocumentPosition(b)&Node.DOCUMENT_POSITION_FOLLOWING); if(after.length) target=after[after.length-1]; }
+                                  if(target) targetIdx=btns.indexOf(target);
+                                }
+                                return targetIdx;
+                            }""",
+                            [b_inner, scope, exclude, m_inner],
+                        )
+                        if isinstance(idx, int) and idx >= 0:
+                            try:
+                                # click the matching btn index in that frame's locator list
+                                await btn_loc.nth(idx if idx < cnt_btn else cnt_btn - 1).click(timeout=10000)
+                                await asyncio.sleep(0.1)
+                                return str(await page.evaluate("navigator.clipboard.readText()") or "")
+                            except Exception:
+                                pass
+                else:
+                    # different frames: just click last button via its frame locator
+                    if scope == "page":
+                        try:
+                            await _resolve_locator(page, selector).last.click(timeout=10000)
+                            await asyncio.sleep(0.1)
+                            return str(await page.evaluate("navigator.clipboard.readText()") or "")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
         parsed = urlsplit(page.url)
         await page.context.grant_permissions(
             ["clipboard-read", "clipboard-write"], origin=f"{parsed.scheme}://{parsed.netloc}")
@@ -1664,7 +2036,7 @@ class BrowserRecipe(Provider):
                                       b.getAttribute("title"),
                                       b.textContent].join(" ").toLowerCase();
                  const usable = btns.filter(b => {
-                   if (b.disabled || b.getAttribute("aria-disabled") === "true") return false;
+                   if (b.disabled || b.getAttribute('aria-disabled') === 'true') return false;
                    if (b.closest("pre") || /code|mã nguồn|代码/.test(nameOf(b))) return false;
                    if (excludeSel) {
                      try { if (b.closest(excludeSel)) return false; } catch (e) {}
@@ -1708,7 +2080,7 @@ class BrowserRecipe(Provider):
         """
         await box.wait_for(state="visible", timeout=self._ready_timeout_ms)
         if self._new_chat_selector:
-            await page.click(self._new_chat_selector, timeout=self._ready_timeout_ms)
+            await _resolve_locator(page, self._new_chat_selector).first.click(timeout=self._ready_timeout_ms)
             await box.wait_for(state="visible", timeout=self._ready_timeout_ms)
         await _sleep_ms(self._ready_delay_ms)
 
@@ -1777,7 +2149,7 @@ class BrowserRecipe(Provider):
             try:
                 await page.goto(self._new_chat_url or self.url, wait_until="domcontentloaded",
                                 timeout=min(timeout_ms, 60000))
-                box = page.locator(prompt_cfg["input_selector"]).first
+                box = _resolve_locator(page, prompt_cfg["input_selector"]).first
                 await self._wait_chat_ready(page, box)
                 await _sleep_ms(self._input_delay_ms)
                 model = next((item for item in self._recipe["models"]
@@ -1793,7 +2165,7 @@ class BrowserRecipe(Provider):
                     await box.fill(prompt)
                 submit = prompt_cfg.get("submit", "Enter")
                 if submit.startswith("click:"):
-                    await page.click(submit.split(":", 1)[1])
+                    await _resolve_locator(page, submit.split(":", 1)[1]).first.click(timeout=10000)
                 else:
                     await box.press("Enter")
 
@@ -1851,7 +2223,7 @@ class BrowserRecipe(Provider):
                                 level="warn")
                             done = True
                     else:
-                        count = await page.locator(ds["selector"]).count()
+                        count = await _resolve_locator(page, ds["selector"]).count()
                         appear = dtype == "selector_appear"
                         done = (((count > 0) == appear) and stable_since is not None
                                 and quiet_for >= min(quiet_ms, 1000))

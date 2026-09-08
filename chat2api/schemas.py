@@ -225,6 +225,13 @@ class FlowSaveRequest(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class PickerStartRequest(BaseModel):
+    profile_id: int
+    url: str = ""
+
+class PickerCountRequest(BaseModel):
+    selector: str
+
 class FlowTestRequest(BaseModel):
     """Chạy thử một flow đã lưu (preflight từng node + run thật)."""
 

@@ -1,0 +1,36 @@
+<!doctype html>
+<html><body>
+<div id="host"></div>
+<button id="outsideBtn">outside</button>
+<div id="shadowNestedHost"></div>
+<button id="dupShadow">outside dup</button>
+<script>
+const host = document.getElementById("host");
+const shadow = host.attachShadow({mode: "open"});
+shadow.innerHTML = `<style>button{padding:8px}</style><button id="shadowBtn">shadowBtn</button><button id="dupShadow">shadow dup</button>`;
+window.__shadow = shadow;
+window.__shadowBtn = shadow.getElementById("shadowBtn");
+
+// nested shadow
+const host2 = document.getElementById("shadowNestedHost");
+const s2 = host2.attachShadow({mode: "open"});
+s2.innerHTML = `<div id="innerHost"></div>`;
+const innerHost = s2.getElementById("innerHost");
+const s3 = innerHost.attachShadow({mode: "open"});
+s3.innerHTML = `<button id="deepShadowBtn">deepShadow</button>`;
+window.__shadowNested = s3;
+
+// closed shadow
+const closedHost = document.createElement("div");
+closedHost.id = "closedHost";
+document.body.appendChild(closedHost);
+const closed = closedHost.attachShadow({mode: "closed"});
+closed.innerHTML = `<button id="closedBtn">closedBtn</button>`;
+window.__closed = closed;
+
+// dynamic replace
+window.replaceShadowBtn = ()=>{
+  shadow.innerHTML = `<button id="shadowBtn" data-testid="new">shadowBtnNew</button>`;
+};
+</script>
+</body></html>

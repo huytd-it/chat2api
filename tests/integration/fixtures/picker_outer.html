@@ -1,0 +1,20 @@
+<!doctype html>
+<html><body>
+<h1>Picker outer</h1>
+<div id="outerOnly">outer</div>
+<button id="dupBtn">outer dup</button>
+<div id="outerStatus"></div>
+<iframe id="outer" src="picker_inner.html" style="width:600px;height:300px;border:1px solid #000"></iframe>
+<iframe id="outer2" src="picker_inner2.html" style="width:600px;height:200px;border:1px solid #000"></iframe>
+<script>
+// cross-origin second origin will be served separately; outer2 placeholder falls back to same-origin for tests that don't need cross
+window.addEventListener("message", (e)=>{
+  try{
+    const d = typeof e.data === "string" ? JSON.parse(e.data) : e.data;
+    if(d && d.pickerInnerClick){
+      document.getElementById("outerStatus").textContent = "innerClicked:" + d.id;
+    }
+  }catch(_){}
+});
+</script>
+</body></html>

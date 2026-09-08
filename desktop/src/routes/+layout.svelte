@@ -11,7 +11,7 @@
   import AppHeader from "$lib/components/AppHeader.svelte";
   import { serverStatus, serverLog } from "$lib/stores";
   import { fetchHealth } from "$lib/api";
-  import { refreshModels, refreshRecipes, refreshFlows, refreshAccounts, refreshOverview } from "$lib/sync";
+  import { refreshModels, refreshRecipes, refreshAccounts, refreshOverview } from "$lib/sync";
 
   let { children } = $props();
 
@@ -48,7 +48,6 @@
       if (await waitForHealth()) {
         refreshModels();
         refreshRecipes();
-        refreshFlows();
         refreshAccounts();
         refreshOverview();
       }

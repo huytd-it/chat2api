@@ -153,7 +153,7 @@ def create_app(cfg: Config) -> FastAPI:
     pool = BrowserPool(cfg.browser_engine, cfg.pool_max_contexts,
                        max_profiles=cfg.pool_max_profiles)
     login_manager = LoginSessionManager()
-    router = Router(cfg.recipes_dir, pool, flows_dir=getattr(cfg, "flows_dir", None))
+    router = Router(cfg.recipes_dir, pool)
     router.reload()
 
     @asynccontextmanager
@@ -191,18 +191,21 @@ def create_app(cfg: Config) -> FastAPI:
         migrated = accounts.migrate_legacy(cfg.recipes_dir)
         if migrated:
             applog.log(f"account: gom {len(migrated)} account vào kho chung: {', '.join(migrated)}")
-        # Auto-convert recipes/*/recipe.yaml → data/flows/*/flow.json (chỉ tạo
-        # mới, không đụng flow người dùng đã sửa; cắt đứt, không ghi ngược).
-        try:
-            from . import flow_converter as flow_converter_mod
-
-            flow_counts = await asyncio.to_thread(
-                flow_converter_mod.migrate_all, cfg.recipes_dir,
-                getattr(cfg, "flows_dir", None) or (cfg.data_dir / "flows"))
-            if flow_counts.get("flows"):
-                applog.log("flow: convert {recipes} recipe → {flows} flow".format(**flow_counts))
-        except Exception as error:
-            applog.log(f"flow: migrate thất bại: {error}", "error")
+        # Flows → recipes safe migration (1): dùng helpers sẵn có, giữ source, không đè.
+        from .router import _has_branch_or_eval, _try_migrate_flows as _migrate_flows_safe
+        flows_dir = cfg.data_dir / "flows"
+        if flows_dir.exists():
+            # Alias check: model ids thay đổi sẽ log concrete mapping, không im lặng bỏ.
+            res = await asyncio.to_thread(_migrate_flows_safe, flows_dir, cfg.recipes_dir)
+            if res.get("migrated"):
+                applog.log(f"flows→recipes migrate: {', '.join(res['migrated'])}")
+            if res.get("skipped_existing"):
+                applog.log(f"flows→recipes skipped (đã có recipe): {', '.join(res['skipped_existing'])}")
+            if res.get("unsupported"):
+                # Branch/eval: chỉ legacy compat, báo explicit — không flatten im lặng.
+                applog.log(f"flows legacy branch/eval giữ compat (FlowRunner): {', '.join(res['unsupported'])}", "warn")
+            for err in res.get("errors") or []:
+                applog.log(f"flows migrate lỗi: {err}", "error")
         # Mirror đĩa vào DB *sau* migrate_legacy (để account vừa gom cũng vào kho)
         # và *trước* reload cuối (để provider dựng lại đọc được state đã lưu, ví
         # dụ số lượt dùng thử ẩn danh đã tiêu).
@@ -817,8 +820,7 @@ def register_admin(app: FastAPI, admin) -> None:
     from .agents import llm
     from . import jobs, settings
     from .schemas import (AccountLoginRequest, AddAccountRequest, ApiKeyCreateRequest,
-                           ComboCreateRequest, ComboUpdateRequest, FlowDuplicateRequest,
-                           FlowSaveRequest, FlowTestRequest, IntegrateRequest,
+                           ComboCreateRequest, ComboUpdateRequest, IntegrateRequest,
                            OpenAIProviderCreateRequest, OpenAIProviderUpdateRequest,
                            ProfileAccountRequest, ProfileCreateRequest,
                            ProfileOpenRequest, ProfileUpdateRequest, RecipeAnalyzeRequest,
@@ -1799,110 +1801,86 @@ def register_admin(app: FastAPI, admin) -> None:
         applog.log(f"browser: đóng thủ công {slug} ({closed} context)")
         return {"ok": True, "closed": closed}
 
-    # ------------------------------------------------------------- flows
-    # Module Flows kiểu n8n: mỗi flow con là data/flows/<slug>/flow.json,
-    # 1 flow = 1 model. Backend Recipe cũ vẫn chạy ngầm nhưng UI đã ẩn.
-
-    def _flows_dir(request: Request):
-        from . import flow_store as flow_store_mod
-
-        return flow_store_mod.flows_dir_of(request.app.state.cfg)
-
-    def _flow_slug_or_400(slug: str) -> str:
-        from . import flow_store as flow_store_mod
-
-        cleaned = (slug or "").strip().lower()
-        if not flow_store_mod.slug_ok(cleaned):
-            raise OpenAIError(400, "invalid_slug",
-                              "Slug chỉ gồm chữ thường, số và dấu -")
-        return cleaned
-
+    # Flows đã xoá — các endpoint cũ trả 410 để client biết migrate sang recipes.
     @admin.get("/flows")
     async def flow_list(request: Request):
-        from . import flow_store as flow_store_mod
-
-        items = await asyncio.to_thread(flow_store_mod.list_flows, _flows_dir(request))
-        return items
+        raise OpenAIError(410, "gone", "Flows đã xoá — dùng /admin/recipes (mọi flow giờ là recipe + BrowserRecipe).")
 
     @admin.get("/flows/{slug}")
     async def flow_detail(slug: str, request: Request):
-        from . import flow_store as flow_store_mod
-
-        cleaned = _flow_slug_or_400(slug)
-        data = await asyncio.to_thread(flow_store_mod.load_flow, _flows_dir(request), cleaned)
-        if data is None:
-            raise OpenAIError(404, "not_found", "Flow không tồn tại")
-        return data
+        raise OpenAIError(410, "gone", "Flows đã xoá — dùng /admin/recipes/{slug}/source.")
 
     @admin.put("/flows/{slug}")
-    async def flow_save(slug: str, body: FlowSaveRequest, request: Request):
-        from . import flow_store as flow_store_mod
-
-        cleaned = _flow_slug_or_400(slug)
-        payload = body.model_dump(exclude_none=True)
-        payload["slug"] = cleaned
-        try:
-            saved = await asyncio.to_thread(
-                flow_store_mod.save_flow, _flows_dir(request), cleaned, payload)
-        except ValueError as error:
-            raise OpenAIError(400, "invalid_flow", str(error)) from None
-        request.app.state.router.reload()
-        applog.log(f"flow: lưu {cleaned}")
-        return {"ok": True, "slug": cleaned, "flow": saved}
+    async def flow_save(slug: str, request: Request):
+        raise OpenAIError(410, "gone", "Flows đã xoá — dùng PUT /admin/recipes/{slug}.")
 
     @admin.delete("/flows/{slug}")
     async def flow_delete(slug: str, request: Request):
-        from . import flow_store as flow_store_mod
-
-        cleaned = _flow_slug_or_400(slug)
-        ok = await asyncio.to_thread(
-            flow_store_mod.delete_flow, _flows_dir(request), cleaned)
-        if not ok:
-            raise OpenAIError(404, "not_found", "Flow không tồn tại")
-        request.app.state.router.reload()
-        applog.log(f"flow: xóa {cleaned}", "warn")
-        return {"ok": True}
+        raise OpenAIError(410, "gone", "Flows đã xoá.")
 
     @admin.post("/flows/{slug}/duplicate")
-    async def flow_duplicate(slug: str, body: FlowDuplicateRequest, request: Request):
-        from . import flow_store as flow_store_mod
-
-        cleaned = _flow_slug_or_400(slug)
-        new_slug = _flow_slug_or_400(body.slug)
-        try:
-            saved = await asyncio.to_thread(
-                flow_store_mod.duplicate_flow, _flows_dir(request), cleaned, new_slug)
-        except FileNotFoundError:
-            raise OpenAIError(404, "not_found", "Flow không tồn tại") from None
-        except FileExistsError as error:
-            raise OpenAIError(409, "slug_taken", str(error)) from None
-        except ValueError as error:
-            raise OpenAIError(400, "invalid_slug", str(error)) from None
-        request.app.state.router.reload()
-        applog.log(f"flow: copy {cleaned} -> {new_slug}")
-        return {"ok": True, "slug": new_slug, "flow": saved}
+    async def flow_duplicate(slug: str, request: Request):
+        raise OpenAIError(410, "gone", "Flows đã xoá — tạo recipe mới bằng POST /admin/recipes.")
 
     @admin.post("/flows/{slug}/reload")
     async def flow_reload(slug: str, request: Request):
-        _flow_slug_or_400(slug)
-        request.app.state.router.reload()
-        applog.log(f"flow: reload {slug}")
-        return {"ok": True}
+        raise OpenAIError(410, "gone", "Flows đã xoá.")
 
     @admin.post("/flows/{slug}/test")
-    async def flow_test(slug: str, body: FlowTestRequest, request: Request):
-        """Chạy thử flow đã lưu: preflight từng node + run thật + postflight."""
-        from . import flow_store as flow_store_mod
-        from .trial import run_flow_trial
+    async def flow_test(slug: str, request: Request):
+        raise OpenAIError(410, "gone", "Flows đã xoá — dùng POST /admin/recipes/{slug}/test.")
 
-        cleaned = _flow_slug_or_400(slug)
-        data = await asyncio.to_thread(
-            flow_store_mod.load_flow, _flows_dir(request), cleaned)
-        if data is None:
-            raise OpenAIError(404, "not_found", "Flow không tồn tại")
-        n = max(1, min(int(body.n or 1), 4))
-        return await run_flow_trial(request.app.state.cfg, request.app.state.pool,
-                                    data, body.headed, body.prompt, n)
+    # ------------------------------------------------------------- picker — chọn selector trực tiếp trên headed browser
+    from .schemas import PickerCountRequest, PickerStartRequest
+
+    @admin.post("/picker/start")
+    async def picker_start(body: PickerStartRequest, request: Request):
+        """Mở headed browser trên profile đã chọn và cài overlay picker.
+
+        Picker highlight hover và capture click KHÔNG trigger action trang:
+        click được preventDefault + stopPropagation, kèm nút Cancel.
+        """
+        from . import picker as picker_mod
+
+        row = await asyncio.to_thread(__import__("chat2api.profiles", fromlist=["find"]).find, str(body.profile_id))
+        if row is None:
+            raise OpenAIError(400, "invalid_profile", "Profile không tồn tại")
+        try:
+            info = await picker_mod.start_picker(request.app.state.pool, row["name"], body.url, request.app.state.cfg)
+        except Exception as error:
+            raise OpenAIError(500, "picker_failed", str(error))
+        return info
+
+    @admin.post("/picker/{picker_id}/stop")
+    async def picker_stop(picker_id: str, request: Request):
+        from . import picker as picker_mod
+
+        ok = await picker_mod.stop_picker(request.app.state.pool, picker_id)
+        return {"ok": bool(ok)}
+
+    @admin.post("/picker/{picker_id}/count")
+    async def picker_count(picker_id: str, body: PickerCountRequest, request: Request):
+        from . import picker as picker_mod
+
+        try:
+            result = await picker_mod.count_selector(request.app.state.pool, picker_id, body.selector)
+        except KeyError:
+            raise OpenAIError(404, "not_found", "Picker không tồn tại hoặc đã đóng")
+        except Exception as error:
+            raise OpenAIError(400, "invalid_selector", str(error))
+        return result
+
+    @admin.post("/picker/{picker_id}/capture")
+    async def picker_capture(picker_id: str, request: Request):
+        from . import picker as picker_mod
+
+        try:
+            result = await picker_mod.capture_pick(request.app.state.pool, picker_id)
+        except KeyError:
+            raise OpenAIError(404, "not_found", "Picker không tồn tại hoặc đã đóng")
+        except TimeoutError:
+            raise OpenAIError(408, "picker_timeout", "Chưa chọn element — bấm vào trang rồi thử lại")
+        return result
 
     # ------------------------------------------------------------- combos
 

@@ -64,8 +64,9 @@ def _split_actions(action: Any) -> list[tuple[str, str]]:
 
 async def _count(page, selector: str) -> int:
     """Số element khớp; -1 khi selector sai cú pháp (Playwright ném)."""
+    from .selectors import resolve_locator as _resolve
     try:
-        return await page.locator(selector).count()
+        return await _resolve(page, selector).count()
     except Exception:
         return -1
 
@@ -95,7 +96,8 @@ async def _run_action_step(page, label: str, verb: str, selector: str,
     if n == 0:
         return _step(label, selector, FAIL, 0,
                      "không khớp element nào — các bước sau không soi được")
-    loc = page.locator(selector).first
+    from .selectors import resolve_locator as _resolve2
+    loc = _resolve2(page, selector).first
     try:
         await loc.wait_for(state="visible", timeout=10000)
     except Exception:
