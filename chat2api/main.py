@@ -1071,10 +1071,6 @@ def register_admin(app: FastAPI, admin) -> None:
     @admin.post("/record")
     async def record_start(body: RecordRequest, request: Request):
         cfg = request.app.state.cfg
-        if not llm.configured(cfg):
-            raise OpenAIError(503, "agent_not_configured",
-                              "Đặt AGENT_LLM_BASE_URL, AGENT_LLM_API_KEY, AGENT_LLM_MODEL "
-                              "để dùng tính năng record.")
         profile_row = await asyncio.to_thread(profiles.find, str(body.profile_id))
         if profile_row is None:
             raise OpenAIError(400, "invalid_profile", "Chọn một profile hợp lệ trước khi ghi thao tác.")
@@ -1114,11 +1110,14 @@ def register_admin(app: FastAPI, admin) -> None:
             raise OpenAIError(409, "invalid_job_state", "Job không ở trạng thái ghi thao tác")
 
     @admin.post("/record/{job_id}/finish")
-    async def record_finish(job_id: str, request: Request):
+    async def record_finish(job_id: str, request: Request, analyze: bool = False):
+        if analyze and not llm.configured(request.app.state.cfg):
+            raise OpenAIError(503, "agent_not_configured",
+                              "Chưa cấu hình LLM để sinh recipe. Chọn Lưu trace để phân tích bằng agent CLI.")
         try:
             return await jobs.finish_record(
                 job_id, request.app.state.cfg, request.app.state.pool,
-                request.app.state.router, request.app.state.login_manager)
+                request.app.state.router, request.app.state.login_manager, analyze=analyze)
         except jobs.JobNotFound:
             raise OpenAIError(404, "not_found", "Job không tồn tại")
         except jobs.InvalidJobState:

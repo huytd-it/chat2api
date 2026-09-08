@@ -1,0 +1,30 @@
+slug: grok
+url: https://grok.com/
+prompt:
+  input_selector: '#textarea'
+  input_mode: fill
+  submit: Enter
+response:
+  done_signal: &id001
+    type: copy_button
+    scope: after
+    use_copy_result: true
+  last_message_selector: .msg
+models:
+- id: default
+  capability: chat
+  flow: text
+flows:
+  text:
+    prompt:
+      input_selector: '#textarea'
+      input_mode: fill
+      submit: Enter
+    response:
+      done_signal: *id001
+      last_message_selector: .msg
+    type: text
+login:
+  strategy: round_robin
+  quota: 50
+keep_context: true

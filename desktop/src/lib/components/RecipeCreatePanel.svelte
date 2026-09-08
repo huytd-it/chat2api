@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { ensureProfiles, profilesLoading, profilesError, refreshProfiles } from "../sync";
+  onMount(() => { void ensureProfiles(); });
   import { apiKey, showToast } from "../stores";
   import {
     FLOW_KINDS,
@@ -211,9 +214,18 @@
       <div class="min-w-0">
         <div class="flex items-center gap-2 text-sm font-semibold"><RecordIcon size={16} class="text-primary" aria-hidden="true" /> Ghi thao tác thật</div>
         <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
-          Khi AI đoán sai DOM: nhập URL ở <span class="font-medium text-foreground">Trang đích</span>, chọn profile bên trên rồi bấm ghi — một cửa sổ Chromium mở ra, bạn gõ prompt / gửi / bấm Copy như dùng thật. AI sao chép đúng các selector bị tác động để sinh recipe và tự chạy thử.
+          Khi AI đoán sai DOM: nhập URL ở <span class="font-medium text-foreground">Trang đích</span>, chọn profile để ghi bên dưới rồi bấm ghi — một cửa sổ Chromium mở ra, bạn gõ prompt / gửi / bấm Copy như dùng thật. AI sao chép đúng các selector bị tác động để sinh recipe và tự chạy thử.
           {#if selectedProfileId === ANON_RCP}<span class="font-medium text-warning"> Cần chọn profile trước.</span>{/if}
         </p>
+      </div>
+      <div class="grid gap-1.5">
+        <label for="rcp-record-profile" class="text-sm font-medium">Profile để ghi <span class="text-destructive">*</span></label>
+        <select id="rcp-record-profile" class="h-9 w-full rounded-lg border border-input bg-background px-2.5 text-sm focus-visible:outline-ring" bind:value={selectedProfileId} disabled={analyzing || !$profiles.length}>
+          <option value={ANON_RCP} disabled>{$profilesLoading ? "Đang tải profiles…" : $profilesError ? "Không tải được profiles" : $profiles.length ? "Chọn profile…" : "Chưa có profile — tạo trong mục Profiles"}</option>
+          {#each $profiles as p (p.id)}<option value={String(p.id)}>{p.name}</option>{/each}
+        </select>
+        {#if $profilesError}<p class="text-xs text-destructive" role="alert">{$profilesError}</p>{/if}
+        <Button type="button" variant="ghost" size="sm" disabled={$profilesLoading} onclick={() => refreshProfiles()}>{$profilesLoading ? "Đang tải…" : "Tải lại profiles"}</Button>
       </div>
       <RecordSessionPanel
         url={form.url}

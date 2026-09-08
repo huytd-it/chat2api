@@ -1,11 +1,12 @@
 slug: grok-web
 url: https://grok.com/
 prompt:
-  input_selector: '#textarea'
+  input_selector: rich-textarea .ProseMirror[contenteditable="true"]
   input_mode: fill
   submit: Enter
 response:
-  last_message_selector: .msg
+  last_message_selector: '#grok-app-root > div > div > div > div:nth-of-type(4) >
+    div:nth-of-type(2) > div > ul > li > div > a'
   done_signal:
     type: copy_button
     scope: after

@@ -86,10 +86,7 @@
       <div class="recipe-fields cols-selector">
         <label class="recipe-field" for={id("input-sel")}>
           <span>Selector ô nhập <b>*</b></span>
-          <div class="flex gap-1.5">
-            <Input id={id("input-sel")} class="font-data flex-1" placeholder="#prompt-textarea" bind:value={form.inputSelector} />
-            <InlineSelectorPicker url={form.url} bind:value={form.inputSelector} label="ô nhập" />
-          </div>
+          <InlineSelectorPicker id={id("input-sel")} placeholder="#prompt-textarea" url={form.url} bind:value={form.inputSelector} label="ô nhập" />
         </label>
         <label class="recipe-field" for={id("input-mode")}>
           <span>Phương thức nhập</span>
@@ -102,10 +99,7 @@
       <div class="recipe-fields cols-selector">
         <label class="recipe-field" for={id("submit-sel")}>
           <span>Selector nút gửi {form.submitMode === "click" ? "*" : ""}</span>
-          <div class="flex gap-1.5">
-            <Input id={id("submit-sel")} class="font-data flex-1" disabled={form.submitMode !== "click"} placeholder="button[data-testid='send-button']" bind:value={form.submitSelector} />
-            <InlineSelectorPicker url={form.url} bind:value={form.submitSelector} label="nút gửi" disabled={form.submitMode !== "click"} />
-          </div>
+          <InlineSelectorPicker id={id("submit-sel")}  placeholder="button[data-testid='send-button']" url={form.url} bind:value={form.submitSelector} label="nút gửi" disabled={form.submitMode !== "click"} />
         </label>
         <label class="recipe-field" for={id("submit-mode")}>
           <span>Action gửi</span>
@@ -124,10 +118,7 @@
       </div>
       <label class="recipe-field" for={id("reply-sel")}>
         <span>Selector tin nhắn AI <b>*</b></span>
-        <div class="flex gap-1.5">
-          <Input id={id("reply-sel")} class="font-data flex-1" placeholder=".message.assistant" bind:value={form.lastMessageSelector} />
-          <InlineSelectorPicker url={form.url} bind:value={form.lastMessageSelector} label="tin nhắn AI" />
-        </div>
+        <InlineSelectorPicker id={id("reply-sel")} placeholder=".message.assistant" url={form.url} bind:value={form.lastMessageSelector} label="tin nhắn AI" />
         <small>Luôn đọc phần tử cuối cùng khớp selector.</small>
       </label>
       <div class="recipe-fields cols-2">
@@ -145,10 +136,7 @@
         </label>
         <label class="recipe-field" for={id("done-sel")}>
           <span>Selector tín hiệu {form.doneType === "copy_button" ? "(tùy chọn)" : form.doneType === "stable_text" ? "(không dùng)" : "*"}</span>
-          <div class="flex gap-1.5">
-            <Input id={id("done-sel")} class="font-data flex-1" disabled={form.doneType === "stable_text"} placeholder={form.doneType === "copy_button" ? "để trống dùng bộ đếm Copy" : ".typing-indicator"} bind:value={form.doneSelector} />
-            <InlineSelectorPicker url={form.url} bind:value={form.doneSelector} label="tín hiệu" disabled={form.doneType === "stable_text"} />
-          </div>
+          <InlineSelectorPicker id={id("done-sel")}  placeholder={form.doneType === "copy_button" ? "để trống dùng bộ đếm Copy" : ".typing-indicator"} url={form.url} bind:value={form.doneSelector} label="tín hiệu" disabled={form.doneType === "stable_text"} />
         </label>
       </div>
       <div class="recipe-fields cols-3">
@@ -189,10 +177,7 @@
       <div class="grid gap-2">
         <label class="recipe-field" for={id("sel-sel")}>
           <span>Selector dropdown (chờ hiện trước khi bấm)</span>
-          <div class="flex gap-1.5">
-            <Input id={id("sel-sel")} class="font-data flex-1" placeholder="#model-dropdown" bind:value={form.selectModelSelector} />
-            <InlineSelectorPicker url={form.url} bind:value={form.selectModelSelector} label="dropdown model" />
-          </div>
+          <InlineSelectorPicker id={id("sel-sel")} placeholder="#model-dropdown" url={form.url} bind:value={form.selectModelSelector} label="dropdown model" />
           <small>Để trống nếu site không có dropdown riêng.</small>
         </label>
         <div class="recipe-field">
@@ -273,7 +258,7 @@
           <Select.Content><Select.Item value="none" label="Không thao tác">Không thao tác</Select.Item><Select.Item value="selector" label="Bấm selector">Bấm selector</Select.Item><Select.Item value="url" label="Mở URL">Mở URL</Select.Item></Select.Content>
         </Select.Root>
       </label>
-      {#if form.newChatMode === "selector"}<label class="recipe-field" for={id("newchat-sel")}><span>Selector chat mới *</span><div class="flex gap-1.5"><Input id={id("newchat-sel")} class="font-data flex-1" placeholder="#new-chat" bind:value={form.newChatSelector} /><InlineSelectorPicker url={form.url} bind:value={form.newChatSelector} label="chat mới" /></div></label>{/if}
+      {#if form.newChatMode === "selector"}<label class="recipe-field" for={id("newchat-sel")}><span>Selector chat mới *</span><InlineSelectorPicker id={id("newchat-sel")} placeholder="#new-chat" url={form.url} bind:value={form.newChatSelector} label="chat mới" /></label>{/if}
       {#if form.newChatMode === "url"}<label class="recipe-field" for={id("newchat-url")}><span>URL chat mới *</span><Input id={id("newchat-url")} class="font-data" placeholder="https://chat.example.com/new" bind:value={form.newChatUrl} /></label>{/if}
       <div class="recipe-fields cols-3 timing-grid">
         <label class="recipe-field" for={id("ready-delay")}><span>ready delay</span><Input id={id("ready-delay")} type="number" min="0" placeholder="1200" bind:value={form.readyDelayMs} /><small>ms</small></label>

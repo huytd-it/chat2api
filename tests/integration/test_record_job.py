@@ -7,6 +7,8 @@ người dùng chọn (`job["profile"]` = {"id","name"}) phải được resolve
 """
 
 import asyncio
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -43,6 +45,35 @@ class FakeRecordLoginManager:
 class FakePool:
     async def drop(self, slug: str) -> None:
         pass
+
+
+async def test_finish_trace_only_without_llm(db, tmp_path, monkeypatch):
+    from chat2api.agents import analyzer
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("Trace-only recording must not call the analyzer")
+
+    monkeypatch.setattr(analyzer, "build_recipe_from_trace", forbidden)
+    cfg = SimpleNamespace(recipes_dir=tmp_path / "recipes", traces_dir=tmp_path / "traces")
+    manager = FakeRecordLoginManager()
+    job_id = await _start_recording(cfg, manager, tmp_path)
+    event = {"kind": "click", "selector": "#send", "flow": "text"}
+    manager._sessions[job_id] = SimpleNamespace(trace=[event], page=None)
+    completed = []
+
+    async def complete(session_id):
+        completed.append(session_id)
+        manager._sessions.pop(session_id)
+        return tmp_path / "state.json"
+
+    manager.complete = complete
+    result = await jobs.finish_record(job_id, cfg, FakePool(), FakeRouter(), manager, analyze=False)
+    assert result["status"] == "recorded"
+    assert completed == [job_id]
+    result = await jobs.get(job_id)
+    assert json.loads(Path(result["trace_path"]).read_text(encoding="utf-8"))["events"] == [event]
+    assert Path(result["trace_md_path"]).is_file()
+    assert not list(cfg.recipes_dir.glob("*/recipe.yaml"))
 
 
 @pytest.fixture

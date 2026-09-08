@@ -99,6 +99,10 @@ async def test_real_picker_nested_and_cross_origin_capture(site, tmp_path):
         try:
             page = picker_mod.PICKERS[pid]["page"]
             await page.wait_for_timeout(500)
+            # A capture before clicking can time out; the same picker must
+            # still accept the subsequent real browser selection.
+            with pytest.raises(TimeoutError):
+                await picker_mod.capture_pick(None, pid, timeout=0.01)
             # click nested deepBtn via frame locator (authoritative path)
             from chat2api.selectors import resolve_locator
             # need to ensure picker overlay does not block real click? We use locator click on target directly via page, picker captures

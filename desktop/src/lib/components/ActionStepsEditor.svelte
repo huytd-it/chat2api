@@ -86,8 +86,7 @@
             <option value="Enter"></option><option value="Escape"></option><option value="Tab"></option><option value="Space"></option>
           </datalist>
         {:else}
-          <Input class="h-8 flex-1 font-data" placeholder={s.kind==="select" ? "select: option value" : "#dropdown"} bind:value={steps[i].arg} />
-          <InlineSelectorPicker {url} bind:value={steps[i].arg} label={label} />
+          <InlineSelectorPicker {url} bind:value={steps[i].arg} label={label} placeholder={s.kind==="select" ? "select: option value" : "#dropdown"} />
         {/if}
 
         <div class="step-actions">

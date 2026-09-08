@@ -14,7 +14,7 @@ from .agents.analyzer import integrate
 LOGIN_TIMEOUT_SECONDS = 600
 RECORD_TIMEOUT_SECONDS = 1800
 MAX_LOGIN_ATTEMPTS = 2
-TERMINAL_STATUSES = {"ok", "failed", "cancelled", "login_timeout", "record_timeout"}
+TERMINAL_STATUSES = {"ok", "recorded", "failed", "cancelled", "login_timeout", "record_timeout"}
 CANCELLABLE_STATUSES = {"running", "waiting_login", "resuming", "recording", "resuming_record"}
 JOBS: dict[str, dict] = {}
 
@@ -352,6 +352,17 @@ async def _finish_record(job: dict, cfg, pool, router, login_manager) -> None:
                 _cleanup_staging(job)
         return
 
+    if not job.get("analyze_record", True):
+        async with job["lock"]:
+            if job["status"] != "resuming_record" or job.get("cancel_claimed"):
+                return
+            job["status"] = "recorded" if job.get("trace_path") and job.get("trace_md_path") else "failed"
+            job["log"].append("Đã lưu trace .json và .md để phân tích bằng agent CLI."
+                              if job["status"] == "recorded" else "Không lưu được trace.")
+            _save(job)
+            _cleanup_staging(job)
+        return
+
     analyze_key = f"{job['id']}__record_analyze"
     try:
         from .agents.analyzer import build_recipe_from_trace
@@ -641,7 +652,7 @@ async def set_record_segment(job_id: str, flow: str | None, action: str) -> dict
         return _snapshot(job, default_kind="record", can_finish_record=True)
 
 
-async def finish_record(job_id: str, cfg, pool, router, login_manager) -> dict:
+async def finish_record(job_id: str, cfg, pool, router, login_manager, *, analyze: bool = True) -> dict:
     job = JOBS.get(job_id)
     if job is None:
         raise JobNotFound
@@ -654,6 +665,7 @@ async def finish_record(job_id: str, cfg, pool, router, login_manager) -> dict:
         if job["status"] != "recording" or job.get("record_timeout_claimed") or job.get("cancel_claimed"):
             raise InvalidJobState
         job["status"] = "resuming_record"
+        job["analyze_record"] = analyze
         # Đoạn còn mở lúc bấm Hoàn tất coi như kết thúc tại đây.
         job["segment"] = None
         for seg in job.get("segments") or []:
@@ -665,7 +677,7 @@ async def finish_record(job_id: str, cfg, pool, router, login_manager) -> dict:
         if t and not t.done():
             t.cancel()
         job["timeout_task"] = None
-        job["log"].append("Đã bấm Hoàn tất — đang sinh recipe từ selector đã ghi…")
+        job["log"].append("Đang sinh recipe từ selector đã ghi…" if analyze else "Đang lưu trace…")
         cont = asyncio.create_task(_finish_record(job, cfg, pool, router, login_manager))
         job["task"] = cont
     try:

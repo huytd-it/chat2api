@@ -27,7 +27,7 @@
   let { url, profileId, slug = null, label = "Ghi thao tác", disabled = false, onSuccess }: Props = $props();
 
   // Khớp jobs.TERMINAL_STATUSES ở backend.
-  const TERMINAL = ["ok", "failed", "cancelled", "login_timeout", "record_timeout"];
+  const TERMINAL = ["ok", "recorded", "failed", "cancelled", "login_timeout", "record_timeout"];
 
   let jobId = $state<string | null>(null);
   let status = $state("idle");
@@ -108,7 +108,7 @@
 
   function show(j: { status: string }) {
     status = j.status;
-    kind = j.status === "ok" ? "success"
+    kind = ["ok", "recorded"].includes(j.status) ? "success"
       : TERMINAL.includes(j.status) ? "error"
       : "busy";
     if (j.status === "recording")
@@ -116,7 +116,9 @@
         ? `Đang ghi đoạn “${flowLabel(segment)}” — thao tác trên trang, xong bấm Kết thúc đoạn.`
         : "Chromium đã sẵn sàng — chọn loại thao tác bên dưới rồi bắt đầu ghi đoạn.";
     else if (j.status === "resuming_record")
-      statusText = "Đang gửi các selector vừa ghi cho AI sinh recipe…";
+      statusText = "Đang hoàn tất phiên ghi…";
+    else if (j.status === "recorded")
+      statusText = "Đã lưu trace — tải .md hoặc .json bên dưới để phân tích bằng agent CLI.";
     else if (j.status === "ok")
       statusText = "Xong — recipe đã sinh từ thao tác và chạy thử đạt.";
     else if (j.status === "record_timeout")
@@ -213,12 +215,12 @@
     }
   }
 
-  async function finish() {
+  async function finish(analyze = false) {
     const id = jobId;
     if (!id) return;
     actionBusy = true;
     try {
-      await finishRecord($apiKey, id);
+      await finishRecord($apiKey, id, analyze);
       show({ status: "resuming_record" });
       startPolling(id);
     } catch (e) {
@@ -329,9 +331,10 @@
       </fieldset>
 
       <div class="flex flex-wrap gap-2">
-        <Button size="sm" disabled={actionBusy || segmentBusy !== null} onclick={finish}>
-          <Check /> Hoàn tất
+        <Button size="sm" disabled={actionBusy || segmentBusy !== null} onclick={() => finish(false)}>
+          <Check /> Lưu trace
         </Button>
+        <Button size="sm" variant="outline" disabled={actionBusy || segmentBusy !== null} onclick={() => finish(true)}><Sparkle /> Lưu và phân tích bằng LLM</Button>
         <Button size="sm" variant="outline" disabled={actionBusy} onclick={cancel}><X /> Hủy</Button>
       </div>
     </div>

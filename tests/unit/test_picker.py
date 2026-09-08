@@ -1,9 +1,77 @@
 """Picker count MUST use Playwright locator, not querySelectorAll; TTL/cleanup/hold."""
 
 import asyncio
+from dataclasses import dataclass
+from types import SimpleNamespace
 import pytest
 
 from chat2api import picker as picker_mod
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_request", [False, True])
+async def test_capture_retry_after_timeout_or_disconnect(cancel_request):
+    future = asyncio.get_running_loop().create_future()
+    info = {"page": FakePage(), "future": future}
+    picker_mod.PICKERS["retry"] = info
+    try:
+        if cancel_request:
+            request = asyncio.create_task(picker_mod.capture_pick(None, "retry"))
+            await asyncio.sleep(0)
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+        else:
+            with pytest.raises(TimeoutError):
+                await picker_mod.capture_pick(None, "retry", timeout=0.001)
+        assert not future.done()
+        await picker_mod._handle_pick("retry", {"selector": "#chosen"}, None)
+        result = await picker_mod.capture_pick(None, "retry", timeout=0.1)
+        assert result["best"] == "#chosen"
+        assert info["future"] is not future
+        assert not info["future"].done()
+    finally:
+        picker_mod.PICKERS.pop("retry", None)
+
+
+@pytest.mark.asyncio
+async def test_ttl_rechecks_activity_before_closing(monkeypatch, tmp_path):
+    from chat2api import profiles
+
+    @dataclass
+    class Profile:
+        name: str = "ttl-profile"
+        headless: bool = True
+
+    waits = asyncio.Queue()
+
+    async def controlled_sleep(delay):
+        resume = asyncio.Event()
+        await waits.put(resume)
+        await resume.wait()
+
+    monkeypatch.setattr(profiles, "find", lambda name: {"name": name})
+    monkeypatch.setattr(profiles, "ensure_profile", lambda *args: Profile())
+    monkeypatch.setattr(picker_mod.asyncio, "sleep", controlled_sleep)
+    pool = FakePool()
+    result = await picker_mod.start_picker(pool, "ttl-profile", "", SimpleNamespace(profiles_dir=tmp_path))
+    pid = result["picker_id"]
+    info = picker_mod.PICKERS[pid]
+    try:
+        first_wait = await asyncio.wait_for(waits.get(), 1)
+        with pytest.raises(TimeoutError):
+            await picker_mod.capture_pick(pool, pid, timeout=0.001)
+        first_wait.set()
+        second_wait = await asyncio.wait_for(waits.get(), 1)
+        assert pid in picker_mod.PICKERS
+        assert not pool.closed_tabs
+        info["created_at"] -= picker_mod.PICKER_TTL_SECONDS + 1
+        second_wait.set()
+        await asyncio.wait_for(info["ttl_task"], 1)
+        assert pid not in picker_mod.PICKERS
+        assert pool.closed_tabs == [("ttl-profile", info["tab_key"])]
+    finally:
+        await picker_mod.stop_picker(pool, pid)
 
 
 class FakeLocator:

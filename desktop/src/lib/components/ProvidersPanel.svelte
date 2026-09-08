@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { ensureProfiles, profilesLoading, profilesError } from "../sync";
+  onMount(() => { void ensureProfiles(); });
   import { apiKey, showToast } from "../stores";
   import { profiles, recipes, recipesLoading, openaiProviders, openaiProvidersLoading, refreshAfterRecipeChange, refreshAfterRecipeDelete, refreshProfiles, refreshRecipes, refreshOpenAIProviders, refreshAfterOpenAIChange } from "../sync";
   import { closeRecipeBrowser, deleteRecipe, fetchJob, jobAction, reanalyzeRecipe, reloadRecipe, renameRecipe, type RecipeInfo, createOpenAIProvider, updateOpenAIProvider, deleteOpenAIProvider, type OpenAIProviderInfo } from "../api";
@@ -166,7 +169,6 @@
   let recordSlug = $state<string | null>(null);
   let recordUrl = $state("");
   let recordProfileId = $state<string>("");
-  const recordProfileName = $derived($profiles.find((p) => String(p.id) === recordProfileId)?.name ?? "");
   function openRecord(slug: string, url: string) {
     recordSlug = slug;
     recordUrl = url;
@@ -463,12 +465,12 @@
       </div>
       <div class="grid gap-1.5">
         <label for="record-profile" class="text-sm font-medium">Profile <span class="text-destructive">*</span></label>
-        <Select.Root type="single" bind:value={recordProfileId}>
-          <Select.Trigger id="record-profile" class="h-9 w-full">{recordProfileName || "Chọn profile…"}</Select.Trigger>
-          <Select.Content>
-            {#each $profiles as p (p.id)}<Select.Item value={String(p.id)} label={p.name}>{p.name}</Select.Item>{/each}
-          </Select.Content>
-        </Select.Root>
+        <select id="record-profile" class="h-9 w-full rounded-lg border border-input bg-background px-2.5 text-sm focus-visible:outline-ring" bind:value={recordProfileId} disabled={!$profiles.length}>
+          <option value="" disabled>{$profilesLoading ? "Đang tải profiles…" : $profilesError ? "Không tải được profiles" : $profiles.length ? "Chọn profile…" : "Chưa có profile — tạo trong mục Profiles"}</option>
+          {#each $profiles as p (p.id)}<option value={String(p.id)}>{p.name}</option>{/each}
+        </select>
+        {#if $profilesError}<p class="text-xs text-destructive" role="alert">{$profilesError}</p>{/if}
+        <Button type="button" variant="ghost" size="sm" disabled={$profilesLoading} onclick={() => refreshProfiles()}>{$profilesLoading ? "Đang tải…" : "Tải lại profiles"}</Button>
         <p class="text-xs text-muted-foreground">Phiên ghi chạy trong profile này — đăng nhập giữa chừng cũng được lưu lại.</p>
       </div>
       {#key recordSlug}

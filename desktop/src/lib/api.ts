@@ -826,9 +826,9 @@ export async function setRecordSegment(
   return asJson(r);
 }
 
-export async function finishRecord(key: string, jobId: string): Promise<JobStatus> {
+export async function finishRecord(key: string, jobId: string, analyze = false): Promise<JobStatus> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/record/" + encodeURIComponent(jobId) + "/finish", {
+  const r = await fetch(base + "/admin/record/" + encodeURIComponent(jobId) + "/finish?analyze=" + analyze, {
     method: "POST",
     headers: headers(key),
   });

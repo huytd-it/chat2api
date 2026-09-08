@@ -391,12 +391,16 @@ async def start_picker(pool, profile_name: str, url: str, cfg) -> dict:
                         "created_at": created_at, "hold_ctx": hold_ctx, "ttl_task": None}
 
         async def _ttl_close():
-            await asyncio.sleep(PICKER_TTL_SECONDS)
-            if pid in PICKERS:
+            while pid in PICKERS:
+                remaining = PICKER_TTL_SECONDS - (_time.monotonic() - PICKERS[pid]["created_at"])
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+                    continue
                 try:
                     await stop_picker(pool, pid)
                 except Exception:
                     pass
+                return
         try:
             PICKERS[pid]["ttl_task"] = asyncio.create_task(_ttl_close())
         except Exception:
@@ -540,7 +544,9 @@ async def capture_pick(pool, picker_id: str, timeout: float = 120) -> dict:
     if fut is None:
         raise KeyError(picker_id)
     try:
-        result = await asyncio.wait_for(fut, timeout=timeout)
+        # A request timeout/disconnect must not cancel the session's shared
+        # future: the browser can still deliver a selection for the next retry.
+        result = await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
     except asyncio.TimeoutError:
         raise TimeoutError("Chưa chọn element — bấm vào trang rồi thử lại")
     if result is None:
