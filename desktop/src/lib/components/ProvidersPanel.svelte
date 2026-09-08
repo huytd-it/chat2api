@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { ensureProfiles, profilesLoading, profilesError } from "../sync";
-  onMount(() => { void ensureProfiles(); });
+  import { ensureProfiles, ensureOpenAIProviders, profilesLoading, profilesError } from "../sync";
+  // Panel tự nạp dữ liệu của mình: ở route /providers không có
+  // refreshIntegrations() chạy kèm nên khối OpenAI sẽ trống nếu chờ trang cha.
+  onMount(() => { void ensureProfiles(); void ensureOpenAIProviders(); });
   import { apiKey, showToast } from "../stores";
   import { profiles, recipes, recipesLoading, openaiProviders, openaiProvidersLoading, refreshAfterRecipeChange, refreshAfterRecipeDelete, refreshProfiles, refreshRecipes, refreshOpenAIProviders, refreshAfterOpenAIChange } from "../sync";
   import { closeRecipeBrowser, deleteRecipe, fetchJob, jobAction, reanalyzeRecipe, reloadRecipe, renameRecipe, type RecipeInfo, createOpenAIProvider, updateOpenAIProvider, deleteOpenAIProvider, type OpenAIProviderInfo } from "../api";

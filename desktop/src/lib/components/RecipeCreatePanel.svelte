@@ -59,6 +59,14 @@
   /** Flow đem ra chạy thử. `select_model` chỉ chạy tới bước chọn model rồi
    * dừng — hữu ích khi đang dò đúng chuỗi bấm mở dropdown. */
   let testFlow = $state<FlowKind>("text");
+  /** Model đem ra chạy thử. Rỗng = để server chọn model đầu phục vụ flow —
+   * recipe nhiều model (mỗi model một option trong dropdown) thì phải chỉ đích
+   * danh, nếu không chỉ model đầu danh sách được soi. */
+  let testModel = $state("");
+  const testModels = $derived(form.models.map((id) => id.trim()).filter(Boolean));
+  $effect(() => {
+    if (testModel && !testModels.includes(testModel)) testModel = "";
+  });
   let testResult = $state<TrialResult | null>(null);
   let analyzeError = $state("");
   let analyzeLog = $state<string[]>([]);
@@ -132,7 +140,7 @@
     const spec = buildSpec();
     if (!spec) { showToast(form.error); return; }
     testing = true; testResult = null;
-    try { testResult = await testRecipe($apiKey, spec, { headed: headedTest, flow: testFlow }); }
+    try { testResult = await testRecipe($apiKey, spec, { headed: headedTest, flow: testFlow, model: testModel }); }
     catch (e) { testResult = { ok: false, reply: "", flow: testFlow, error: (e as Error).message }; }
     finally { testing = false; }
   }
@@ -286,6 +294,21 @@
           {#each FLOW_KINDS as kind (kind)}<option value={kind}>{flowLabel(kind)}</option>{/each}
         </datalist>
       </label>
+      {#if testModels.length > 1}
+        <label class="flex items-center gap-2 text-sm">
+          Model
+          <!-- Recipe nhiều model thì mỗi model một đường bấm riêng; không chọn
+               ở đây thì chỉ model đầu danh sách được soi. -->
+          <select
+            bind:value={testModel}
+            aria-label="Model đem ra chạy thử"
+            class="h-8 w-44 rounded-md border border-input bg-background px-2 font-data text-sm"
+          >
+            <option value="">Model đầu (mặc định)</option>
+            {#each testModels as id (id)}<option value={id}>{id}</option>{/each}
+          </select>
+        </label>
+      {/if}
     </div>
     <div class="flex flex-wrap gap-2">
       <Button type="button" variant="ghost" size="sm" disabled={testing || creating || analyzing} onclick={() => { resetForm(); form.error=""; testResult=null; analyzeError=""; analyzeLog=[]; }}><Sliders /> Đặt lại</Button>

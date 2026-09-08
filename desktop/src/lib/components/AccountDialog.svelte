@@ -2,8 +2,9 @@
   // Một dialog duy nhất cho mọi cách thêm account: mở từ hàng recipe (domain
   // điền sẵn, khoá lại), hay mở độc lập từ panel Profile (domain gõ tay, chọn
   // từ dropdown, hoặc để trống cho server tự dò).
+  import { onMount } from "svelte";
   import { apiKey, showToast } from "../stores";
-  import { domains, profiles, refreshAccounts, refreshDomains, refreshProfiles } from "../sync";
+  import { domains, profiles, ensureDomains, ensureProfiles, refreshAccounts, refreshDomains, refreshProfiles } from "../sync";
   import {
     addProfileAccount,
     cancelAccountLogin,
@@ -52,6 +53,11 @@
 
   const usingProfile = $derived(profileName !== "");
   const opened = $derived(sessionId !== null || profileId !== null);
+
+  onMount(() => {
+    void ensureProfiles();
+    void ensureDomains();
+  });
 
   async function openBrowser() {
     const target = host.trim().toLowerCase();
@@ -189,7 +195,7 @@
           list="known-domains"
           placeholder="chat.qwen.ai — để trống để server tự dò"
           bind:value={host}
-          disabled={lockDomain || opened}
+          disabled={lockDomain || (!usingProfile && opened)}
         />
         <datalist id="known-domains">
           {#each $domains as d (d.host)}

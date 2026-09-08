@@ -113,17 +113,26 @@ async def _run_action_step(page, label: str, verb: str, selector: str,
     return _step(label, selector, WARN if n > 1 else OK, n, detail)
 
 
-def _model_of(recipe: dict, flow: str) -> dict:
+def _model_of(recipe: dict, flow: str, model_id: str | None = None) -> dict | None:
     """Model chạy flow này — chọn flow chính là chọn model tương ứng.
 
     Đây là chiều ngược của `models[].flow`: bảng báo cáo phải soi đúng đường
     bấm của model thật sự phục vụ flow đó, chứ không phải model đầu danh sách.
+
+    `model_id` là lựa chọn tường minh của người dùng và thắng mọi suy đoán:
+    recipe khai nhiều model cùng flow (mỗi model một option trong dropdown) thì
+    chỉ cách này mới soi được đường bấm của model thứ hai trở đi. Nhận cả `id`
+    trần lẫn dạng công khai `slug/id`. Trả `None` khi id đó không có trong
+    recipe — người gọi báo lỗi thay vì lặng lẽ thử nhầm model.
     """
     from .flows import flows_of
 
     models = [m for m in (recipe.get("models") or []) if isinstance(m, dict)]
     if not models:
         return {}
+    if model_id:
+        wanted = model_id.split("/", 1)[1] if "/" in model_id else model_id
+        return next((m for m in models if str(m.get("id") or "") == wanted), None)
     if flow != PREFLIGHT_ONLY:
         for m in models:
             if flow in flows_of(m):
@@ -476,7 +485,8 @@ def _trial_selector(ntype: str, params: dict) -> str | None:
 
 
 async def run_trial(cfg, pool, recipe: dict, headed: bool, flow: str = "text",
-                    prompt: str | None = None) -> dict[str, Any]:
+                    prompt: str | None = None,
+                    model_id: str | None = None) -> dict[str, Any]:
     """Chạy thử `recipe` (chưa ghi đĩa) cho đúng một flow, báo cáo từng bước."""
     from .providers.browser_recipe import BrowserRecipe
 
@@ -492,7 +502,12 @@ async def run_trial(cfg, pool, recipe: dict, headed: bool, flow: str = "text",
         return {"ok": False, "flow": flow, "reply": "", "steps": [],
                 "error": f"recipe chưa khai báo flow '{flow}' — đang có: {known}"}
 
-    model = _model_of(trial_recipe, flow)
+    model = _model_of(trial_recipe, flow, model_id)
+    if model is None:
+        known = ", ".join(str(m.get("id") or "?") for m in (trial_recipe.get("models") or [])
+                          if isinstance(m, dict)) or "(chưa khai model nào)"
+        return {"ok": False, "flow": flow, "reply": "", "steps": [],
+                "error": f"recipe không có model '{model_id}' — đang có: {known}"}
     is_media = _is_media(runner, flow) and flow != PREFLIGHT_ONLY
     text = prompt or (DEFAULT_MEDIA_PROMPT if is_media else DEFAULT_TEXT_PROMPT)
     steps: list[dict[str, Any]] = []

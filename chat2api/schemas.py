@@ -195,12 +195,15 @@ class RecipeTestRequest(RecipeManualSpec):
     # Prompt riêng cho lượt thử; để trống thì dùng mặc định theo flow. KHÔNG
     # đặt tên `prompt` — khóa đó đã là `RecipePromptSpec` của chính recipe.
     test_prompt: str | None = None
+    # Model đem ra thử. Để trống = model đầu tiên phục vụ flow (hành vi cũ).
+    # Nhận cả `id` trần lẫn dạng công khai `slug/id`.
+    model: str | None = None
 
     def to_recipe_dict(self) -> dict:
         # Tuỳ chọn của lượt thử không phải một phần của recipe; để lọt vào là
         # `validate_recipe` soi một dict không giống thứ sẽ được ghi xuống đĩa.
         data = super().to_recipe_dict()
-        for key in ("headed", "flow", "test_prompt"):
+        for key in ("headed", "flow", "test_prompt", "model"):
             data.pop(key, None)
         return data
 
@@ -265,6 +268,8 @@ class RecipeEditTestRequest(RecipeEditRequest):
     flow: str = "text"
     # Prompt riêng cho lượt thử; để trống thì dùng mặc định theo flow.
     test_prompt: str | None = None
+    # Model đem ra thử. Để trống = model đầu tiên phục vụ flow (hành vi cũ).
+    model: str | None = None
 
 
 class AddAccountRequest(BaseModel):

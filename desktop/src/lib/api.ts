@@ -711,6 +711,9 @@ export interface TrialOptions {
   flow?: FlowKind;
   /** Prompt riêng; để trống thì server dùng mặc định theo flow. */
   testPrompt?: string;
+  /** Model đem ra thử (`id` trần hoặc `slug/id`). Để trống = model đầu tiên
+   * phục vụ flow — chỉ đủ khi recipe có đúng một model cho flow đó. */
+  model?: string;
 }
 
 function trialBody(opts: TrialOptions = {}) {
@@ -720,6 +723,7 @@ function trialBody(opts: TrialOptions = {}) {
     // Server đặt tên `test_prompt` chứ không phải `prompt` — `prompt` đã là
     // khối cấu hình ô nhập của chính recipe.
     test_prompt: opts.testPrompt || null,
+    model: opts.model || null,
   };
 }
 

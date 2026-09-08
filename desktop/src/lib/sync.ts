@@ -141,6 +141,7 @@ export function ensureProfiles(): Promise<void> {
 
 /** Domain đã biết — chỉ dùng để gợi ý trong ô Domain, hỏng thì im lặng bỏ qua. */
 export const domains = writable<DomainInfo[]>([]);
+let domainsInflight: Promise<void> | null = null;
 
 export async function refreshDomains() {
   try {
@@ -148,6 +149,15 @@ export async function refreshDomains() {
   } catch {
     domains.set([]);
   }
+}
+
+export function ensureDomains(): Promise<void> {
+  if (domainsInflight) return domainsInflight;
+  if (get(domains).length) return Promise.resolve();
+  domainsInflight = refreshDomains().finally(() => {
+    domainsInflight = null;
+  });
+  return domainsInflight;
 }
 
 export const combos = writable<ComboInfo[]>([]);
@@ -167,22 +177,47 @@ export async function refreshCombos() {
 export const openaiProviders = writable<OpenAIProviderInfo[]>([]);
 export const openaiProvidersLoading = writable(false);
 
-export async function refreshOpenAIProviders() {
+/** Request đang bay, để `ensureOpenAIProviders()` ghép vào thay vì bắn thêm lượt. */
+let openaiInflight: Promise<void> | null = null;
+/** Đã nạp xong ít nhất một lượt: phân biệt "chưa gọi API" với "không có provider
+ * nào" — danh sách rỗng của hai trường hợp đó trông giống hệt nhau trên UI. */
+let openaiLoaded = false;
+let openaiSeq = 0;
+
+export function refreshOpenAIProviders(): Promise<void> {
   openaiProvidersLoading.set(true);
-  try {
-    openaiProviders.set(await fetchOpenAIProviders(get(apiKey)));
-  } catch {
-    openaiProviders.set([]);
-  } finally {
-    openaiProvidersLoading.set(false);
-  }
+  // Hai lượt chồng nhau: chỉ lượt mới nhất được dọn `openaiInflight`.
+  const seq = ++openaiSeq;
+  const run = (async () => {
+    try {
+      openaiProviders.set(await fetchOpenAIProviders(get(apiKey)));
+      openaiLoaded = true;
+    } catch {
+      openaiProviders.set([]);
+    } finally {
+      openaiProvidersLoading.set(false);
+      if (openaiSeq === seq) openaiInflight = null;
+    }
+  })();
+  openaiInflight = run;
+  return run;
+}
+
+/** Nạp lần đầu cho nơi tự đứng một mình (route /providers, nơi không có
+ * `refreshIntegrations()` chạy kèm). Ghép vào request đang bay và bỏ qua nếu đã
+ * nạp xong, nên mount cùng bootstrap của trang Integrations chỉ tốn một lượt.
+ * Lần nạp lỗi không đánh dấu đã xong, để lần vào trang sau còn thử lại. */
+export function ensureOpenAIProviders(): Promise<void> {
+  if (openaiInflight) return openaiInflight;
+  if (openaiLoaded) return Promise.resolve();
+  return refreshOpenAIProviders();
 }
 
 /** Mọi thứ trang Integrations hiển thị, nạp trong một lượt — chỉ dùng cho lần
  * tải đầu tiên; các thao tác đơn lẻ nên gọi refreshX() đúng phần bị ảnh hưởng
  * để tránh giật hình toàn trang (xem refreshAfterRecipeChange/Delete bên dưới). */
 export async function refreshIntegrations() {
-  await Promise.all([refreshRecipes(), refreshAccounts(), ensureProfiles(), refreshDomains(), refreshCombos(), refreshOpenAIProviders()]);
+  await Promise.all([refreshRecipes(), refreshAccounts(), ensureProfiles(), refreshDomains(), refreshCombos(), ensureOpenAIProviders()]);
 }
 
 /** Sau reload/tạo mới một recipe: health và model có thể đổi. */

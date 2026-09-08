@@ -132,16 +132,20 @@ def llm_upstream_error(error) -> OpenAIError:
 
 
 async def run_recipe_trial(cfg: Config, pool, recipe: dict, headed: bool,
-                           flow: str = "text", prompt: str | None = None) -> dict:
+                           flow: str = "text", prompt: str | None = None,
+                           model_id: str | None = None) -> dict:
     """Chạy thử `recipe` mà KHÔNG ghi nó xuống đĩa, báo cáo từng bước.
 
     Dùng chung cho cả recipe tạo mới lẫn bản đang sửa: người dùng biết selector
     nào sai trước khi bấm lưu (form thủ công không có bước round-trip tự sửa
     như analyzer AI). Phần soi selector nằm ở `trial.run_trial`.
+
+    `model_id` trống = model đầu tiên phục vụ flow (hành vi cũ); truyền vào để
+    soi đúng đường bấm của một model cụ thể trong dropdown.
     """
     from .trial import run_trial
 
-    return await run_trial(cfg, pool, recipe, headed, flow, prompt)
+    return await run_trial(cfg, pool, recipe, headed, flow, prompt, model_id)
 
 
 def create_app(cfg: Config) -> FastAPI:
@@ -1503,7 +1507,8 @@ def register_admin(app: FastAPI, admin) -> None:
         if errs:
             raise OpenAIError(400, "invalid_recipe", "; ".join(errs))
         return await run_recipe_trial(request.app.state.cfg, request.app.state.pool,
-                                      recipe, body.headed, body.flow, body.test_prompt)
+                                      recipe, body.headed, body.flow, body.test_prompt,
+                                      body.model)
 
     @admin.post("/recipes/analyze")
     async def analyze_recipe(body: RecipeAnalyzeRequest, request: Request):
@@ -1760,7 +1765,8 @@ def register_admin(app: FastAPI, admin) -> None:
         """Chạy thử bản đang sửa mà chưa ghi đè recipe đang chạy."""
         data = _edited_recipe(request, slug, body)
         return await run_recipe_trial(request.app.state.cfg, request.app.state.pool,
-                                      data, body.headed, body.flow, body.test_prompt)
+                                      data, body.headed, body.flow, body.test_prompt,
+                                      body.model)
 
     @admin.post("/recipes/{slug}/reanalyze")
     async def reanalyze_recipe(slug: str, body: RecipeReanalyzeRequest, request: Request):

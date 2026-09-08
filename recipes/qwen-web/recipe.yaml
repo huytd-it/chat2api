@@ -1,6 +1,7 @@
+slug: qwen-web
 url: https://chat.qwen.ai/
 prompt:
-  input_selector: textarea[placeholder='Ask Qwen']
+  input_selector: textarea[placeholder='Ask Qwen'] # snapshot cuối xác nhận textarea label Ask Qwen; giữ nguyên
   input_mode: fill
   submit: Enter
 response:
@@ -9,18 +10,31 @@ response:
   capture_html: true
   done_signal:
     type: copy_button
-    quiet_ms: 10000
+    quiet_ms: 10000        # giữ nguyên (recipe hiện 10000, không hạ xuống 600 nếu chưa fix copy selector)
+    fallback_quiet_ms: 15000
     timeout_ms: 300000
     scope: after
-    use_copy_result: true
+    use_copy_result: true  # kiểm chứng log sau sửa: q=use_copy_result phải 0 cảnh báo
+flows:
+  select_model:
+    selector: '[aria-label="Select Model"]'
+    action: 'click:[aria-label="Select Model"]'
+    # alternative neo bền hơn: '#qwen-chat-header-left [aria-label="Select Model"]' hoặc 'div.wms-trigger'
 new_chat:
   selector: div[role='button'][aria-label='New Chat']
 timing:
   ready_delay_ms: 2000
   input_delay_ms: 600
 models:
-- id: qwen-web
-slug: qwen-web
+  - id: qwen3.7-plus
+    action: 'click:div[role="listbox"][aria-label="Models"] div[role="option"]:has-text("Qwen3.7-Plus")'
+    capability: chat
+  - id: qwen3.8-max
+    action: 'click:div[role="listbox"][aria-label="Models"] div[role="option"]:has-text("Qwen3.8-Max")'
+    capability: chat
+  # giữ alias cũ nếu client đang dùng qwen-web/qwen-web
+  - id: qwen-web
+    capability: chat
 login:
   anon_trial_limit: 20
   strategy: round_robin
