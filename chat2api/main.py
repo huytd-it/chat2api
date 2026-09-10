@@ -1330,6 +1330,68 @@ def register_admin(app: FastAPI, admin) -> None:
         applog.log(f"account: gắn {host}/{label} vào profile '{row['name']}'")
         return {"ok": True, "account": item}
 
+    @admin.delete("/profiles/{ident}/accounts/{account_id}")
+    async def profile_remove_account(ident: str, account_id: int):
+        row = await _profile_or_404(ident)
+        acc = await asyncio.to_thread(
+            lambda: store.default().connection().execute(
+                "SELECT id, domain_id, label FROM account WHERE id = ? AND profile_id = ?",
+                (int(account_id), int(row["id"]))).fetchone() if store.default() else None)
+        if acc is None:
+            raise OpenAIError(404, "not_found", f"Account {account_id} không thuộc profile này")
+        blockers = await asyncio.to_thread(profiles.account_blockers, int(account_id))
+        if blockers:
+            raise OpenAIError(
+                409, "account_in_use",
+                f"Xoá account này sẽ làm recipe mất đăng nhập: {', '.join(blockers)} — "
+                "thêm account khác cho domain đó trước.")
+        ok = await asyncio.to_thread(profiles.remove_account, int(account_id))
+        if not ok:
+            raise OpenAIError(404, "not_found", f"Account {account_id} không tồn tại")
+        host = ""
+        try:
+            drow = store.default().connection().execute(
+                "SELECT host FROM domain WHERE id = ?", (int(acc["domain_id"]),)).fetchone()
+            host = drow["host"] if drow else ""
+        except Exception:
+            pass
+        applog.log(f"account: gỡ {host}/{acc['label']} khỏi profile '{row['name']}'", "warn")
+        return {"ok": True}
+
+    @admin.delete("/domains/{host}/profiles/{ident}")
+    async def domain_remove_profile(host: str, ident: str):
+        host = host.strip().lower()
+        if not accounts.valid_domain(host):
+            raise OpenAIError(400, "invalid_domain", "Domain không hợp lệ")
+        prof = await _profile_or_404(ident)
+        db = store.default()
+        if db is None:
+            _need_store()
+        dom = await asyncio.to_thread(
+            lambda: db.connection().execute("SELECT id FROM domain WHERE host = ?", (host,)).fetchone())
+        if dom is None:
+            raise OpenAIError(404, "not_found", f"Domain '{host}' không tồn tại")
+        did = int(dom["id"])
+        rows = await asyncio.to_thread(
+            lambda: db.connection().execute(
+                "SELECT id, label FROM account WHERE domain_id = ? AND profile_id = ? AND disabled = 0",
+                (did, int(prof["id"]))).fetchall())
+        if not rows:
+            raise OpenAIError(404, "not_found", f"Profile '{prof['name']}' chưa gắn domain '{host}'")
+        blockers = []
+        for r in rows:
+            blockers.extend(await asyncio.to_thread(profiles.account_blockers, int(r["id"])))
+        blockers = sorted(set(blockers))
+        if blockers:
+            raise OpenAIError(
+                409, "account_in_use",
+                f"Gỡ profile này khỏi '{host}' sẽ làm recipe mất đăng nhập: {', '.join(blockers)} — "
+                "thêm account khác cho domain đó trước.")
+        for r in rows:
+            await asyncio.to_thread(profiles.remove_account, int(r["id"]))
+        applog.log(f"account: gỡ profile '{prof['name']}' khỏi domain '{host}'", "warn")
+        return {"ok": True}
+
     @admin.post("/profiles/{name}/close")
     async def profile_close(name: str, request: Request):
         closed = await request.app.state.pool.drop_profile(name)

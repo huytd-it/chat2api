@@ -117,7 +117,7 @@ async def test_patch_updates_fields_and_default(client):
 
 
 async def test_engine_is_chosen_when_creating_a_profile(client):
-    """Form "Tạo profile mới" gửi engine — cả hai lựa chọn phải xuống tới DB."""
+    """Form "Tạo profile mới" gửi engine — mọi lựa chọn phải xuống tới DB."""
     c, *_ = client
     cloak = (await _create(c, "kin", engine="cloak")).json()
     assert cloak["engine"] == "cloak"
@@ -126,6 +126,8 @@ async def test_engine_is_chosen_when_creating_a_profile(client):
     # Và đổi lại được ở form sửa.
     back = await c.patch(f"/admin/profiles/{cloak['id']}", json={"engine": "playwright"})
     assert back.json()["engine"] == "playwright"
+    scrapling = (await _create(c, "stealth", engine="scrapling")).json()
+    assert scrapling["engine"] == "scrapling"
 
 
 async def test_open_no_longer_refuses_a_cloak_profile(client, monkeypatch):

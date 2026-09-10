@@ -23,6 +23,12 @@ def test_validate_coerces_types():
                      "BROWSER_ENGINE": "cloak"}
 
 
+def test_validate_accepts_scrapling_engine():
+    clean, errs = settings.validate({"BROWSER_ENGINE": "scrapling"})
+    assert errs == []
+    assert clean == {"BROWSER_ENGINE": "scrapling"}
+
+
 def test_validate_reports_bad_values():
     _, errs = settings.validate({"RECIPE_READY_DELAY_MS": "abc"})
     assert "số nguyên" in errs[0]

@@ -99,6 +99,12 @@ pip install -e ".[dev]"
 playwright install chromium
 ```
 
+Nếu dùng engine Scrapling để tăng stealth/anti-bot, cài browser riêng của nó một lần:
+
+```bash
+scrapling install
+```
+
 ### 2. Chạy server
 
 ```bash

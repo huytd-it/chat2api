@@ -6,7 +6,7 @@
   onMount(() => { void ensureProfiles(); void ensureOpenAIProviders(); });
   import { apiKey, showToast } from "../stores";
   import { profiles, recipes, recipesLoading, openaiProviders, openaiProvidersLoading, refreshAfterRecipeChange, refreshAfterRecipeDelete, refreshProfiles, refreshRecipes, refreshOpenAIProviders, refreshAfterOpenAIChange } from "../sync";
-  import { closeRecipeBrowser, deleteRecipe, fetchJob, jobAction, reanalyzeRecipe, reloadRecipe, renameRecipe, type RecipeInfo, createOpenAIProvider, updateOpenAIProvider, deleteOpenAIProvider, type OpenAIProviderInfo } from "../api";
+  import { closeRecipeBrowser, deleteRecipe, fetchJob, jobAction, reanalyzeRecipe, removeDomainProfile, reloadRecipe, renameRecipe, type RecipeInfo, createOpenAIProvider, updateOpenAIProvider, deleteOpenAIProvider, type OpenAIProviderInfo } from "../api";
   import RecipeEditorSheet from "./RecipeEditorSheet.svelte";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
@@ -204,6 +204,9 @@
     const slug = deleteRecipeTarget; if (!slug) return; deleteRecipeTarget = null; busySlug = slug; panelError = "";
     try { await deleteRecipe($apiKey, slug); showToast(`Đã xóa provider ${slug}`); await refreshAfterRecipeDelete(); } catch (e) { fail(e); } finally { busySlug = null; }
   }
+  async function onRemoveProfileFromDomain(domain: string, profileId: number) {
+    panelError = ""; try { await removeDomainProfile($apiKey, domain, profileId); showToast("Đã gỡ profile khỏi domain"); await Promise.all([refreshProfiles(), refreshRecipes()]); } catch (e) { fail(e); }
+  }
   function startRename(slug: string) { renamingSlug = slug; renameValue = slug; }
   function cancelRename() { renamingSlug = null; renameValue = ""; }
   async function confirmRename() {
@@ -342,6 +345,7 @@
                           <strong class="font-data">{item.profile.name}</strong>
                           {#each item.accounts as account (account.id)}<Badge variant="outline" class="font-data">{account.label}</Badge>{/each}
                           <span class="ml-auto text-xs text-muted-foreground">{item.profile.open ? `đang chạy · ${item.profile.tabs} tab` : "rảnh"}</span>
+                          <Button variant="ghost" size="icon-sm" aria-label={`Gỡ ${item.profile.name} khỏi ${rec.domain}`} onclick={() => onRemoveProfileFromDomain(rec.domain!, item.profile.id)}><X size={14} /></Button>
                         </li>
                       {/each}
                     </ul>

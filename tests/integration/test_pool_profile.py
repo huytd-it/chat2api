@@ -149,6 +149,36 @@ class FakeCloak:
         return FakePersistentContext()
 
 
+def install_fake_scrapling(monkeypatch):
+    import sys
+    import types
+
+    sessions = []
+
+    class FakeScraplingSession:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.context = FakePersistentContext()
+            self.closed = False
+            sessions.append(self)
+
+        async def start(self):
+            return None
+
+        async def close(self):
+            self.closed = True
+            await self.context.close()
+
+    package = types.ModuleType("scrapling")
+    package.__path__ = []
+    fetchers = types.ModuleType("scrapling.fetchers")
+    fetchers.AsyncStealthySession = FakeScraplingSession
+    package.fetchers = fetchers
+    monkeypatch.setitem(sys.modules, "scrapling", package)
+    monkeypatch.setitem(sys.modules, "scrapling.fetchers", fetchers)
+    return sessions
+
+
 async def test_cloak_profile_opens_a_persistent_context(pool, db, tmp_path, monkeypatch):
     """Bug cũ: profile engine=cloak không mở được, giờ đi qua cloakbrowser."""
     import sys
@@ -206,6 +236,56 @@ async def test_profile_engine_beats_the_pool_engine(pool, db, tmp_path, monkeypa
 
     assert fake.calls == []
     assert len(pool.launched) == 1
+
+
+async def test_scrapling_profile_uses_stealth_session(pool, db, tmp_path, monkeypatch):
+    sessions = install_fake_scrapling(monkeypatch)
+    profile = make_profile(db, tmp_path)
+    conn = db.connection()
+    with conn:
+        conn.execute(
+            "UPDATE profile SET engine = 'scrapling', proxy = ?, user_agent = ?, "
+            "locale = ?, timezone = ?, viewport = ? WHERE id = ?",
+            ("http://127.0.0.1:8888", "agent", "vi-VN", "Asia/Ho_Chi_Minh",
+             "1440x900", profile.id),
+        )
+
+    ctx = await pool.context_for_profile(profiles.get_profile("main"))
+
+    assert pool.launched == []
+    kwargs = sessions[0].kwargs
+    assert kwargs["user_data_dir"] == str(tmp_path / "profiles" / "main")
+    assert kwargs["headless"] is True
+    assert kwargs["max_pages"] == profile.max_tabs
+    assert kwargs["extra_flags"] == PROFILE_ARGS
+    assert kwargs["hide_canvas"] is True and kwargs["block_webrtc"] is True
+    assert kwargs["proxy"] == "http://127.0.0.1:8888"
+    assert kwargs["useragent"] == "agent"
+    assert kwargs["locale"] == "vi-VN"
+    assert kwargs["timezone_id"] == "Asia/Ho_Chi_Minh"
+    assert kwargs["additional_args"] == {"viewport": {"width": 1440, "height": 900}}
+
+    await pool.drop_profile("main")
+    assert sessions[0].closed and ctx.closed
+
+
+async def test_scrapling_storage_state_is_seeded_and_session_is_closed(tmp_path, monkeypatch):
+    sessions = install_fake_scrapling(monkeypatch)
+    state = tmp_path / "state.json"
+    state.write_text(
+        '{"cookies":[{"name":"sid","value":"x","domain":"example.test","path":"/"}],'
+        '"origins":[{"origin":"https://example.test","localStorage":'
+        '[{"name":"token","value":"y"}]}]}',
+        encoding="utf-8",
+    )
+    pool = BrowserPool(engine="scrapling")
+
+    ctx = await pool.context_for("site", state)
+
+    assert ctx.cookies[0]["name"] == "sid"
+    assert any(page.goto_calls == ["https://example.test"] for page in ctx.pages)
+    await pool.drop("site")
+    assert sessions[0].closed
 
 
 # ------------------------------------------------------------ tab song song

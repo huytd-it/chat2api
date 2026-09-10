@@ -347,8 +347,8 @@ def _clean(values: dict) -> dict:
             out[key] = tabs
         elif key == "engine":
             engine = str(value).strip().lower()
-            if engine not in {"playwright", "cloak"}:
-                raise ValueError("engine phải là playwright hoặc cloak")
+            if engine not in {"playwright", "cloak", "scrapling"}:
+                raise ValueError("engine phải là playwright, cloak hoặc scrapling")
             out[key] = engine
         elif key == "viewport":
             viewport = str(value).strip().lower()
@@ -577,6 +577,36 @@ def add_account_with_state(profile_id: int, host: str, label: str,
             " WHERE a.profile_id = ? AND a.domain_id = ? AND a.label = ?",
             (int(profile_id), domain_id, label)).fetchone()
     return dict(row) if row else None
+
+
+def account_blockers(account_id: int) -> list[str]:
+    db = store.default()
+    if db is None:
+        return []
+    rows = db.query("SELECT domain_id FROM account WHERE id = ?", (int(account_id),))
+    if not rows:
+        return []
+    domain_id = rows[0]["domain_id"]
+    others = db.query(
+        "SELECT COUNT(*) AS n FROM account WHERE domain_id = ? AND disabled = 0 AND id <> ?",
+        (domain_id, int(account_id)))
+    if others and int(others[0]["n"]) > 0:
+        return []
+    recs = db.query("SELECT slug FROM recipe WHERE domain_id = ?", (domain_id,))
+    return sorted(row["slug"] for row in recs)
+
+
+def remove_account(account_id: int) -> bool:
+    db = store.default()
+    if db is None:
+        return False
+    conn = db.connection()
+    row = conn.execute("SELECT id FROM account WHERE id = ?", (int(account_id),)).fetchone()
+    if row is None:
+        return False
+    with conn:
+        conn.execute("DELETE FROM account WHERE id = ?", (int(account_id),))
+    return True
 
 
 def known_hosts() -> list[str]:

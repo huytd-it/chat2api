@@ -1265,6 +1265,18 @@ export async function addProfileAccount(
   return asJson(r);
 }
 
+export async function removeProfileAccount(key: string, ident: string | number, accountId: number): Promise<void> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/profiles/" + encodeURIComponent(String(ident)) + "/accounts/" + accountId, { method: "DELETE", headers: headers(key) });
+  await asJson(r);
+}
+
+export async function removeDomainProfile(key: string, host: string, ident: string | number): Promise<void> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/domains/" + encodeURIComponent(host) + "/profiles/" + encodeURIComponent(String(ident)), { method: "DELETE", headers: headers(key) });
+  await asJson(r);
+}
+
 /** Mọi domain đã biết (DB + đĩa + recipe) — gợi ý cho ô Domain của dialog. */
 export async function fetchDomains(key: string): Promise<DomainInfo[]> {
   const base = await apiBase();

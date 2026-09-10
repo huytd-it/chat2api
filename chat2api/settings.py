@@ -38,13 +38,14 @@ FIELDS: list[dict] = [
     {"key": "POOL_MAX_CONTEXTS", "type": "int", "default": "3", "group": "Browser",
      "apply": "restart", "label": "Số browser context tối đa"},
     {"key": "BROWSER_ENGINE", "type": "choice", "default": "playwright", "group": "Browser",
-     "apply": "restart", "label": "Engine browser", "choices": ["playwright", "cloak"]},
+     "apply": "restart", "label": "Engine browser",
+     "choices": ["playwright", "cloak", "scrapling"]},
     {"key": "BROWSER_PROFILE_MODE", "type": "choice", "default": "storage_state",
      "group": "Browser", "apply": "restart", "label": "Chế độ danh tính trình duyệt",
      "choices": ["storage_state", "profile"],
      "help": "storage_state: mỗi recipe một context, chỉ cookie + localStorage. "
              "profile: một Chromium profile giữ đăng nhập mọi domain, mỗi recipe một tab "
-             "chạy song song. Chạy được với cả engine playwright lẫn cloak."},
+              "chạy song song. Chạy được với playwright, cloak và scrapling."},
     {"key": "POOL_MAX_PROFILES", "type": "int", "default": "6", "group": "Browser",
      "apply": "restart", "label": "Số profile mở cùng lúc",
      "help": "Mỗi profile là một tiến trình Chromium. Chỉ dùng ở chế độ profile. "

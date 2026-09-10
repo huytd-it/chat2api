@@ -49,8 +49,9 @@ class BrowserPool:
 
     ponytail: engine cloak tạo 1 browser riêng mỗi context (nặng hơn) —
     chấp nhận vì cloak chỉ bật cho site bot-detect khó. Đường profile bên dưới
-    chạy được với cả hai engine (`launch_persistent_context_async` của
-    cloakbrowser), nên "chống bot" và "giữ đăng nhập" không còn loại trừ nhau.
+    chạy được với các engine stealth (`launch_persistent_context_async` của
+    cloakbrowser hoặc `AsyncStealthySession` của Scrapling), nên "chống bot"
+    và "giữ đăng nhập" không còn loại trừ nhau.
     """
 
     def __init__(self, engine: str = "playwright", max_contexts: int = 10,
@@ -62,6 +63,9 @@ class BrowserPool:
         self._lock = asyncio.Lock()
         self._pw = None
         self._browser = None
+        # Scrapling sở hữu cả Playwright driver bên dưới context. Giữ session
+        # theo context để đóng driver cùng lúc, tránh rò tiến trình Chromium.
+        self._scrapling_sessions: dict[int, object] = {}
         # Đường profile (BROWSER_PROFILE_MODE=profile) — sống SONG SONG với
         # _contexts ở trên, không thay thế. Mỗi profile là một persistent
         # context (vừa là browser vừa là context), giữ nhiều tab bên trong.
@@ -86,6 +90,15 @@ class BrowserPool:
         return len(self._contexts)
 
     async def start(self):
+        if self.engine == "scrapling":
+            try:
+                from scrapling.fetchers import AsyncStealthySession  # noqa: F401
+            except ImportError as e:
+                raise RuntimeError(
+                    "BROWSER_ENGINE=scrapling cần: pip install 'scrapling[fetchers]>=0.4.15' "
+                    "&& scrapling install"
+                ) from e
+            return
         if self.engine == "cloak":
             try:
                 from cloakbrowser import launch_context_async  # noqa: F401
@@ -127,15 +140,16 @@ class BrowserPool:
                 return ctx
             while len(self._contexts) >= self.max_contexts:
                 _, old_ctx = self._contexts.popitem(last=False)
-                try:
-                    await old_ctx.close()
-                except Exception:
-                    pass
+                await self._close_context(old_ctx)
                 logger.warning(
                     "BrowserPool context evicted for slug (max_contexts=%s)", self.max_contexts
                 )
             state = str(storage_state) if storage_state and storage_state.exists() else None
-            if self.engine == "cloak":
+            if self.engine == "scrapling":
+                ctx = await self._launch_scrapling(headless=not headed)
+                if state:
+                    await self._seed_storage_state(ctx, Path(state))
+            elif self.engine == "cloak":
                 from cloakbrowser import launch_context_async
 
                 ctx = await launch_context_async(headless=not headed, storage_state=state)
@@ -284,8 +298,59 @@ class BrowserPool:
             kwargs = {k: v for k, v in kwargs.items() if k in names}
         return await launch(profile.user_data_dir, **kwargs)
 
+    async def _launch_scrapling(self, *, headless: bool, user_data_dir=None,
+                                max_pages: int = 1, profile=None):
+        """Mở Scrapling stealth session và trả context Playwright dài hạn."""
+        try:
+            from scrapling.fetchers import AsyncStealthySession
+        except ImportError as error:
+            raise RuntimeError(
+                "Engine scrapling cần: pip install 'scrapling[fetchers]>=0.4.15' "
+                "&& scrapling install"
+            ) from error
+
+        kwargs = {
+            "headless": headless,
+            "max_pages": max(1, int(max_pages)),
+            "extra_flags": list(PROFILE_ARGS),
+            "hide_canvas": True,
+            "block_webrtc": True,
+        }
+        if user_data_dir:
+            kwargs["user_data_dir"] = str(user_data_dir)
+        if profile is not None:
+            viewport = profile.viewport_size
+            if viewport:
+                kwargs["additional_args"] = {"viewport": viewport}
+            for key, value in (("proxy", profile.proxy),
+                               ("useragent", profile.user_agent),
+                               ("locale", profile.locale),
+                               ("timezone_id", profile.timezone)):
+                if value:
+                    kwargs[key] = value
+
+        session = AsyncStealthySession(**kwargs)
+        await session.start()
+        ctx = session.context
+        if ctx is None:
+            await session.close()
+            raise RuntimeError("Scrapling không tạo được browser context")
+        self._scrapling_sessions[id(ctx)] = session
+        return ctx
+
+    async def _launch_scrapling_profile(self, profile):
+        return await self._launch_scrapling(
+            headless=profile.headless,
+            user_data_dir=profile.user_data_dir,
+            max_pages=profile.max_tabs,
+            profile=profile,
+        )
+
     async def _launch_profile(self, profile):
-        if self.profile_engine(profile) == "cloak":
+        engine = self.profile_engine(profile)
+        if engine == "scrapling":
+            return await self._launch_scrapling_profile(profile)
+        if engine == "cloak":
             ctx = await self._launch_cloak_profile(profile)
             if ctx is not None:
                 return ctx
@@ -305,6 +370,38 @@ class BrowserPool:
                 kwargs[key] = value
         pw = await self._ensure_pw()
         return await pw.chromium.launch_persistent_context(**kwargs)
+
+    async def _seed_storage_state(self, ctx, path: Path) -> None:
+        """Nạp storage_state vào persistent context do Scrapling sở hữu."""
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            cookies = state.get("cookies") or []
+            if cookies:
+                await ctx.add_cookies(cookies)
+            for origin in state.get("origins") or []:
+                items = origin.get("localStorage") or []
+                if not items:
+                    continue
+                page = await ctx.new_page()
+                try:
+                    await page.goto(origin["origin"], wait_until="domcontentloaded", timeout=20000)
+                    await page.evaluate(
+                        "(items) => { for (const it of items)"
+                        " localStorage.setItem(it.name, it.value); }", items)
+                finally:
+                    await page.close()
+        except Exception as error:
+            logger.warning("Scrapling: không nạp được storage_state %s: %s", path, error)
+
+    async def _close_context(self, ctx) -> None:
+        session = self._scrapling_sessions.pop(id(ctx), None)
+        try:
+            if session is not None:
+                await session.close()
+            else:
+                await ctx.close()
+        except Exception:
+            pass
 
     async def _seed_profile(self, profile, ctx) -> None:
         """Đổ storage_state cũ vào profile lần đầu, rồi bỏ đánh dấu.
@@ -428,10 +525,7 @@ class BrowserPool:
             self._pages.pop(key, None)
             self._busy_tabs.pop(key, None)
         self._busy_profiles.pop(name, None)
-        try:
-            await ctx.close()
-        except Exception:
-            pass
+        await self._close_context(ctx)
         profile_id = self._profile_ids.pop(name, None)
         self._profile_headless.pop(name, None)
         if profile_id is not None:
@@ -489,19 +583,13 @@ class BrowserPool:
             context = self._contexts.pop(slug, None)
         if context:
             async def close() -> None:
-                try:
-                    await context.close()
-                except Exception:
-                    pass
+                await self._close_context(context)
 
             await _finish_cleanup(close())
 
     async def aclose(self):
         for ctx in self._contexts.values():
-            try:
-                await ctx.close()
-            except Exception:
-                pass
+            await self._close_context(ctx)
         self._contexts.clear()
         for name, ctx in list(self._profiles.items()):
             await self._close_profile(name, ctx)
