@@ -1,0 +1,24 @@
+slug: deepseek-web
+url: https://chat.deepseek.com/
+prompt:
+  input_selector: 'textarea[name="search"]'
+  input_mode: fill
+  submit: Enter
+response:
+  last_message_selector: 'div[data-virtual-list-item-key]'
+  done_signal:
+    type: copy_button
+    selector: 'div[data-virtual-list-item-key] div[role="button"].ds-button--icon'
+    scope: after
+    use_copy_result: true
+    quiet_ms: 600
+    fallback_quiet_ms: 15000
+    timeout_ms: 120000
+models:
+  - id: default
+login:
+  strategy: round_robin
+  quota: 50
+keep_context: true
+new_chat:
+  selector: 'div._5a8ac7a'
