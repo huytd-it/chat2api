@@ -69,33 +69,6 @@ def _reply_extras(provider, assignment, browser_recipe_cls) -> tuple[str | None,
     return None, None
 
 
-class _ConcurrencyGate:
-    """Trần số request chat chạy song song (API_MAX_CONCURRENT_REQUESTS).
-
-    Vượt trần thì request mới CHỜ chứ không bị từ chối — client gửi một loạt
-    request vẫn nhận đủ câu trả lời, chỉ là không mở 20 tab Chromium một lúc.
-    0 = không giới hạn.
-    """
-
-    def __init__(self) -> None:
-        self._sem: asyncio.Semaphore | None = None
-        self._size = 0
-
-    @asynccontextmanager
-    async def slot(self):
-        limit = settings.current_int("API_MAX_CONCURRENT_REQUESTS", 0)
-        if limit <= 0:
-            yield
-            return
-        # Đổi trần lúc đang chạy thì dựng semaphore mới; các request đang giữ
-        # semaphore cũ vẫn chạy tiếp, trần mới có hiệu lực đủ từ lượt sau.
-        if self._sem is None or self._size != limit:
-            self._sem = asyncio.Semaphore(limit)
-            self._size = limit
-        async with self._sem:
-            yield
-
-
 def merge_recipe(base: dict, patch: dict) -> dict:
     """Ghép mảnh `patch` vào recipe `base`, giữ nguyên khóa ngoài patch.
 
@@ -277,7 +250,6 @@ def create_app(cfg: Config) -> FastAPI:
     app.state.login_manager = login_manager
     app.state.router = router
     app.state.recipe_publish_lock = asyncio.Lock()
-    app.state.chat_gate = _ConcurrencyGate()
 
     @app.get("/health")
     async def health(request: Request):
@@ -416,7 +388,7 @@ def create_app(cfg: Config) -> FastAPI:
 
         async def _do_generate():
             sent = {"n": 0}
-            async with request.app.state.chat_gate.slot():
+            async with rt.slot():
                 try:
                     # Combo failover giữ provider là combo, delegate bên trong sẽ thử từng member
                     if isinstance(original_combo_provider_img, ComboPImg) and combo_strategy_img == "failover":
@@ -655,7 +627,7 @@ def create_app(cfg: Config) -> FastAPI:
             sent = {"n": 0}
             # Trần song song ôm trọn cả stream: giữ chỗ từ lúc bắt đầu tới byte
             # cuối, chứ không phải chỉ lúc mở tab.
-            async with request.app.state.chat_gate.slot():
+            async with rt.slot():
                 if rt.is_unhealthy(provider.slug) and fallback_ok("unhealthy recipe"):
                     async for d in agent_stream():
                         yield d
@@ -1175,6 +1147,30 @@ def register_admin(app: FastAPI, admin) -> None:
             raise OpenAIError(404, "not_found", f"Profile '{ident}' không tồn tại")
         return row
 
+    async def _apply_engine_switch(pool_, name: str, updated: dict | None) -> None:
+        """Đổi engine của một profile ĐANG MỞ thì phải mở lại mới có tác dụng.
+
+        Đăng nhập không mất: engine mới nhận đúng `user_data_dir` cũ nên toàn bộ
+        cookie/localStorage đi theo. Chỉ đóng khi profile đang rảnh — cắt ngang
+        một request đang stream chỉ để đổi engine là đánh đổi tệ, và pool tự mở
+        lại bằng engine mới ngay lần dùng kế tiếp.
+        """
+        if not updated:
+            return
+        running = pool_.launched_engine(name)
+        if running is None:
+            return
+        wanted = (updated.get("engine") or "").strip().lower() or (pool_.engine or "playwright")
+        if running == wanted:
+            return
+        if pool_.profile_busy(name):
+            applog.log(f"profile: '{name}' đổi engine {running} -> {wanted} nhưng đang "
+                       "chạy request — mở lại bằng engine mới khi rảnh", "warn")
+            return
+        await pool_.drop_profile(name)
+        applog.log(f"profile: '{name}' đổi engine {running} -> {wanted}, đã đóng để mở lại "
+                   "bằng engine mới (giữ nguyên đăng nhập, cùng user_data_dir)")
+
     @admin.post("/profiles")
     async def profile_create(body: ProfileCreateRequest, request: Request):
         _need_store()
@@ -1191,9 +1187,9 @@ def register_admin(app: FastAPI, admin) -> None:
     async def profile_clone(ident: str, body: ProfileCloneRequest, request: Request):
         """Bản sao đầy đủ của một profile: thư mục Chromium + account đã khai báo.
 
-        Dùng khi muốn thử engine khác (playwright ⇄ cloak) mà vẫn giữ đường lui.
-        Đổi thẳng `engine` bằng PATCH cũng không mất đăng nhập — cùng một
-        `user_data_dir` — nên clone chỉ cần khi không muốn đụng bản gốc.
+        Dùng khi muốn thử engine khác (playwright / cloak / scrapling) mà vẫn
+        giữ đường lui. Đổi thẳng `engine` bằng PATCH cũng không mất đăng nhập —
+        cùng một `user_data_dir` — nên clone chỉ cần khi không muốn đụng bản gốc.
         """
         cfg = request.app.state.cfg
         pool_ = request.app.state.pool
@@ -1222,7 +1218,7 @@ def register_admin(app: FastAPI, admin) -> None:
         return created
 
     @admin.patch("/profiles/{ident}")
-    async def profile_update(ident: str, body: ProfileUpdateRequest):
+    async def profile_update(ident: str, body: ProfileUpdateRequest, request: Request):
         row = await _profile_or_404(ident)
         if body.name is not None and body.name.strip() != row["name"]:
             # Tên profile LÀ tên thư mục Chromium đang giữ mọi đăng nhập của nó.
@@ -1236,6 +1232,7 @@ def register_admin(app: FastAPI, admin) -> None:
         except ValueError as error:
             raise OpenAIError(400, "invalid_profile", str(error))
         applog.log(f"profile: cập nhật '{row['name']}'")
+        await _apply_engine_switch(request.app.state.pool, row["name"], updated)
         return updated
 
     @admin.delete("/profiles/{ident}")

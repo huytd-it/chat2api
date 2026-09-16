@@ -1,7 +1,9 @@
+import asyncio
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from . import store
+from . import settings, store
 from .providers.base import ModelInfo, Provider
 
 UNHEALTHY_THRESHOLD = 3
@@ -24,9 +26,26 @@ class Router:
         self.failures: dict[str, int] = {}
         # Combo là provider ảo duy nhất trỏ tới nhiều model thật, nạp sau các provider khác
         self._combo_provider = None
+        self._semaphore: asyncio.Semaphore | None = None
+        self._semaphore_size = 0
+
+    @asynccontextmanager
+    async def slot(self):
+        """Giữ một slot xử lý request; 0 nghĩa là không giới hạn."""
+        limit = settings.current_int("API_MAX_CONCURRENT_REQUESTS", 0)
+        if limit <= 0:
+            yield
+            return
+        if self._semaphore is None or self._semaphore_size != limit:
+            self._semaphore = asyncio.Semaphore(limit)
+            self._semaphore_size = limit
+        async with self._semaphore:
+            yield
 
     def reload(self) -> None:
-        self.providers.clear()
+        # Dựng snapshot mới rồi publish một lần. Request đang resolve trong lúc
+        # reload tiếp tục thấy registry cũ thay vì một dict vừa bị clear dở.
+        providers: dict[str, Provider] = {}
         # Reload luôn xoá bộ đếm hỏng, cả trong RAM lẫn DB — người dùng sửa
         # recipe rồi bấm reload là để nó được thử lại từ đầu. Cột `failures`
         # trong DB chỉ mirror trạng thái sống; phần *lịch sử* nằm ở
@@ -47,7 +66,7 @@ class Router:
                         continue
                     items = loaded if isinstance(loaded, list) else [loaded]
                     for p in items:
-                        self.providers[p.slug] = p
+                        providers[p.slug] = p
                     break
         # Legacy compat ONLY: branch/eval flows that cannot be flattened.
         # Migrate đã chạy ở lifespan (không đè recipe, không xoá source).
@@ -57,16 +76,17 @@ class Router:
             # flows_dir suy từ recipes_dir khi Router được tạo với flows_dir=None
             flows_dir = self.flows_dir if self.flows_dir is not None else (self.recipes_dir.parent / "data" / "flows")
             for runner in _flow_loaders_legacy(Path(flows_dir), self.pool, accounts_root=self.recipes_dir):
-                if runner.slug in self.providers:
+                if runner.slug in providers:
                     print(f"[chat2api] skip legacy flow '{runner.slug}' — đã có recipe cùng slug",
                           file=sys.stderr)
                     continue
-                self.providers[runner.slug] = runner
+                providers[runner.slug] = runner
         except Exception as e:
             print(f"[chat2api] legacy flow loader error: {e}", file=sys.stderr)
-        self._ensure_combo_provider()
+        self._ensure_combo_provider(providers)
+        self.providers = providers
 
-    def _ensure_combo_provider(self) -> None:
+    def _ensure_combo_provider(self, providers: dict[str, Provider] | None = None) -> None:
         """Đảm bảo provider 'combo' luôn tồn tại (kể cả khi chưa có combo nào)."""
         try:
             from .providers.combo import ComboProvider
@@ -78,7 +98,8 @@ class Router:
         else:
             self._combo_provider.set_router(self)
             self._combo_provider.reload()
-        self.providers[self._combo_provider.slug] = self._combo_provider
+        target = self.providers if providers is None else providers
+        target[self._combo_provider.slug] = self._combo_provider
 
     def resolve(self, model_id: str) -> tuple[Provider, str]:
         prefix, _, local = model_id.partition("/")

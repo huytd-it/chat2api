@@ -269,6 +269,79 @@ async def test_scrapling_profile_uses_stealth_session(pool, db, tmp_path, monkey
     assert sessions[0].closed and ctx.closed
 
 
+def set_engine(db, profile_id, engine):
+    conn = db.connection()
+    with conn:
+        conn.execute("UPDATE profile SET engine = ? WHERE id = ?", (engine, profile_id))
+
+
+async def test_switching_engine_to_scrapling_reopens_the_same_user_data_dir(
+        pool, db, tmp_path, monkeypatch):
+    """Đổi engine sang Scrapling phải mở lại — và mở lại trên ĐÚNG profile cũ.
+
+    Bug: context Playwright đang mở được tái dùng vô điều kiện, nên đổi engine
+    từ trang Profiles im lặng không có tác dụng cho tới khi restart server.
+    """
+    sessions = install_fake_scrapling(monkeypatch)
+    profile = make_profile(db, tmp_path)
+    playwright_ctx = await pool.context_for_profile(profile)
+    assert len(pool.launched) == 1
+
+    set_engine(db, profile.id, "scrapling")
+    scrapling_ctx = await pool.context_for_profile(profiles.get_profile("main"))
+
+    assert scrapling_ctx is not playwright_ctx
+    assert playwright_ctx.closed, "context engine cũ phải đóng để nhả khoá pid"
+    # Cùng user_data_dir = cùng cookie/localStorage: đăng nhập không mất.
+    assert sessions[0].kwargs["user_data_dir"] == str(tmp_path / "profiles" / "main")
+    assert sessions[0].kwargs["user_data_dir"] == profile.user_data_dir
+    assert len(pool.launched) == 1              # không mở thêm Chromium thường
+    assert pool.launched[0]["user_data_dir"] == sessions[0].kwargs["user_data_dir"]
+    assert pool.launched_engine("main") == "scrapling"
+
+
+async def test_engine_switch_releases_the_pid_lock_before_relaunching(
+        pool, db, tmp_path, monkeypatch):
+    """Engine mới đụng đúng thư mục engine cũ đang giữ — khoá phải nhả trước."""
+    install_fake_scrapling(monkeypatch)
+    profile = make_profile(db, tmp_path)
+    await pool.context_for_profile(profile)
+    locks = []
+    monkeypatch.setattr(profiles, "release_lock",
+                        lambda pid: locks.append(("release", pid)))
+    monkeypatch.setattr(profiles, "acquire_lock",
+                        lambda p: locks.append(("acquire", p.id)))
+
+    set_engine(db, profile.id, "scrapling")
+    await pool.context_for_profile(profiles.get_profile("main"))
+
+    assert locks == [("release", profile.id), ("acquire", profile.id)]
+
+
+async def test_unchanged_engine_still_reuses_the_open_context(pool, db, tmp_path):
+    """Guard đổi engine không được làm profile mở lại sau mỗi request."""
+    profile = make_profile(db, tmp_path)
+    first = await pool.context_for_profile(profile)
+    second = await pool.context_for_profile(profiles.get_profile("main"))
+    assert first is second
+    assert len(pool.launched) == 1
+
+
+async def test_launched_engine_reports_what_is_actually_running(pool, db, tmp_path):
+    """Cột `engine` là ý muốn; `launched_engine` là thực tế đang chạy."""
+    profile = make_profile(db, tmp_path)
+    assert pool.launched_engine("main") is None
+    await pool.context_for_profile(profile)
+    assert pool.launched_engine("main") == "playwright"
+
+    # Đổi cột engine mà chưa mở lại: thực tế vẫn là Playwright.
+    set_engine(db, profile.id, "scrapling")
+    assert pool.launched_engine("main") == "playwright"
+
+    await pool.drop_profile("main")
+    assert pool.launched_engine("main") is None
+
+
 async def test_scrapling_storage_state_is_seeded_and_session_is_closed(tmp_path, monkeypatch):
     sessions = install_fake_scrapling(monkeypatch)
     state = tmp_path / "state.json"

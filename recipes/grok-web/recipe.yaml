@@ -1,0 +1,21 @@
+slug: grok-web
+url: https://grok.com/
+prompt:
+  input_selector: '[aria-label="Ask Grok anything"]'
+  input_mode: fill
+  submit: Enter
+response:
+  last_message_selector: 'div[id^="response-"]'
+  done_signal:
+    type: copy_button
+    selector: '[aria-label="Copy response"]'
+    scope: inside
+    use_copy_result: true
+new_chat:
+  selector: '[data-testid="new-chat"]'
+models:
+- id: default
+login:
+  strategy: round_robin
+  quota: 50
+keep_context: true

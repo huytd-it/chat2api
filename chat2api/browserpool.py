@@ -72,6 +72,11 @@ class BrowserPool:
         self._profiles: OrderedDict[str, object] = OrderedDict()
         self._profile_ids: dict[str, int] = {}
         self._profile_headless: dict[str, bool] = {}
+        # Engine mà mỗi profile đang mở ĐÃ thật sự được mở bằng. Cột
+        # `profile.engine` đổi được bất cứ lúc nào từ trang Profiles, nên không
+        # nhớ cái này thì context cũ cứ được tái dùng và việc đổi engine im lặng
+        # không có tác dụng cho tới khi restart server.
+        self._profile_engines: dict[str, str] = {}
         self._pages: OrderedDict[str, object] = OrderedDict()
         self._profile_lock = asyncio.Lock()
         # Đếm việc đang chạy trên từng profile / từng tab. Trần max_profiles và
@@ -181,14 +186,24 @@ class BrowserPool:
         from . import profiles as profiles_mod
 
         ctx = self._profiles.get(profile.name)
-        if ctx is not None and self._profile_alive(ctx):
+        if ctx is not None and self._profile_alive(ctx) and not self._engine_changed(profile):
             self._profiles.move_to_end(profile.name)
             return ctx
         async with self._profile_lock:
             ctx = self._profiles.get(profile.name)
             if ctx is not None and self._profile_alive(ctx):
-                self._profiles.move_to_end(profile.name)
-                return ctx
+                if not self._engine_changed(profile):
+                    self._profiles.move_to_end(profile.name)
+                    return ctx
+                # Đổi engine chỉ có tác dụng khi mở lại bằng tiến trình mới.
+                # Đăng nhập KHÔNG mất: engine mới nhận đúng `user_data_dir` cũ
+                # nên cookie/localStorage đi theo — nhưng phải đóng trước để nhả
+                # khoá pid, không thì engine mới đụng thư mục Chromium đang bị giữ.
+                logger.info("BrowserPool: profile '%s' đổi engine %s -> %s, mở lại "
+                            "trên cùng user_data_dir (giữ nguyên đăng nhập)",
+                            profile.name, self._profile_engines.get(profile.name),
+                            self.profile_engine(profile))
+                await self._close_profile(profile.name, self._profiles.pop(profile.name))
             self._profiles.pop(profile.name, None)
             while len(self._profiles) >= self.max_profiles:
                 name = self._idle_profile()
@@ -211,6 +226,7 @@ class BrowserPool:
                 raise
             self._profiles[profile.name] = ctx
             self._profile_headless[profile.name] = bool(profile.headless)
+            self._profile_engines[profile.name] = self.profile_engine(profile)
             self._profile_ids[profile.name] = profile.id
             await self._seed_profile(profile, ctx)
             await asyncio.to_thread(profiles_mod.touch, profile.id)
@@ -246,6 +262,25 @@ class BrowserPool:
     def profile_engine(self, profile) -> str:
         """Engine mở profile này: cột `profile.engine` thắng cấu hình chung."""
         return (getattr(profile, "engine", "") or self.engine or "playwright").strip().lower()
+
+    def launched_engine(self, profile_name: str) -> str | None:
+        """Engine mà context đang mở của profile này ĐÃ được mở bằng.
+
+        None khi profile chưa mở. Khác `profile_engine()` — cái đó đọc ý muốn
+        hiện tại trong DB, cái này đọc thực tế đang chạy.
+        """
+        if self.open_context(profile_name) is None:
+            return None
+        return self._profile_engines.get(profile_name)
+
+    def profile_busy(self, profile_name: str) -> bool:
+        """Có request nào đang giữ profile này không (xem `hold`)."""
+        return bool(self._busy_profiles.get(profile_name))
+
+    def _engine_changed(self, profile) -> bool:
+        """Context đang mở được mở bằng engine khác với cột `engine` bây giờ."""
+        launched = self._profile_engines.get(profile.name)
+        return launched is not None and launched != self.profile_engine(profile)
 
     async def _ensure_pw(self):
         """Driver Playwright, mở lần đầu khi cần.
@@ -528,6 +563,7 @@ class BrowserPool:
         await self._close_context(ctx)
         profile_id = self._profile_ids.pop(name, None)
         self._profile_headless.pop(name, None)
+        self._profile_engines.pop(name, None)
         if profile_id is not None:
             await asyncio.to_thread(profiles_mod.release_lock, profile_id)
 
