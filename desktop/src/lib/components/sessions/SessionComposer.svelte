@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowRight, Plus, Stop, Target, X } from "phosphor-svelte";
+  import { ArrowRight, Link, LinkBreak, Plus, Stop, Target, TestTube, X } from "phosphor-svelte";
   import type { ChatTarget, TestTarget } from "../../api";
   import { headedBrowser } from "../../stores";
   import { models, selectedModel } from "../../sync";
@@ -7,11 +7,14 @@
   import { Switch } from "$lib/components/ui/switch";
   import { Textarea } from "$lib/components/ui/textarea";
   import * as Select from "$lib/components/ui/select";
-  import type { RotationMode } from "./shared";
+  import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
+  import { TEST_PROMPTS, type RotationMode } from "./shared";
 
   let {
     prompt = $bindable(),
     extraPrompts = $bindable(),
+    keepContext = $bindable(true),
+    hasActive = false,
     selected,
     targetCount,
     benchOpen,
@@ -30,6 +33,9 @@
   }: {
     prompt: string;
     extraPrompts: string[];
+    keepContext?: boolean;
+    /** Có session đang mở không — chưa có thì toggle giữ context vô nghĩa. */
+    hasActive?: boolean;
     selected: TestTarget[];
     targetCount: number;
     benchOpen: boolean;
@@ -85,6 +91,13 @@
 
   function removeExtra(index: number) {
     extraPrompts = extraPrompts.filter((_, position) => position !== index);
+  }
+
+  /** Chèn prompt mẫu vào ô nhập — nối tiếp nếu đã gõ dở, không gửi ngay. */
+  function pickTestPrompt(text: string) {
+    prompt = prompt.trim() ? prompt.replace(/\s+$/, "") + "\n\n" + text : text;
+    promptEl?.focus();
+    autoGrow();
   }
 </script>
 
@@ -172,6 +185,51 @@
       Bàn test{selected.length ? ` · ${selected.length}` : targetCount ? ` · ${targetCount} sẵn` : ""}
     </Button>
 
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger>
+        {#snippet child({ props })}
+          <Button size="sm" variant="outline" class="text-[11px]" title="Chèn một prompt kiểm tra có sẵn vào ô nhập" {...props}>
+            <TestTube />
+            Prompt mẫu
+          </Button>
+        {/snippet}
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Content align="start" class="max-w-80">
+        <DropdownMenu.Label class="font-data text-[10px] text-muted-foreground">
+          PROMPT KIỂM TRA DÙNG CHUNG
+        </DropdownMenu.Label>
+        {#each TEST_PROMPTS as item (item.id)}
+          <DropdownMenu.Item
+            class="flex-col items-start gap-0.5 whitespace-normal"
+            title={item.hint}
+            onclick={() => pickTestPrompt(item.text)}
+          >
+            <span class="text-xs font-medium">{item.label}</span>
+            <span class="line-clamp-2 text-[11px] text-muted-foreground">{item.text}</span>
+          </DropdownMenu.Item>
+        {/each}
+      </DropdownMenu.Content>
+    </DropdownMenu.Root>
+
+    {#if !selected.length}
+      <Button
+        size="sm"
+        variant={keepContext ? "secondary" : "outline"}
+        class="text-[11px]"
+        disabled={!hasActive}
+        title={hasActive
+          ? keepContext
+            ? "Đang giữ context: lượt gửi tới sẽ nối vào session đang mở"
+            : "Đã tách context: lượt gửi tới sẽ tạo session mới"
+          : "Mở một session để dùng tiếp tục chat trong cùng phiên"}
+        aria-pressed={keepContext}
+        onclick={() => (keepContext = !keepContext)}
+      >
+        {#if keepContext}<Link />{:else}<LinkBreak />{/if}
+        {keepContext ? "Giữ context" : "Tách phiên"}
+      </Button>
+    {/if}
+
     {#if selected.length}
       <Button size="sm" variant="ghost" class="text-[11px]" title="Thêm một prompt nữa" onclick={() => (extraPrompts = [...extraPrompts, ""])}>
         <Plus />
@@ -229,6 +287,8 @@
   <p class="mt-2 text-[10px] text-muted-foreground">
     {#if selected.length}
       {planLine} · Enter để gửi
+    {:else if hasActive}
+      {keepContext ? "Đang nối vào session đang mở" : "Lượt tới sẽ tạo session mới"} · Enter gửi · Shift+Enter xuống dòng
     {:else}
       Enter gửi · Shift+Enter xuống dòng · bản ghi được chốt khi stream kết thúc
     {/if}

@@ -1,22 +1,18 @@
 slug: tencent
 url: https://aistudio.tencent.ai/
 prompt:
-  input_selector: .tiptap.ProseMirror
+  input_selector: textarea[placeholder="Ask me anything"]
   input_mode: fill
-  submit: Enter
+  submit: click:div.hy-chat-input-send-btn
 response:
-  last_message_selector: test
+  last_message_selector: div.agent-chat__bubble--ai
   done_signal:
     type: copy_button
+    selector: div.agent-chat__toolbar__copy
     scope: after
     use_copy_result: true
 models:
 - id: default
-mode:
-  selector: default
-flows:
-  select_model:
-    selector: default
 login:
   strategy: round_robin
   quota: 50

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { apiKey, showToast } from "../stores";
-  import { ensureProfiles, profiles, profilesError, profilesLoading, profilesMeta, refreshProfiles } from "../sync";
+  import { ensureProfiles, profiles, profilesError, profilesLoading, profilesMeta, refreshProfiles, domains, ensureDomains } from "../sync";
   import { cloneProfile, closeProfile, createProfile, deleteProfile, detectProfileDomains, openProfile, removeProfileAccount, updateProfile, type ProfileInfo } from "../api";
   import AccountDialog from "./AccountDialog.svelte";
   import { Button } from "$lib/components/ui/button";
@@ -12,15 +12,23 @@
   import * as Card from "$lib/components/ui/card";
   import * as Select from "$lib/components/ui/select";
   import * as AlertDialog from "$lib/components/ui/alert-dialog";
-  import { Browser, CircleNotch, Copy, FolderOpen, MagnifyingGlass, PencilSimple, Plus, Star, Trash, UserCircle, WarningCircle, X } from "phosphor-svelte";
+  import { Browser, Check, CircleNotch, Copy, FolderOpen, MagnifyingGlass, PencilSimple, Plus, Star, Trash, UserCircle, WarningCircle, X } from "phosphor-svelte";
 
   let creating = $state(false); let newName = $state(""); let newMaxTabs = $state(4); let newHeadless = $state(true); let newEngine = $state("playwright"); let creatingBusy = $state(false);
   let busyIds = $state<Set<number>>(new Set());
   let editingId = $state<number | null>(null); let editMaxTabs = $state(4); let editHeadless = $state(true); let editEngine = $state("playwright"); let editNotes = $state("");
   let cloningId = $state<number | null>(null); let cloneName = $state(""); let cloneEngine = $state("playwright");
   let watchProfiles = $state<Set<string>>(new Set());
-  let suggestions = $state<Record<number, string[]>>({}); let dialogProfile = $state<string | null>(null);
+  let suggestions = $state<Record<number, string[]>>({}); let dialogProfile = $state<string | null>(null); let dialogDomain = $state("");
   let deleteTarget = $state<ProfileInfo | null>(null); let purgeChecked = $state(false); let panelError = $state("");
+
+  const allSites = $derived(
+    [...new Set([
+      ...$domains.map((d) => d.host),
+      ...$profiles.flatMap((p) => p.accounts.map((a) => a.host)),
+      ...Object.values(suggestions).flat(),
+    ])].sort((a, b) => a.localeCompare(b)),
+  );
 
   const liveSuggestions = $derived(
     Object.fromEntries(
@@ -35,8 +43,12 @@
   // bootstrap riêng) và route /profiles đứng một mình (không có bootstrap nào).
   // Trước đây nó chỉ nạp lại sau mỗi thao tác, nên mở thẳng /profiles là thấy
   // danh sách rỗng dù kho vẫn còn profile. ensureProfiles() lo cả hai đường mà
-  // không gọi API hai lần.
-  onMount(() => { ensureProfiles(); });
+  // không gọi API hai lần. Kèm ensureDomains() để có đủ toàn bộ site cho ma
+  // trận profile × site bên dưới.
+  onMount(() => { ensureProfiles(); ensureDomains(); });
+
+  function openAddAccount(p: ProfileInfo, host: string) { dialogProfile = p.name; dialogDomain = host; }
+  function closeAccountDialog() { dialogProfile = null; dialogDomain = ""; }
 
   function setBusy(id: number, on: boolean) {
     const next = new Set(busyIds);
@@ -85,8 +97,61 @@
       {#each $profiles as p (p.id)}{@const status = statusOf(p)}
         <article class="rounded-lg border bg-card p-4">
           <div class="flex flex-col gap-3 lg:flex-row lg:items-start"><div class="flex min-w-0 flex-1 items-start gap-3"><span class={`mt-1.5 size-2.5 shrink-0 rounded-full ${status.cls}`}></span><div class="min-w-0"><div class="flex flex-wrap items-center gap-2"><h3 class="font-data font-semibold">{p.name}</h3><Badge variant="outline" class="font-data text-[11px]">{engineLabel(p.engine)}</Badge>{#if p.is_default}<Badge variant="secondary"><Star weight="fill" /> Mặc định</Badge>{/if}</div><p class="mt-1 text-xs text-muted-foreground">{p.domains} domain · {p.max_tabs} tab tối đa · {status.label}</p></div></div>
-            <div class="flex flex-wrap gap-1.5"><Button variant="outline" size="sm" disabled={busyIds.has(p.id)} onclick={() => onOpen(p)}><Browser /> Mở</Button><Button variant="outline" size="sm" disabled={busyIds.has(p.id) || !p.open} onclick={() => onDetect(p)}><MagnifyingGlass /> Dò domain</Button><Button variant="outline" size="sm" disabled={busyIds.has(p.id)} onclick={() => (dialogProfile = p.name)}><Plus /> Account</Button><Button variant="ghost" size="icon-sm" aria-label={`Nhân bản profile ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => (cloningId === p.id ? (cloningId = null) : startClone(p))}><Copy /></Button><Button variant="ghost" size="icon-sm" aria-label={`Sửa profile ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => (editingId === p.id ? (editingId = null) : startEdit(p))}><PencilSimple /></Button>{#if p.open}<Button variant="ghost" size="icon-sm" aria-label={`Đóng profile ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => onClose(p)}><X /></Button>{/if}<Button variant="destructive" size="icon-sm" aria-label={`Xóa profile ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => requestDelete(p)}><Trash /></Button></div></div>
-          {#if p.accounts.length}<div class="mt-3 flex flex-wrap gap-1.5">{#each p.accounts as account (account.id)}<span class="inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-data"><span>{account.host} / {account.label}</span><button class="ml-1 rounded-full p-0.5 hover:bg-muted" aria-label={`Gỡ ${account.host} khỏi ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => onRemoveAccount(p, account.id)}><X size={12} /></button></span>{/each}</div>{/if}
+            <div class="flex flex-wrap gap-1.5"><Button variant="outline" size="sm" disabled={busyIds.has(p.id)} onclick={() => onOpen(p)}><Browser /> Mở</Button><Button variant="outline" size="sm" disabled={busyIds.has(p.id) || !p.open} onclick={() => onDetect(p)}><MagnifyingGlass /> Dò domain</Button><Button variant="outline" size="sm" disabled={busyIds.has(p.id)} onclick={() => openAddAccount(p, "")}><Plus /> Account</Button><Button variant="ghost" size="icon-sm" aria-label={`Nhân bản profile ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => (cloningId === p.id ? (cloningId = null) : startClone(p))}><Copy /></Button><Button variant="ghost" size="icon-sm" aria-label={`Sửa profile ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => (editingId === p.id ? (editingId = null) : startEdit(p))}><PencilSimple /></Button>{#if p.open}<Button variant="ghost" size="icon-sm" aria-label={`Đóng profile ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => onClose(p)}><X /></Button>{/if}<Button variant="destructive" size="icon-sm" aria-label={`Xóa profile ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => requestDelete(p)}><Trash /></Button></div></div>
+          <div class="mt-3 grid gap-2">
+            <p class="text-xs text-muted-foreground">
+              {#if allSites.length}
+                {p.accounts.length}/{allSites.length} site đã gắn ·
+                <span class="inline-flex items-center gap-1 align-middle"><span class="size-2 rounded-full bg-success"></span> đã có</span> ·
+                <span class="inline-flex items-center gap-1 align-middle"><Plus size={11} class="text-primary" /> chưa có — bấm để thêm</span>
+              {:else}
+                Chưa biết site nào — bấm “Dò domain” khi profile đang mở, hoặc “Account” để thêm tay.
+              {/if}
+            </p>
+            {#if allSites.length}
+              <div class="flex flex-wrap gap-1.5">
+                {#each allSites as host (host)}
+                  {@const matched = p.accounts.filter((a) => a.host === host)}
+                  {@const suggested = liveSuggestions[p.id]?.includes(host) ?? false}
+                  {#if matched.length}
+                    {#each matched as account (account.id)}
+                      <span class="inline-flex items-center gap-1 rounded-full border border-success/40 bg-success/10 px-2.5 py-0.5 text-xs font-data text-success" title={`${account.host} / ${account.label} — đã đăng nhập`}>
+                        <Check size={12} class="shrink-0" />
+                        <span>{account.host} / {account.label}</span>
+                        <button class="ml-1 rounded-full p-0.5 text-success/70 transition-colors hover:bg-destructive/15 hover:text-destructive" aria-label={`Gỡ ${account.host} khỏi ${p.name}`} title={`Gỡ ${account.host} khỏi ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => onRemoveAccount(p, account.id)}>
+                          <X size={12} />
+                        </button>
+                      </span>
+                    {/each}
+                  {:else}
+                    <button
+                      class={suggested
+                        ? "inline-flex items-center gap-1 rounded-full border border-dashed border-warning/50 bg-warning/10 px-2.5 py-0.5 text-xs font-data text-warning transition-colors hover:border-warning hover:bg-warning/20 disabled:opacity-50"
+                        : "inline-flex items-center gap-1 rounded-full border border-dashed border-muted-foreground/30 bg-muted/20 px-2.5 py-0.5 text-xs font-data text-muted-foreground transition-colors hover:border-primary/60 hover:bg-primary/10 hover:text-primary disabled:opacity-50"}
+                      title={suggested ? `${host} đang đăng nhập trong profile này — bấm để khai báo` : `Thêm ${host} vào ${p.name}`}
+                      disabled={busyIds.has(p.id)}
+                      onclick={() => openAddAccount(p, host)}
+                    >
+                      <Plus size={12} class="shrink-0" />
+                      <span>{host}</span>
+                    </button>
+                  {/if}
+                {/each}
+              </div>
+            {:else if p.accounts.length}
+              <div class="flex flex-wrap gap-1.5">
+                {#each p.accounts as account (account.id)}
+                  <span class="inline-flex items-center gap-1 rounded-full border border-success/40 bg-success/10 px-2.5 py-0.5 text-xs font-data text-success">
+                    <Check size={12} class="shrink-0" />
+                    <span>{account.host} / {account.label}</span>
+                    <button class="ml-1 rounded-full p-0.5 text-success/70 transition-colors hover:bg-destructive/15 hover:text-destructive" aria-label={`Gỡ ${account.host} khỏi ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => onRemoveAccount(p, account.id)}>
+                      <X size={12} />
+                    </button>
+                  </span>
+                {/each}
+              </div>
+            {/if}
+          </div>
           {#if liveSuggestions[p.id]?.length}<div class="mt-3 flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning"><WarningCircle class="mt-0.5 shrink-0" />Còn đăng nhập chưa khai báo: {liveSuggestions[p.id].join(", ")} — bấm “Account” để thêm.</div>{/if}
           {#if editingId === p.id}<form class="mt-4 grid gap-3 border-t pt-4 sm:grid-cols-[9rem_8rem_minmax(0,1fr)_auto] sm:items-end" onsubmit={(e) => { e.preventDefault(); saveEdit(p); }}><div class="grid gap-1.5"><label for="edit-engine-{p.id}" class="text-sm font-medium">Engine</label><Select.Root type="single" bind:value={editEngine}><Select.Trigger id="edit-engine-{p.id}" class="h-8 w-full">{engineLabel(editEngine)}</Select.Trigger><Select.Content><Select.Item value="playwright" label="Playwright">Playwright</Select.Item><Select.Item value="cloak" label="CloakBrowser">CloakBrowser</Select.Item><Select.Item value="scrapling" label="Scrapling">Scrapling</Select.Item></Select.Content></Select.Root></div><div class="grid gap-1.5"><label for="edit-tabs-{p.id}" class="text-sm font-medium">Tab tối đa</label><Input id="edit-tabs-{p.id}" type="number" min="1" max="32" bind:value={editMaxTabs} /></div><div class="grid gap-1.5"><label for="edit-notes-{p.id}" class="text-sm font-medium">Ghi chú</label><Input id="edit-notes-{p.id}" bind:value={editNotes} /></div><div class="flex flex-wrap items-center gap-2"><label class="flex h-8 items-center gap-2 text-sm"><Switch bind:checked={editHeadless} aria-label={`Chạy ẩn profile ${p.name}`} /> Chạy ẩn</label><Button type="submit" size="sm" disabled={busyIds.has(p.id)}>Lưu</Button>{#if !p.is_default}<Button type="button" variant="outline" size="sm" disabled={busyIds.has(p.id)} onclick={() => makeDefault(p)}><Star /> Mặc định</Button>{/if}</div>{#if editEngine !== (p.engine || "playwright")}<p class="text-xs text-muted-foreground sm:col-span-4">Đổi sang <strong class="text-foreground">{engineLabel(editEngine)}</strong> dùng lại chính thư mục profile này ({p.domains} domain đã đăng nhập) — không phải đăng nhập lại. {#if p.open}Cửa sổ đang chạy sẽ được đóng và mở lại bằng engine mới; nếu profile đang phục vụ request thì việc mở lại đợi tới lúc rảnh.{/if}</p>{/if}</form>{/if}
           {#if cloningId === p.id}<form class="mt-4 grid gap-3 border-t pt-4 sm:grid-cols-[minmax(0,1fr)_10rem_auto] sm:items-end" onsubmit={(e) => { e.preventDefault(); onClone(p); }}><div class="grid gap-1.5"><label for="clone-name-{p.id}" class="text-sm font-medium">Tên bản sao</label><Input id="clone-name-{p.id}" class="font-data" bind:value={cloneName} /></div><div class="grid gap-1.5"><label for="clone-engine-{p.id}" class="text-sm font-medium">Engine</label><Select.Root type="single" bind:value={cloneEngine}><Select.Trigger id="clone-engine-{p.id}" class="h-8 w-full">{engineLabel(cloneEngine)}</Select.Trigger><Select.Content><Select.Item value="playwright" label="Playwright">Playwright</Select.Item><Select.Item value="cloak" label="CloakBrowser">CloakBrowser</Select.Item><Select.Item value="scrapling" label="Scrapling">Scrapling</Select.Item></Select.Content></Select.Root></div><Button type="submit" size="sm" disabled={busyIds.has(p.id) || p.open}><Copy /> Nhân bản</Button><p class="text-xs text-muted-foreground sm:col-span-3">Copy cả thư mục Chromium ({p.domains} domain đã đăng nhập) sang profile mới — bản gốc không đổi. {#if p.open}<span class="text-warning">Đang chạy: bấm ✕ để đóng trước đã, copy lúc Chromium còn ghi sẽ ra bản sao hỏng.</span>{:else}Cache không được copy nên bản sao nhẹ hơn.{/if}</p></form>{/if}
@@ -97,7 +162,7 @@
   </Card.Content>
 </Card.Root>
 
-{#if dialogProfile !== null}<AccountDialog profile={dialogProfile} onclose={() => (dialogProfile = null)} />{/if}
+{#if dialogProfile !== null}{#key dialogProfile + "|" + dialogDomain}<AccountDialog profile={dialogProfile} domain={dialogDomain} onclose={closeAccountDialog} />{/key}{/if}
 <AlertDialog.Root open={deleteTarget !== null} onOpenChange={(open) => { if (!open) deleteTarget = null; }}>
   <AlertDialog.Content>
     <AlertDialog.Header>

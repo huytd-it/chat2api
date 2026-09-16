@@ -45,6 +45,18 @@
   let loadingDetail = $state(false);
   let prompt = $state("");
   let extraPrompts = $state<string[]>([]);
+  /** true = gửi tiếp vào session đang mở (kèm history); false = mỗi lượt gửi
+   * tạo session mới. Chỉ áp dụng cho chat 1-1, batch test luôn dùng id mới. */
+  let keepContext = $state(
+    typeof localStorage !== "undefined" ? localStorage.getItem("c2a_keep_context") !== "0" : true,
+  );
+
+  // Nhớ lựa chọn giữ/tách giữa các lần mở app.
+  $effect(() => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("c2a_keep_context", keepContext ? "1" : "0");
+    }
+  });
   let sending = $state(false);
   let elapsed = $state(0);
   let copiedId = $state<number | null>(null);
@@ -401,8 +413,14 @@
     sending = true;
     elapsed = 0;
     ticker = setInterval(() => (elapsed += 1), 1000);
-    const existingId = active?.id ?? crypto.randomUUID().replaceAll("-", "");
-    const outgoing = [...history(), { role: "user" as const, content: text }];
+    // Tách phiên: luôn sinh id mới và chỉ gửi đúng lượt này, không kèm
+    // history của session đang mở. Giữ context: nối vào session đang mở.
+    const existingId = keepContext
+      ? (active?.id ?? crypto.randomUUID().replaceAll("-", ""))
+      : crypto.randomUUID().replaceAll("-", "");
+    const outgoing = keepContext
+      ? [...history(), { role: "user" as const, content: text }]
+      : [{ role: "user" as const, content: text }];
 
     // Optimistic trace: phần lưu bền được nạp lại từ server ngay khi stream đóng.
     const temporary: SessionMessage = {
@@ -430,7 +448,10 @@
       content: "",
       char_count: 0,
     };
-    if (active) active.messages.push(temporary, reply);
+    // Optimistic trace: chỉ khi giữ context mới vẽ tạm vào session đang mở.
+    // Tách phiên thì session mới chưa tồn tại — đợi server chốt rồi nạp lại.
+    const showOptimistic = keepContext && active;
+    if (showOptimistic) active!.messages.push(temporary, reply);
 
     liveTarget = null;
     abortCtrl = new AbortController();
@@ -734,6 +755,8 @@
       bind:this={composer}
       bind:prompt
       bind:extraPrompts
+      bind:keepContext
+      hasActive={!!active}
       {selected}
       targetCount={targets.length}
       {benchOpen}
