@@ -247,6 +247,11 @@ Server trả các header sau ngay từ đầu response, kể cả với stream:
 | `X-Chat2api-Headed` | Browser có hiển thị hay không |
 | `X-Chat2api-Conversation-Url` | URL hội thoại gốc; có ở response non-stream khi website cung cấp |
 
+> Ứng dụng ngoài muốn tích hợp API đầy đủ (chat, session, ảnh, recipe,
+> combo, provider, profile, settings, key) và tùy biến nâng cao: xem
+> [docs/api-integration.md](docs/api-integration.md). Bản rút gọn chỉ giữ
+> session: [docs/session-api.md](docs/session-api.md).
+
 ## Tích hợp web chat mới
 
 ### Cách 1 — dùng desktop app
