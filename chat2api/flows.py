@@ -90,7 +90,8 @@ _MEDIA_ALIASES: dict[str, str] = {
     "video_copy_exclude": "copy_exclude",
 }
 
-_TEXT_RESPONSE_KEYS = ("last_message_selector", "done_signal", "format", "capture_html")
+_TEXT_RESPONSE_KEYS = ("last_message_selector", "done_signal", "format", "capture_html",
+                        "limit_patterns", "limit_cooldown_hours", "limit_on_missing_copy")
 _MEDIA_RESPONSE_KEYS = ("media_selector", "copy_selector", "copy_scope", "copy_exclude",
                         "done_signal", "capture_html")
 
@@ -386,6 +387,8 @@ def validate_flows(recipe: dict, done_signals, copy_scopes) -> list[str]:
                             "(hoặc copy_selector)")
         elif not response.get("last_message_selector"):
             errs.append(f"missing/invalid field: flows.{kind}.response.last_message_selector")
+        from .account_limits import validate_limit_fields as _validate_limits
+        errs += _validate_limits(response, f"flows.{kind}.response")
 
     errs += _model_flow_errors(recipe, built)
     return errs

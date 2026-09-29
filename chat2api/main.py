@@ -9,11 +9,11 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from . import (accounts, apikeys, applog, auth, errors, flows, profiles, sessions,  # noqa: F401  (import auth để đăng ký dependency)
+from . import (account_limits, accounts, apikeys, applog, auth, errors, flows, profiles, sessions,  # noqa: F401  (import auth để đăng ký dependency)
                settings, store)
 from .config import Config
 from .errors import OpenAIError
-from .providers.browser_recipe import TrialLimitExceeded
+from .providers.browser_recipe import AccountLimitExceeded, TrialLimitExceeded
 from .router import ModelNotFound, Router
 from .schemas import ChatRequest, ComboCreateRequest, ComboUpdateRequest, ImageGenerateRequest
 
@@ -95,6 +95,22 @@ def merge_recipe(base: dict, patch: dict) -> dict:
         else:
             out[key] = value
     return out
+
+
+def account_limit_error(slug: str, error: AccountLimitExceeded,
+                          response: Response | None = None) -> OpenAIError:
+    """Hết account vì limit (429). Không trả msg cảnh báo của site cho client."""
+    retry = max(0, int(getattr(error, "retry_after", 0) or 0))
+    if response is not None:
+        try:
+            response.headers["Retry-After"] = str(retry or 3600)
+        except Exception:
+            pass
+    applog.log(f"limit: hết account phục vụ '{slug}' (thử lại sau {retry}s)", "warn")
+    return OpenAIError(
+        429, "account_limit_exceeded",
+        f"Mọi account phục vụ '{slug}' đang tạm khóa, thử lại sau {retry}s.",
+        "rate_limit")
 
 
 def llm_upstream_error(error) -> OpenAIError:
@@ -350,6 +366,8 @@ def create_app(cfg: Config) -> FastAPI:
             except TrialLimitExceeded as error:
                 applog.log(f"images: hết lượt dùng thử ({provider.slug}): {error}", "warn")
                 raise OpenAIError(403, "trial_limit_exceeded", str(error))
+            except AccountLimitExceeded as error:
+                raise account_limit_error(provider.slug, error, response)
         raw_headed = request.headers.get("x-chat2api-headed", "").strip().lower()
         headed = True if raw_headed == "true" else False if raw_headed == "false" else None
         # log session: prompt stored as messages list for reuse
@@ -387,49 +405,75 @@ def create_app(cfg: Config) -> FastAPI:
             + (" (cửa sổ)" if assignment and assignment.headed else ""))
 
         async def _do_generate():
-            sent = {"n": 0}
-            async with rt.slot():
+            nonlocal assignment
+            from .providers.browser_recipe import AccountLimitExceeded as _ALE2
+            from .providers.browser_recipe import account_key_of as _akey2
+            tried_img: set[str] = set()
+            if assignment is not None:
+                tried_img.add(_akey2(assignment))
+            while True:
                 try:
-                    # Combo failover giữ provider là combo, delegate bên trong sẽ thử từng member
-                    if isinstance(original_combo_provider_img, ComboPImg) and combo_strategy_img == "failover":
-                        kwargs = {"headed": headed, "response_format": body.response_format,
-                                  "model_id": original_combo_local_img, "sticky_key": requested_session or ""}
-                        if assignment is not None:
-                            kwargs["assignment"] = assignment
-                        data = await original_combo_provider_img.generate_images(body.prompt, n=body.n, size=body.size, **kwargs)
-                        return data
-                    kwargs = {"headed": headed, "response_format": body.response_format,
-                              "model_id": local}
-                    if assignment is not None:
-                        kwargs["assignment"] = assignment
-                    # passthrough & gemini need prompt via positional
-                    if isinstance(provider, BR):
-                        data = await provider.generate_images(body.prompt, n=body.n, size=body.size, **kwargs)
-                    else:
-                        # generic provider: prompt, n, size, model_id, response_format
-                        data = await provider.generate_images(body.prompt, n=body.n, size=body.size,
-                                                              model_id=local,
-                                                              response_format=body.response_format)
-                    if not isinstance(provider, ComboPImg):
-                        rt.mark_success(provider.slug)
-                    return data
-                except TrialLimitExceeded as e:
-                    applog.log(f"images: hết lượt dùng thử ({provider.slug}): {e}", "warn")
-                    raise OpenAIError(403, "trial_limit_exceeded", str(e))
-                except TimeoutError:
-                    rt.mark_failure(provider.slug, f"timeout sau {cfg_.recipe_timeout_ms}ms")
-                    applog.log(f"images: timeout ({provider.slug})", "error")
-                    raise OpenAIError(504, "recipe_timeout",
-                                      f"Không nhận được ảnh trong thời hạn ({cfg_.recipe_timeout_ms}ms)",
-                                      "api_error")
-                except OpenAIError:
-                    raise
-                except NotImplementedError as e:
-                    raise OpenAIError(400, "model_not_supported", str(e))
-                except Exception as e:
-                    rt.mark_failure(provider.slug, str(e))
-                    applog.log(f"images: lỗi ({provider.slug}): {e}", "error")
-                    raise OpenAIError(502, "upstream_error", str(e), "api_error")
+                    sent = {"n": 0}
+                    async with rt.slot():
+                        try:
+                            # Combo failover giữ provider là combo, delegate bên trong sẽ thử từng member
+                            if isinstance(original_combo_provider_img, ComboPImg) and combo_strategy_img == "failover":
+                                kwargs = {"headed": headed, "response_format": body.response_format,
+                                          "model_id": original_combo_local_img, "sticky_key": requested_session or ""}
+                                if assignment is not None:
+                                    kwargs["assignment"] = assignment
+                                data = await original_combo_provider_img.generate_images(body.prompt, n=body.n, size=body.size, **kwargs)
+                                return data
+                            kwargs = {"headed": headed, "response_format": body.response_format,
+                                      "model_id": local}
+                            if assignment is not None:
+                                kwargs["assignment"] = assignment
+                            # passthrough & gemini need prompt via positional
+                            if isinstance(provider, BR):
+                                data = await provider.generate_images(body.prompt, n=body.n, size=body.size, **kwargs)
+                            else:
+                                # generic provider: prompt, n, size, model_id, response_format
+                                data = await provider.generate_images(body.prompt, n=body.n, size=body.size,
+                                                                      model_id=local,
+                                                                      response_format=body.response_format)
+                            if not isinstance(provider, ComboPImg):
+                                rt.mark_success(provider.slug)
+                            return data
+                        except TrialLimitExceeded as e:
+                            applog.log(f"images: hết lượt dùng thử ({provider.slug}): {e}", "warn")
+                            raise OpenAIError(403, "trial_limit_exceeded", str(e))
+                        except TimeoutError:
+                            rt.mark_failure(provider.slug, f"timeout sau {cfg_.recipe_timeout_ms}ms")
+                            applog.log(f"images: timeout ({provider.slug})", "error")
+                            raise OpenAIError(504, "recipe_timeout",
+                                              f"Không nhận được ảnh trong thời hạn ({cfg_.recipe_timeout_ms}ms)",
+                                              "api_error")
+                        except OpenAIError:
+                            raise
+                        except AccountLimitExceeded:
+                            raise
+                        except NotImplementedError as e:
+                            raise OpenAIError(400, "model_not_supported", str(e))
+                        except Exception as e:
+                            rt.mark_failure(provider.slug, str(e))
+                            applog.log(f"images: lỗi ({provider.slug}): {e}", "error")
+                            raise OpenAIError(502, "upstream_error", str(e), "api_error")
+                except _ALE2 as limit_exc:
+                    if (target_account_id is not None or assignment is None
+                            or not isinstance(provider, BR)):
+                        raise account_limit_error(provider.slug, limit_exc, response)
+                    tried_img.add(limit_exc.account_key or _akey2(assignment))
+                    assignment.release()
+                    try:
+                        assignment = await provider.assign(
+                            target_account_id, sticky_key=requested_session or "",
+                            exclude=tried_img)
+                    except _ALE2 as exhausted:
+                        raise account_limit_error(provider.slug, exhausted, response)
+                    tried_img.add(_akey2(assignment))
+                    assignment.headed = provider.resolve_headed(headed, assignment.profile)
+                    for _k, _v in _target_headers(recording.session_id, assignment).items():
+                        target_headers[_k] = _v
 
         try:
             sessions.first_delta(recording)
@@ -557,6 +601,8 @@ def create_app(cfg: Config) -> FastAPI:
             except TrialLimitExceeded as error:
                 applog.log(f"chat: hết lượt dùng thử ({provider.slug}): {error}", "warn")
                 raise OpenAIError(403, "trial_limit_exceeded", str(error))
+            except AccountLimitExceeded as error:
+                raise account_limit_error(provider.slug, error, response)
 
         # Ghi một transaction trước provider và một transaction khi kết thúc;
         # tuyệt đối không ghi từng SSE delta. Header session cho desktop nối
@@ -636,54 +682,79 @@ def create_app(cfg: Config) -> FastAPI:
                     yield d
 
         async def _run_provider(sent):
-            try:
-                # Combo failover cần sticky_key để sticky_session hoạt động
-                if isinstance(provider, ComboP):
-                    stream_kwargs: dict = {}
-                    if assignment is not None:
-                        stream_kwargs["assignment"] = assignment
-                    # headed vẫn cần cho underlying BR
-                    stream_kwargs["headed"] = headed
-                    stream_kwargs["sticky_key"] = requested_session or ""
-                else:
-                    stream_kwargs = {"headed": headed} if isinstance(provider, BR) else {}
-                    if assignment is not None:
-                        stream_kwargs["assignment"] = assignment
-                async for d in provider.stream(msgs, local, **stream_kwargs):
-                    sent["n"] += 1
-                    yield d
-                # không mark failure/success cho combo ảo (chỉ đếm underlying sẽ tự mark nếu cần)
-                if not isinstance(provider, ComboP):
-                    rt.mark_success(provider.slug)
-            except TrialLimitExceeded as e:
-                applog.log(f"chat: hết lượt dùng thử ({provider.slug}): {e}", "warn")
-                raise OpenAIError(403, "trial_limit_exceeded", str(e))
-            except TimeoutError:
-                rt.mark_failure(provider.slug, f"timeout sau {cfg_.recipe_timeout_ms}ms")
-                applog.log(f"chat: timeout ({provider.slug})", "error")
-                if sent["n"] > 0:
-                    raise
-                if fallback_ok("timeout"):
-                    async for d in agent_stream():
-                        yield d
-                    rt.mark_success(provider.slug)
-                    return
-                raise OpenAIError(504, "recipe_timeout",
-                                  f"Không nhận được reply trong thời hạn ({cfg_.recipe_timeout_ms}ms)",
-                                  "api_error")
-            except OpenAIError:
-                raise
-            except Exception as e:
-                rt.mark_failure(provider.slug, str(e))
-                applog.log(f"chat: lỗi ({provider.slug}): {e}", "error")
-                if sent["n"] > 0:
-                    raise
-                if fallback_ok(str(e)):
-                    async for d in agent_stream():
-                        yield d
-                    rt.mark_success(provider.slug)
-                    return
-                raise OpenAIError(502, "upstream_error", str(e), "api_error")
+            nonlocal assignment
+            from .providers.browser_recipe import account_key_of as _akey
+            tried: set[str] = set()
+            if assignment is not None:
+                tried.add(_akey(assignment))
+            while True:
+                try:
+                    try:
+                        # Combo failover cần sticky_key để sticky_session hoạt động
+                        if isinstance(provider, ComboP):
+                            stream_kwargs: dict = {}
+                            if assignment is not None:
+                                stream_kwargs["assignment"] = assignment
+                            # headed vẫn cần cho underlying BR
+                            stream_kwargs["headed"] = headed
+                            stream_kwargs["sticky_key"] = requested_session or ""
+                        else:
+                            stream_kwargs = {"headed": headed} if isinstance(provider, BR) else {}
+                            if assignment is not None:
+                                stream_kwargs["assignment"] = assignment
+                        async for d in provider.stream(msgs, local, **stream_kwargs):
+                            sent["n"] += 1
+                            yield d
+                        # không mark failure/success cho combo ảo (chỉ đếm underlying sẽ tự mark nếu cần)
+                        if not isinstance(provider, ComboP):
+                            rt.mark_success(provider.slug)
+                    except TrialLimitExceeded as e:
+                        applog.log(f"chat: hết lượt dùng thử ({provider.slug}): {e}", "warn")
+                        raise OpenAIError(403, "trial_limit_exceeded", str(e))
+                    except TimeoutError:
+                        rt.mark_failure(provider.slug, f"timeout sau {cfg_.recipe_timeout_ms}ms")
+                        applog.log(f"chat: timeout ({provider.slug})", "error")
+                        if sent["n"] > 0:
+                            raise
+                        if fallback_ok("timeout"):
+                            async for d in agent_stream():
+                                yield d
+                            rt.mark_success(provider.slug)
+                            return
+                        raise OpenAIError(504, "recipe_timeout",
+                                          f"Không nhận được reply trong thời hạn ({cfg_.recipe_timeout_ms}ms)",
+                                          "api_error")
+                    except OpenAIError:
+                        raise
+                    except AccountLimitExceeded:
+                        raise
+                    except Exception as e:
+                        rt.mark_failure(provider.slug, str(e))
+                        applog.log(f"chat: lỗi ({provider.slug}): {e}", "error")
+                        if sent["n"] > 0:
+                            raise
+                        if fallback_ok(str(e)):
+                            async for d in agent_stream():
+                                yield d
+                            rt.mark_success(provider.slug)
+                            return
+                        raise OpenAIError(502, "upstream_error", str(e), "api_error")
+                except AccountLimitExceeded as limit_exc:
+                    if (target_account_id is not None or assignment is None
+                            or not isinstance(provider, BR)):
+                        raise account_limit_error(provider.slug, limit_exc, response)
+                    tried.add(limit_exc.account_key or _akey(assignment))
+                    assignment.release()
+                    try:
+                        assignment = await provider.assign(
+                            target_account_id, sticky_key=requested_session or "",
+                            exclude=tried)
+                    except AccountLimitExceeded as exhausted:
+                        raise account_limit_error(provider.slug, exhausted, response)
+                    tried.add(_akey(assignment))
+                    assignment.headed = provider.resolve_headed(headed, assignment.profile)
+                    for _k, _v in _target_headers(recording.session_id, assignment).items():
+                        target_headers[_k] = _v
 
         if body.stream:
             async def gen():
@@ -902,6 +973,21 @@ def register_admin(app: FastAPI, admin) -> None:
             raise OpenAIError(400, "target_unsupported",
                               f"Chưa có recipe nào phục vụ {host}")
         return providers_[0]
+
+    @admin.get("/account-cooldowns")
+    async def account_cooldown_list(request: Request, recipe: str = ""):
+        """Account đang bị khóa tạm vì limit (theo từng recipe)."""
+        return {"cooldowns": account_limits.list_cooldowns(recipe.strip())}
+
+    @admin.delete("/account-cooldowns")
+    async def account_cooldown_clear(request: Request, recipe_slug: str = "",
+                                     account_key: str = ""):
+        """Gỡ khóa tạm một account (mở lại ngay, không chờ hết cooldown)."""
+        if not recipe_slug.strip() or not account_key.strip():
+            raise OpenAIError(400, "invalid_request_error",
+                              "Cần recipe_slug + account_key")
+        account_limits.clear_cooldown(recipe_slug.strip(), account_key.strip())
+        return {"ok": True}
 
     @admin.post("/test-targets/open")
     async def test_target_open(body: TestTargetOpenRequest, request: Request):

@@ -27,6 +27,13 @@ response:
     timeout_ms: 120000
     selector: ".copy-btn"              # khi type != copy_button
     scope: after                       # after | inside | page (copy_button)
+  # Phát hiện account limit theo từng site/recipe: regex case-insensitive
+  # trên toàn reply text. Rỗng/vắng = tắt; sai regex báo lỗi lúc lưu.
+  # Dính → khóa tạm account `limit_cooldown_hours` (mặc định 24) + retry
+  # account khác cùng recipe; hết account → 429.
+  limit_patterns: ["reached today's.+limit"]
+  limit_cooldown_hours: 24
+  limit_on_missing_copy: false  # true: mất nút Copy + chốt fallback cũng tính là limit
 
 timing:
   ready_delay_ms: 1200
@@ -83,5 +90,6 @@ anon_trial_limit: 20
 - **models[].flow**: chọn model = chọn flow. Thắng `capability`, và là cách DUY NHẤT trỏ tới flow tên tự đặt. Trỏ vào flow chưa khai (hoặc vào `select_model`) là lỗi validate.
 - **Nút icon-only (không text, không aria-label)**: event có `actionable.isSelf == false` nghĩa là element bị click chỉ là lớp phủ nới vùng bấm — lấy selector từ `actionable.cssPath` / `actionable.attributes`, đừng lấy `selectors.primary`. `icon` (viewBox + `pathD`) chỉ để NHẬN RA nút, CSS không chọn được theo nó.
 - **`done_signal` khi không bám được nút Copy**: `copy_button` bỏ trống `selector` sẽ dùng `DEFAULT_COPY_BUTTON_SELECTOR` (chỉ khớp qua `aria-label` / `title` / `data-testid` / `复制`). Site đặt nút Copy không có tên nào trong số đó thì mọi request phải chờ hết `fallback_quiet_ms` (mặc định 15000ms) rồi mới chốt — và `use_copy_result: true` khi đó vừa mất stream tăng dần vừa không đọc được clipboard. Kiểm tra `actionable.attributes` trong trace trước khi chọn `copy_button`.
+- **Account limit theo site**: nếu trace/site cho thấy msg cảnh báo hết quota (vd Qwen: "You've reached today's ... limit"), seed `response.limit_patterns` (regex, case-insensitive) + `limit_cooldown_hours` (mặc định 24). Chỉ bật `limit_on_missing_copy: true` khi limit thật sự đi kèm mất nút Copy — regex quá rộng sẽ khóa nhầm account 24h.
 - **Iframe/shadow**: nếu `frame.chain` / `shadow.hostSelector` khác rỗng, selector phải tính trong frame/shadow đó (playwright frame locator).
 - **Tương thích ngược**: recipe phẳng (chỉ `prompt`/`response`/`mode`) vẫn chạy — đọc thành flow `text` (+ `image` nếu có `response.image_selector`).

@@ -230,6 +230,7 @@ Envelope mọi lỗi:
 | 401 | `invalid_api_key` | Thiếu/sai Bearer |
 | 403 | `insufficient_scope` | Key thiếu scope cho prefix path |
 | 403 | `trial_limit_exceeded` | Hết lượt dùng thử ẩn danh |
+| 429 | `account_limit_exceeded` | Mọi account phục vụ recipe đều dính limit của site (kèm header `Retry-After` giây) |
 | 404 | `model_not_found`, `not_found` | Sai model id / session, recipe, combo, profile, key không tồn tại |
 | 409 | `slug_taken`, `profile_in_use`, `account_in_use`, `profile_locked`, `invalid_job_state`... | Xung đột trạng thái — đọc `message` |
 | 410 | `gone` | Endpoint `/admin/flows/*` đã xoá → dùng recipe (§10) |
@@ -653,6 +654,23 @@ curl -X POST http://127.0.0.1:8100/admin/recipes/my-site/accounts/$SID/cancel \
 
 Tên account: chữ thường/số/`-`.
 
+### 15.3 Account cooldown (limit theo site/recipe)
+
+Khác `disabled` (tắt hẳn): cooldown chỉ khóa tạm một account cho một
+recipe trong `limit_cooldown_hours`, bền qua restart (bảng
+`account_cooldown`). Hết hạn tự mở lại (lazy-expire lúc assign).
+
+```bash
+# Liệt kê khóa còn hạn (?recipe=qwen-web để lọc)
+curl "http://127.0.0.1:8100/admin/account-cooldowns?recipe=" -H "Authorization: Bearer $ADMIN"
+# -> {cooldowns:[{recipe_slug,account_key,until_ms,retry_after,reason,updated_at}]}
+# account_key: db:<id> cho account DB, file:<domain>/<name> cho kho file
+
+# Gỡ tay (mở lại ngay, không chờ hết hạn)
+curl -X DELETE "http://127.0.0.1:8100/admin/account-cooldowns?recipe_slug=qwen-web&account_key=db:3" \
+  -H "Authorization: Bearer $ADMIN"
+```
+
 ## 16. Test targets
 
 Ma trận account↔recipe đã ghép sẵn — client không tự đoán domain nào
@@ -774,6 +792,13 @@ response:
   last_message_selector: ".assistant-message"
   format: markdown             # giữ heading/list/code; trống = text thuần
   capture_html: true           # kèm HTML gốc trong bản ghi session
+  # Phát hiện account limit theo từng site/recipe: regex case-insensitive
+  # trên toàn reply text. Rỗng/vắng = tắt. Sai regex báo lỗi lúc lưu.
+  limit_patterns:
+    - "reached today's.+limit"
+    - "Upgrade your membership or switch to another model"
+  limit_cooldown_hours: 24     # giờ khóa tạm account dính limit (mặc định 24)
+  limit_on_missing_copy: true  # mất nút Copy + chốt fallback cũng tính là limit
   done_signal:
     type: copy_button          # copy_button | stable_text | selector_appear | selector_disappear
     selector: ".copy-btn"      # khi type != copy_button
@@ -898,6 +923,11 @@ Quy trình sửa an toàn: `source` → `preview` → `test` (§11) → `PUT` �
   response báo member qua `X-Chat2api-Combo-Member`.
 - `keep_context: false` + `new_chat` + `RECIPE_TIMEOUT_MS` thấp = mỗi
   request độc lập, dễ retry, hợp cho worker queue.
+- Account dính limit (khớp `response.limit_patterns`): tự khóa tạm
+  `limit_cooldown_hours` rồi retry account khác cùng recipe (mỗi account
+  1 lần). Ghim `X-Chat2api-Account-Id` thì không chuyển. Hết account →
+  `429 account_limit_exceeded` + header `Retry-After`, không trả msg cảnh
+  báo của site. Coi/xóa khóa tay qua §15.3.
 
 ## 22. Tương thích OpenAI client / n8n
 

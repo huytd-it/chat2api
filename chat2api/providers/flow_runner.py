@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import AsyncIterator
 
+from .. import account_limits as limits
 from .. import applog
 from ..flow_compiler import compile_flow
 from ..flow_executor import (
@@ -32,10 +33,12 @@ from ..flow_executor import (
 from ..prompt import flatten_messages
 from .browser_recipe import (
     DEFAULT_COPY_BUTTON_SELECTOR,
+    AccountLimitExceeded,
     BrowserRecipe,
     TrialLimitExceeded,
     _page_url,
     _sleep_ms,
+    account_key_of,
 )
 
 
@@ -128,6 +131,8 @@ class FlowRunner(FlowRunnerMixin, BrowserRecipe):
         copy_since = None
         last = ""
         prompt = ctx.prompt
+        _compiled, _lcfg = self._compiled_limit(flow)
+        _via_fallback = False
         while True:
             if time.monotonic() > deadline:
                 raise TimeoutError(f"flow '{self.slug}' timeout sau {timeout_ms}ms")
@@ -135,6 +140,10 @@ class FlowRunner(FlowRunnerMixin, BrowserRecipe):
             if text is None:
                 await asyncio.sleep(0.5)
                 continue
+            if _compiled and text.strip() and text.strip() != prompt.strip():
+                _matched_early = limits.match_limit(text, _compiled)
+                if _matched_early:
+                    raise self._record_limit_hit(_matched_early, ctx.assignment, flow)
             if reply_html is not None and ctx.assignment is not None:
                 ctx.assignment.html = reply_html
             if text != last:
@@ -165,12 +174,23 @@ class FlowRunner(FlowRunnerMixin, BrowserRecipe):
                         f"{copy_fallback_ms}ms text đứng yên — chốt theo stable_text",
                         level="warn")
                     done = True
+                    _via_fallback = True
             else:
                 count = await page.locator(ds["selector"]).count()
                 appear = dtype == "selector_appear"
                 done = (((count > 0) == appear) and stable_since is not None
                         and quiet_for >= min(quiet_ms, 1000))
             if done:
+                if _compiled:
+                    _matched_done = limits.match_limit(last, _compiled)
+                    if _matched_done:
+                        raise self._record_limit_hit(_matched_done, ctx.assignment, flow)
+                    if (_via_fallback and _lcfg["on_missing_copy"]
+                            and last.strip() and last.strip() != prompt.strip()):
+                        raise self._record_limit_hit(
+                            last[:200] or "missing-copy", ctx.assignment, flow)
+                if _via_fallback:
+                    ctx.set("copy_fallback", True)
                 if ctx.assignment is not None:
                     ctx.assignment.conversation_url = _page_url(page)
                 ctx.text = last
@@ -240,21 +260,68 @@ class FlowRunner(FlowRunnerMixin, BrowserRecipe):
 
     # ------------------------- stream / generate (override) -------------------------
 
+    def _flow_limit_cfg(self) -> dict:
+        flow = self.flow_kind if self.flow_kind in self.flows else "text"
+        return limits.limit_config(self.flow_response(flow) or self.response_cfg)
+
+    async def _node_check_limit(self, ctx, params: dict) -> bool:
+        # Node `condition` với {check: limit}: dò limit trên ctx.text.
+        # True (dính) -> ghi cooldown + ném AccountLimitExceeded để stream
+        # retry account khác; False -> đi tiếp ra output.
+        cfg = self._flow_limit_cfg()
+        compiled = cfg["compiled"]
+        if not compiled:
+            return False
+        text = ctx.text or ""
+        matched = limits.match_limit(text, compiled)
+        if matched:
+            raise self._record_limit_hit(matched, ctx.assignment, self.flow_kind)
+        if (cfg["on_missing_copy"] and text.strip()
+                and ctx.vars.get("copy_fallback") and not ctx.vars.get("copied")):
+            raise self._record_limit_hit(text[:200] or "missing-copy",
+                                         ctx.assignment, self.flow_kind)
+        return False
+
+    async def _node_copy_button(self, ctx, params: dict) -> None:
+        await super()._node_copy_button(ctx, params)
+        # Sau copy: text cuối dính pattern limit thì ném ngay để retry, thay
+        # vì chờ tới node condition (poll đã abort sớm, đây là chốt sau copy).
+        cfg = self._flow_limit_cfg()
+        if cfg["compiled"] and ctx.text:
+            matched = limits.match_limit(ctx.text, cfg["compiled"])
+            if matched:
+                raise self._record_limit_hit(matched, ctx.assignment, self.flow_kind)
+
     async def stream(self, messages: list[dict], model_id: str,
                      headed: bool | None = None,
                      target_account_id: int | None = None,
                      assignment=None) -> AsyncIterator[str]:
         prompt = flatten_messages(messages)
         self.last_response_html = None
-        owned = assignment is None
-        if owned:
-            assignment = await self.assign(target_account_id)
-        try:
+        if assignment is not None:
             async for delta in self._run_flow(prompt, assignment, headed):
                 yield delta
+            return
+        assignment = await self.assign(target_account_id)
+        tried: set[str] = {account_key_of(assignment)}
+        try:
+            while True:
+                try:
+                    async for delta in self._run_flow(prompt, assignment, headed):
+                        yield delta
+                    break
+                except AccountLimitExceeded as exc:
+                    applog.log(
+                        f"flow: '{self.slug}' account {exc.account_key or '?'} "
+                        f"chạm limit, đổi account khác", level="warn")
+                    if target_account_id is not None:
+                        raise
+                    tried.add(exc.account_key or account_key_of(assignment))
+                    assignment.release()
+                    assignment = await self.assign(target_account_id, exclude=tried)
+                    tried.add(account_key_of(assignment))
         finally:
-            if owned:
-                assignment.release()
+            assignment.release()
 
     async def _run_flow(self, prompt: str, assignment,
                         headed: bool | None) -> AsyncIterator[str]:

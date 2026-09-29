@@ -225,7 +225,17 @@ class FlowRunnerMixin:
             ctx.set("copied", True)
 
     async def _node_condition(self, ctx: FlowContext, params: dict) -> bool:
+        check = str(params.get("check") or "").strip().lower()
         expr = str(params.get("expression") or params.get("value") or "").strip()
+        if check == "limit" or expr.lower() == "limit":
+            # Dò limit trên ctx.text: dính -> ghi cooldown + ném lỗi để lớp
+            # stream retry account khác; không dính -> False (ra output).
+            # Runner (BrowserRecipe/FlowRunner) cung cấp _node_check_limit;
+            # mixin đứng một mình (test) thì coi như không có limit.
+            handler = getattr(self, "_node_check_limit", None)
+            if handler is None:
+                return False
+            return await handler(ctx, params)
         if not expr:
             return True
         if expr in ctx.vars:

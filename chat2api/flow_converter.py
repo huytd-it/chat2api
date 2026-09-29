@@ -167,6 +167,11 @@ def convert_recipe(recipe: dict) -> list[dict]:
         else:
             ds_params = dict(ds) if isinstance(ds, dict) else {"type": "stable_text"}
             ds_params.setdefault("type", "stable_text")
+            limit_params = {k: response[k] for k in (
+                "limit_patterns", "limit_cooldown_hours", "limit_on_missing_copy")
+                if response.get(k) is not None}
+            if limit_params:
+                ds_params.update(limit_params)
             add("wait-done-signal", ds_params)
             last_sel = str(response.get("last_message_selector") or "")
             extract_params = {k: v for k, v in {
@@ -174,6 +179,9 @@ def convert_recipe(recipe: dict) -> list[dict]:
                 "format": response.get("format"),
                 "capture_html": response.get("capture_html"),
                 "use_copy_result": ds_params.get("use_copy_result"),
+                "limit_patterns": response.get("limit_patterns"),
+                "limit_cooldown_hours": response.get("limit_cooldown_hours"),
+                "limit_on_missing_copy": response.get("limit_on_missing_copy"),
             }.items() if v is not None}
             add("extract-text", extract_params or None)
             if ds_params.get("type") == "copy_button":
@@ -183,6 +191,10 @@ def convert_recipe(recipe: dict) -> list[dict]:
                     "exclude": ds_params.get("exclude"),
                     "use_copy_result": ds_params.get("use_copy_result", True),
                 }.items() if v is not None})
+            if limit_params.get("limit_patterns"):
+                # Chốt limit sau khi đã có text cuối: true → cooldown + ném lỗi
+                # (retry account khác), false → ra output như thường.
+                add("condition", {"check": "limit"})
         add("output")
 
         edges = [{"source": nodes[i]["id"], "target": nodes[i + 1]["id"],

@@ -8,6 +8,16 @@ response:
   last_message_selector: .qwen-markdown
   format: markdown
   capture_html: true
+  # Msg cảnh báo limit của site KHÔNG phải câu trả lời: dính pattern thì khóa
+  # tạm account này 24h rồi chuyển account khác cùng recipe (mỗi account 1 lần).
+  # Hết account → 429, không trả msg cảnh báo cho client.
+  limit_patterns:
+    - "reached today's.+limit"
+    - "Upgrade your membership or switch to another model"
+  limit_cooldown_hours: 24
+  # Qwen bật use_copy_result: limit thường đi kèm mất nút Copy nên mất nút
+  # cũng tính là limit (chốt bằng fallback mà không khớp pattern vẫn khóa).
+  limit_on_missing_copy: true
   done_signal:
     type: copy_button
     quiet_ms: 10000        # giữ nguyên (recipe hiện 10000, không hạ xuống 600 nếu chưa fix copy selector)

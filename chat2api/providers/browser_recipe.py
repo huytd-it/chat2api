@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import AsyncIterator
 from urllib.parse import urlsplit
 
+from .. import account_limits as limits
 from .. import accounts, applog, flows, settings, store
 from ..prompt import flatten_messages
 from .base import ModelInfo, Provider
@@ -93,6 +94,26 @@ class TrialLimitExceeded(RuntimeError):
     pass
 
 
+class AccountLimitExceeded(RuntimeError):
+    """Site báo hết quota trên account đang chạy (theo `response.limit_patterns`).
+
+    Mang sẵn khóa account + đoạn text khớp để lớp trên ghi cooldown và retry
+    account khác mà không phải parse lại. Không bao giờ để msg cảnh báo của
+    site lọt ra client — hết account thì fail 429.
+    """
+
+    def __init__(self, account_key: str = "", matched: str = "",
+                 retry_after: int = 0, recipe_slug: str = ""):
+        self.account_key = account_key
+        self.matched = matched
+        self.retry_after = max(0, int(retry_after or 0))
+        self.recipe_slug = recipe_slug
+        super().__init__(
+            f"Account {account_key or '?'} đã chạm giới hạn của '{recipe_slug or '?'}'"
+            f"{(': ' + matched[:120]) if matched else ''}"
+        )
+
+
 def _stored_anon_uses(slug: str) -> int:
     """Số lượt dùng thử ẩn danh đã tiêu, đọc lại từ DB khi dựng recipe."""
     db = store.default()
@@ -103,6 +124,21 @@ def _stored_anon_uses(slug: str) -> int:
     except Exception:
         return 0
     return rows[0]["anon_used"] if rows else 0
+
+
+def account_key_of(assignment) -> str:
+    """Khóa cooldown chung cho một assignment (db:<id> | file:<domain>/<name>)."""
+    if assignment is None:
+        return limits.anon_key()
+    account_id = getattr(assignment, "account_id", None)
+    if account_id is not None:
+        return limits.db_key(int(account_id))
+    label = str(getattr(assignment, "account_label", "") or "")
+    if not label or label == "-":
+        return limits.anon_key()
+    host = str(getattr(assignment, "host", "") or "")
+    domain = host[4:] if host.startswith("www.") else host
+    return limits.file_key(domain.lower(), label)
 
 
 def validate_recipe(d: dict) -> list[str]:
@@ -138,6 +174,9 @@ def validate_recipe(d: dict) -> list[str]:
         errs.append("invalid field: response.image_copy_scope (after | inside | page)")
     if resp.get("image_copy_exclude") is not None and not isinstance(resp.get("image_copy_exclude"), str):
         errs.append("invalid field: response.image_copy_exclude (phải là string)")
+    from ..account_limits import validate_limit_fields as _validate_limits
+
+    errs += _validate_limits(resp if isinstance(resp, dict) else {}, "response")
     if not declared_flows or ds:
         need("response.done_signal.type", ds.get("type") in DONE_SIGNALS)
     if ds.get("type") in {"selector_appear", "selector_disappear"}:
@@ -302,7 +341,8 @@ class _AccountRotator:
     """
 
     def __init__(self, accounts: list[tuple[str, Path | None]], strategy: str, quota: int,
-                anon_trial_limit: int | None = None, slug: str = "", anon_uses: int = 0):
+                anon_trial_limit: int | None = None, slug: str = "", anon_uses: int = 0,
+                domain: str = ""):
         self._accounts = accounts
         self._strategy = strategy
         self._quota = max(1, quota)
@@ -317,6 +357,7 @@ class _AccountRotator:
         # thử không có tác dụng gì. `slug` rỗng = không có chỗ lưu (test đơn vị).
         self._anon_uses = anon_uses
         self._slug = slug
+        self._domain = (domain or "").lower()
 
     @property
     def anon_trial_limit(self) -> int | None:
@@ -332,7 +373,35 @@ class _AccountRotator:
             db.submit("UPDATE recipe SET anon_used = ? WHERE slug = ?",
                       (self._anon_uses, self._slug))
 
-    async def next(self) -> tuple[str, Path | None]:
+    def _file_key(self, name: str) -> str:
+        from .. import account_limits as _limits
+        if name == "__anon__":
+            return _limits.anon_key()
+        return _limits.file_key(self._domain, name)
+
+    def _cooled(self, name: str) -> tuple[bool, int]:
+        from .. import account_limits as _limits
+        if name == "__anon__" or not self._slug:
+            return False, 0
+        hit, until, _ = _limits.is_cooled_down(self._slug, self._file_key(name))
+        return hit, until
+
+    def _min_retry_after(self) -> int:
+        from .. import account_limits as _limits
+        import time as _time
+        now = int(_time.time() * 1000)
+        best = 0
+        for name, _ in self._accounts:
+            if name == "__anon__":
+                continue
+            hit, until, _ = _limits.is_cooled_down(self._slug, self._file_key(name), now)
+            if hit:
+                wait = max(0, (until - now) // 1000)
+                best = wait if not best else min(best, wait)
+        return best
+
+    async def next(self, exclude: set[str] | None = None) -> tuple[str, Path | None]:
+        exclude = exclude or set()
         if len(self._accounts) <= 1:
             name, storage_state = self._accounts[0]
             if name == "__anon__" and self._anon_trial_limit is not None:
@@ -347,14 +416,37 @@ class _AccountRotator:
             return name, storage_state
         async with self._lock:
             if self._strategy == "fill_first":
-                if self._fill_used >= self._quota:
-                    self._fill_index = (self._fill_index + 1) % len(self._accounts)
-                    self._fill_used = 0
-                self._fill_used += 1
-                return self._accounts[self._fill_index]
-            account = self._accounts[self._rr_index]
-            self._rr_index = (self._rr_index + 1) % len(self._accounts)
-            return account
+                for _ in range(len(self._accounts)):
+                    if self._fill_used >= self._quota:
+                        self._fill_index = (self._fill_index + 1) % len(self._accounts)
+                        self._fill_used = 0
+                    name, storage_state = self._accounts[self._fill_index]
+                    hit, _ = self._cooled(name)
+                    if hit or self._file_key(name) in exclude:
+                        self._fill_index = (self._fill_index + 1) % len(self._accounts)
+                        self._fill_used = 0
+                        continue
+                    self._fill_used += 1
+                    return name, storage_state
+                raise AccountLimitExceeded(
+                    account_key=next(iter(exclude), ""),
+                    matched="",
+                    retry_after=self._min_retry_after(),
+                    recipe_slug=self._slug,
+                )
+            for _ in range(len(self._accounts)):
+                name, storage_state = self._accounts[self._rr_index]
+                self._rr_index = (self._rr_index + 1) % len(self._accounts)
+                hit, _ = self._cooled(name)
+                if hit or self._file_key(name) in exclude:
+                    continue
+                return name, storage_state
+            raise AccountLimitExceeded(
+                account_key=next(iter(exclude), ""),
+                matched="",
+                retry_after=self._min_retry_after(),
+                recipe_slug=self._slug,
+            )
 
 
 class Assignment:
@@ -501,6 +593,7 @@ class BrowserRecipe(Provider):
             login_cfg.get("anon_trial_limit"),
             slug=self.slug,
             anon_uses=_stored_anon_uses(self.slug),
+            domain=self.domain,
         )
 
     @staticmethod
@@ -591,8 +684,52 @@ class BrowserRecipe(Provider):
         strategy = settings.current("API_ACCOUNT_STRATEGY")
         return strategy in ASSIGN_STRATEGIES and strategy != "off"
 
+    def _limit_cfg(self, flow: str = "text") -> dict:
+        return limits.limit_config(self.flow_response(flow) or self.response_cfg)
+
+    def _compiled_limit(self, flow: str = "text") -> tuple[list, dict]:
+        cfg = self._limit_cfg(flow)
+        return cfg["compiled"], cfg
+
+    def _record_limit_hit(self, matched: str, assignment, flow: str = "text") -> AccountLimitExceeded:
+        cfg = self._limit_cfg(flow)
+        key = account_key_of(assignment)
+        until = limits.mark_cooldown(self.slug, key, cfg["cooldown_hours"], matched or "limit")
+        import time as _time
+        retry = max(0, (until - int(_time.time() * 1000)) // 1000) if until else 0
+        return AccountLimitExceeded(
+            account_key=key, matched=matched or "limit",
+            retry_after=retry, recipe_slug=self.slug)
+
+    def _min_db_retry_after(self, rows: list[dict]) -> int:
+        import time as _time
+        now = int(_time.time() * 1000)
+        best = 0
+        for row in rows:
+            hit, until, _ = limits.is_cooled_down(
+                self.slug, limits.db_key(int(row["id"])), now)
+            if hit:
+                wait = max(0, (until - now) // 1000)
+                best = wait if not best else min(best, wait)
+        return best
+
+    def _available_rows(self, rows: list[dict],
+                        exclude: set[str] | None = None) -> list[dict]:
+        exclude = exclude or set()
+        out: list[dict] = []
+        for row in rows:
+            key = limits.db_key(int(row["id"]))
+            if key in exclude:
+                continue
+            hit, _, _ = limits.is_cooled_down(self.slug, key)
+            if hit:
+                continue
+            out.append(row)
+        return out
+
     async def assign(self, account_id: int | None = None,
-                     sticky_key: str = "") -> Assignment:
+                     sticky_key: str = "",
+                     exclude: set[str] | None = None) -> Assignment:
         """Chọn (và giữ chỗ) account + profile + tab cho một request.
 
         `account_id` là chỉ định tường minh của client (header
@@ -608,17 +745,26 @@ class BrowserRecipe(Provider):
 
         rows = await asyncio.to_thread(self.db_accounts) if self._auto_enabled() else []
         if rows:
+            avail = await asyncio.to_thread(self._available_rows, rows, exclude)
+            if not avail:
+                raise AccountLimitExceeded(
+                    account_key=next(iter(exclude or set()), ""),
+                    matched="",
+                    retry_after=self._min_db_retry_after(rows),
+                    recipe_slug=self.slug,
+                )
             async with self._assign_lock:
-                row = self._pick_row(rows, sticky_key)
+                row = self._pick_row(avail, sticky_key)
                 slot = self._quietest_slot(int(row["id"]), slots)
                 profile = await asyncio.to_thread(
                     _profile_named, row["profile_name"], self._profiles_dir)
                 if profile is not None:
                     return self._make(row, profile, slot)
+            # Profile hỏng thì rơi xuống đường file bên dưới.
 
         # Không có account nào trong DB (hoặc chiến lược tắt): đường cũ — kho
         # file `.accounts/` + storage_state, và hạn mức dùng thử ẩn danh.
-        name, storage_state = await self._rotator.next()
+        name, storage_state = await self._rotator.next(exclude)
         ctx_key = self.slug if len(self._accounts) <= 1 else f"{self.slug}::{name}"
         async with self._assign_lock:
             self._reserve(ctx_key)
@@ -2128,15 +2274,34 @@ class BrowserRecipe(Provider):
         # Handler thường gán sẵn (để trả header "đi tới đâu" trước khi stream mở);
         # gọi thẳng stream() không kèm assignment vẫn chạy được, tự gán rồi tự nhả.
         owned = assignment is None
-        if owned:
-            assignment = await self.assign(target_account_id)
-        try:
+        if not owned:
+            # Assignment của handler: chạy một lượt, dính limit thì ném để
+            # handler retry (nó giữ header/session nên nó phải đổi assignment).
             async for delta in self._run(prompt, model_id, assignment, headed,
                                          self.flow_for_model(model_id)):
                 yield delta
+            return
+        assignment = await self.assign(target_account_id)
+        tried: set[str] = {account_key_of(assignment)}
+        try:
+            while True:
+                try:
+                    async for delta in self._run(prompt, model_id, assignment, headed,
+                                                 self.flow_for_model(model_id)):
+                        yield delta
+                    break
+                except AccountLimitExceeded as exc:
+                    applog.log(
+                        f"recipe: '{self.slug}' account {exc.account_key or '?'} "
+                        f"chạm limit, đổi account khác", level="warn")
+                    if target_account_id is not None:
+                        raise
+                    tried.add(exc.account_key or account_key_of(assignment))
+                    assignment.release()
+                    assignment = await self.assign(target_account_id, exclude=tried)
+                    tried.add(account_key_of(assignment))
         finally:
-            if owned:
-                assignment.release()
+            assignment.release()
 
     async def _run(self, prompt: str, model_id: str, assignment: "Assignment",
                    headed: bool | None, flow: str = "text") -> AsyncIterator[str]:
@@ -2172,6 +2337,8 @@ class BrowserRecipe(Provider):
         # nhận đủ. Nên vẫn giữ đường lùi: text đứng yên đủ lâu thì chốt và ghi
         # log cảnh báo. Đặt `fallback_quiet_ms: 0` để tắt hẳn.
         copy_fallback_ms = int(ds.get("fallback_quiet_ms", 15000))
+        _limit_compiled, _limit_cfg = self._compiled_limit(flow)
+        _via_fallback = False
         # Page dùng chung cho mỗi ctx_key nên hai request cùng account phải nối
         # đuôi nhau, không chen ngang vào cùng một ô input.
         async with self._lock_for(ctx_key), contextlib.AsyncExitStack() as stack:
@@ -2230,6 +2397,10 @@ class BrowserRecipe(Provider):
                     if reply_html is not None:
                         captured_html = reply_html
                         self.last_response_html = reply_html
+                    if _limit_compiled and text.strip() and text.strip() != prompt.strip():
+                        _matched_early = limits.match_limit(text, _limit_compiled)
+                        if _matched_early:
+                            raise self._record_limit_hit(_matched_early, assignment, flow)
                     if text != last:
                         if (not use_copy_result and not structured_markdown and text.startswith(last)
                                 and text.strip() != prompt.strip()):
@@ -2261,12 +2432,21 @@ class BrowserRecipe(Provider):
                                 f"stable_text, nên kiểm tra lại done_signal.selector",
                                 level="warn")
                             done = True
+                            _via_fallback = True
                     else:
                         count = await _resolve_locator(page, ds["selector"]).count()
                         appear = dtype == "selector_appear"
                         done = (((count > 0) == appear) and stable_since is not None
                                 and quiet_for >= min(quiet_ms, 1000))
                     if done:
+                        if _limit_compiled:
+                            _matched_done = limits.match_limit(last, _limit_compiled)
+                            if _matched_done:
+                                raise self._record_limit_hit(_matched_done, assignment, flow)
+                            if (_via_fallback and _limit_cfg["on_missing_copy"]
+                                    and last.strip() and last.strip() != prompt.strip()):
+                                raise self._record_limit_hit(
+                                    last[:200] or "missing-copy", assignment, flow)
                         assignment.html = captured_html
                         assignment.conversation_url = _page_url(page)
                         if use_copy_result:
@@ -2291,6 +2471,16 @@ class BrowserRecipe(Provider):
                                     f"được nội dung từ nút Copy — đang trả text DOM, KHÔNG đúng "
                                     f"format Copy; kiểm tra response.done_signal.selector",
                                     level="warn")
+                            if not copied and _limit_compiled:
+                                _matched_copy = limits.match_limit(last, _limit_compiled)
+                                if _matched_copy:
+                                    raise self._record_limit_hit(
+                                        _matched_copy, assignment, flow)
+                                if (_via_fallback and _limit_cfg["on_missing_copy"]
+                                        and last.strip()
+                                        and last.strip() != prompt.strip()):
+                                    raise self._record_limit_hit(
+                                        last[:200] or "missing-copy", assignment, flow)
                             yield copied or last
                         elif structured_markdown:
                             yield last

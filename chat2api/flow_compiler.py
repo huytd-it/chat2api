@@ -96,6 +96,13 @@ def compile_flow(flow: dict) -> dict:
         response["capture_html"] = extract_text["capture_html"]
     if extract_text.get("use_copy_result") is not None:
         done_signal["use_copy_result"] = extract_text["use_copy_result"]
+    # Limit theo site/recipe: converter ghi vào params wait-done-signal và
+    # extract-text; đọc lại ở cả hai để flow sửa tay một bên vẫn giữ được.
+    for key in ("limit_patterns", "limit_cooldown_hours", "limit_on_missing_copy"):
+        if wait_done.get(key) is not None:
+            response[key] = wait_done[key]
+        elif extract_text.get(key) is not None:
+            response[key] = extract_text[key]
     for key in ("media_selector", "copy_selector", "copy_scope", "copy_exclude"):
         if wait_media.get(key) is not None:
             response[key] = wait_media[key]

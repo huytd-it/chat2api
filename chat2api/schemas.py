@@ -95,6 +95,14 @@ class RecipeResponseSpec(BaseModel):
     format: str | None = None
     # Kèm HTML gốc của câu trả lời trong bản ghi session, để soi lại sau.
     capture_html: bool | None = None
+    # Phát hiện account limit theo từng site/recipe: regex case-insensitive
+    # trên toàn reply text. Rỗng = tắt. Sai regex báo lỗi lúc lưu.
+    limit_patterns: list[str] | None = None
+    # Số giờ khóa tạm account dính limit (mặc định 24, bền qua restart).
+    limit_cooldown_hours: float | None = None
+    # Mất nút copy chỉ thành limit khi có limit_patterns và (text khớp
+    # pattern hoặc cờ này bật + chốt bằng fallback).
+    limit_on_missing_copy: bool | None = None
     # Selector ảnh cho image generation. Nếu có, recipe được coi là image-capable.
     image_selector: str | None = None
     # Nút copy riêng cho từng ảnh (khác nút copy response). Mỗi ảnh có 1 nút.

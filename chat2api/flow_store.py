@@ -166,8 +166,10 @@ def _node_param_errors(ntype: str, i: int, params: dict) -> list[str]:
         if scope is not None and scope not in _COPY_SCOPES:
             errs.append(f"invalid field: nodes[{i}].params.scope "
                         f"({' | '.join(sorted(_COPY_SCOPES))})")
+        errs += _limit_param_errors(i, params)
     elif ntype == "extract-text":
         need("selector", bool(str(params.get("selector") or "").strip()))
+        errs += _limit_param_errors(i, params)
     elif ntype == "extract-media":
         has_media = bool(str(params.get("media_selector") or "").strip())
         has_copy = bool(str(params.get("copy_selector") or "").strip())
@@ -185,12 +187,24 @@ def _node_param_errors(ntype: str, i: int, params: dict) -> list[str]:
     elif ntype == "condition":
         # Biểu thức rẽ nhánh — executor v1 hiểu `value` là tên biến boolean
         # trong context, hoặc `expression` dạng chuỗi đơn giản.
-        if not params.get("expression") and not params.get("value"):
+        # Alias `check: limit` / `expression: limit`: dò limit trên ctx.text,
+        # true → ghi cooldown + ném AccountLimitExceeded, false → đi tiếp.
+        check = str(params.get("check") or "").strip().lower()
+        expr = str(params.get("expression") or "").strip().lower()
+        if check == "limit" or expr == "limit":
+            pass
+        elif not params.get("expression") and not params.get("value") and not check:
             errs.append(f"missing/invalid field: nodes[{i}].params.expression "
                         "(hoặc value)")
     elif ntype == "action-sequence":
         need("action", bool(str(params.get("action") or "").strip()))
     return errs
+
+
+def _limit_param_errors(i: int, params: dict) -> list[str]:
+    from .account_limits import validate_limit_fields as _validate
+
+    return _validate(params, f"nodes[{i}].params")
 
 
 def _atomic_write_json(path: Path, obj: dict) -> None:
