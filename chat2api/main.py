@@ -708,6 +708,7 @@ def create_app(cfg: Config) -> FastAPI:
                         # không mark failure/success cho combo ảo (chỉ đếm underlying sẽ tự mark nếu cần)
                         if not isinstance(provider, ComboP):
                             rt.mark_success(provider.slug)
+                        return  # Retry chỉ khi account chạm limit, không gửi lại prompt đã hoàn tất.
                     except TrialLimitExceeded as e:
                         applog.log(f"chat: hết lượt dùng thử ({provider.slug}): {e}", "warn")
                         raise OpenAIError(403, "trial_limit_exceeded", str(e))

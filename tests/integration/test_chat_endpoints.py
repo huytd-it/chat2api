@@ -1,5 +1,7 @@
 ﻿import json
 
+import pytest
+
 
 async def test_lifespan_closes_manager_and_pool_when_job_shutdown_raises(monkeypatch, tmp_path):
     from chat2api import jobs
@@ -72,6 +74,44 @@ async def test_completion_stream_sse(app_client):
     assert "data: [DONE]" in text
     chunks = [json.loads(l[6:]) for l in text.splitlines() if l.startswith("data: {")]
     assert "".join(c["choices"][0]["delta"]["content"] for c in chunks) == "Hello world"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_completed_provider_is_not_called_again(app_client, stream):
+    from chat2api.providers.base import ModelInfo, Provider
+
+    class CountingProvider(Provider):
+        slug = "counting"
+
+        def __init__(self):
+            self.calls = 0
+
+        def models(self):
+            return [ModelInfo(id="counting/m1", slug=self.slug)]
+
+        async def stream(self, messages, model_id):
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("prompt sent again after completion")
+            yield "done"
+
+    provider = CountingProvider()
+    app_client._transport.app.state.router.providers[provider.slug] = provider
+    response = await app_client.post("/v1/chat/completions", json={
+        "model": "counting/m1", "messages": [{"role": "user", "content": "hi"}],
+        "stream": stream,
+    })
+
+    assert response.status_code == 200
+    assert provider.calls == 1
+    if stream:
+        chunks = [json.loads(line[6:]) for line in response.text.splitlines()
+                  if line.startswith("data: {")]
+        assert len(chunks) == 1
+        assert chunks[0]["choices"][0]["delta"]["content"] == "done"
+        assert response.text.count("data: [DONE]") == 1
+    else:
+        assert response.json()["choices"][0]["message"]["content"] == "done"
 
 
 async def test_trial_limit_exceeded_returns_403(app_client):
