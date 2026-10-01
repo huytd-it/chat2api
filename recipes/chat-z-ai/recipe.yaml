@@ -1,0 +1,23 @@
+slug: chat-z-ai
+url: https://chat.z.ai/
+prompt:
+  input_selector: '#chat-input'
+  input_mode: fill
+  submit: Enter
+response:
+  last_message_selector: '#messages-container'
+  done_signal:
+    type: copy_button
+    scope: after
+    use_copy_result: true
+models:
+- id: default
+mode:
+  selector: '#model-selector-x-preview-l-button > div'
+flows:
+  select_model:
+    selector: '#model-selector-x-preview-l-button > div'
+login:
+  strategy: round_robin
+  quota: 50
+keep_context: true

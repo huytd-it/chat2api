@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { ensureProfiles, ensureOpenAIProviders, profilesLoading, profilesError } from "../sync";
+  import { cooldowns, ensureProfiles, ensureOpenAIProviders, profilesLoading, profilesError, refreshCooldowns } from "../sync";
   // Panel tự nạp dữ liệu của mình: ở route /providers không có
   // refreshIntegrations() chạy kèm nên khối OpenAI sẽ trống nếu chờ trang cha.
-  onMount(() => { void ensureProfiles(); void ensureOpenAIProviders(); });
+  onMount(() => { void ensureProfiles(); void ensureOpenAIProviders(); void refreshCooldowns(); });
   import { apiKey, showToast } from "../stores";
   import { profiles, recipes, recipesLoading, openaiProviders, openaiProvidersLoading, refreshAfterRecipeChange, refreshAfterRecipeDelete, refreshProfiles, refreshRecipes, refreshOpenAIProviders, refreshAfterOpenAIChange } from "../sync";
   import { closeRecipeBrowser, deleteRecipe, fetchJob, jobAction, reanalyzeRecipe, removeDomainProfile, reloadRecipe, renameRecipe, type RecipeInfo, createOpenAIProvider, updateOpenAIProvider, deleteOpenAIProvider, type OpenAIProviderInfo } from "../api";
@@ -20,6 +20,7 @@
   import { Textarea } from "$lib/components/ui/textarea";
   import JobStepTracker from "./JobStepTracker.svelte";
   import RecordSessionPanel from "./RecordSessionPanel.svelte";
+  import AccountCooldownsPanel from "./AccountCooldownsPanel.svelte";
   import { Browser, CaretDown, CaretRight, Check, CircleNotch, Copy, PencilSimple, Plus, Record as RecordIcon, Repeat, Sliders, Sparkle, Stack, Trash, WarningCircle, X, Globe, Plugs } from "phosphor-svelte";
   import { get } from "svelte/store";
 
@@ -343,7 +344,10 @@
                         <li class="flex flex-wrap items-center gap-2 rounded-lg border bg-card px-3 py-2 text-sm">
                           <span class={`size-2 shrink-0 rounded-full ${item.profile.open ? "bg-success" : "bg-muted-foreground"}`}></span>
                           <strong class="font-data">{item.profile.name}</strong>
-                          {#each item.accounts as account (account.id)}<Badge variant="outline" class="font-data">{account.label}</Badge>{/each}
+                          {#each item.accounts as account (account.id)}
+                            {@const locked = $cooldowns.some((c) => c.recipe_slug === rec.slug && c.account_key === `db:${account.id}`)}
+                            <Badge variant={locked ? "warning" : "outline"} class="font-data" title={locked ? `${account.label} đang bị khóa limit ở ${rec.slug} — mở khóa ở bảng bên dưới` : account.label}>{account.label}{#if locked} · khóa{/if}</Badge>
+                          {/each}
                           <span class="ml-auto text-xs text-muted-foreground">{item.profile.open ? `đang chạy · ${item.profile.tabs} tab` : "rảnh"}</span>
                           <Button variant="ghost" size="icon-sm" aria-label={`Gỡ ${item.profile.name} khỏi ${rec.domain}`} onclick={() => onRemoveProfileFromDomain(rec.domain!, item.profile.id)}><X size={14} /></Button>
                         </li>
@@ -353,6 +357,9 @@
                   {:else}
                     <div class="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning"><WarningCircle class="mt-0.5 shrink-0" />Chưa profile nào đăng nhập {rec.domain} — provider đang chạy ẩn danh.</div>
                   {/if}
+                  <div class="mt-3">
+                    <AccountCooldownsPanel recipeSlug={rec.slug} compact={true} />
+                  </div>
                 </div>
               {/if}
             </div>

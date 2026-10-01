@@ -8,7 +8,11 @@ response:
   last_message_selector: 'div[data-virtual-list-item-key]'
   done_signal:
     type: copy_button
-    selector: 'div[data-virtual-list-item-key] div[role="button"].ds-button--icon'
+    # Thanh hành động mỗi reply có NHIỀU nút cùng class ds-button--icon
+    # (copy / like / dislike / share / retry...), copy là nút ĐẦU TIÊN
+    # bên trái. Selector cũ khớp hết nên engine bấm usable[last] trúng nút
+    # share cuối cùng. Neo :first-of-type để mỗi toolbar chỉ còn nút copy.
+    selector: 'div[data-virtual-list-item-key] div[role="button"].ds-button--icon:first-of-type'
     scope: after
     use_copy_result: true
     quiet_ms: 600

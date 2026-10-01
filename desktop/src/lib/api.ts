@@ -1285,6 +1285,42 @@ export async function fetchDomains(key: string): Promise<DomainInfo[]> {
   return data.domains as DomainInfo[];
 }
 
+/** Account đang bị khóa tạm vì dính limit của site (theo từng recipe).
+ * `account_key` là `db:<id>` (profile account) hoặc `file:<domain>/<name>`. */
+export interface AccountCooldown {
+  recipe_slug: string;
+  account_key: string;
+  until_ms: number;
+  retry_after: number;
+  reason: string;
+  updated_at: number;
+}
+
+export async function fetchAccountCooldowns(key: string, recipe = ""): Promise<AccountCooldown[]> {
+  const base = await apiBase();
+  const q = recipe ? "?recipe=" + encodeURIComponent(recipe) : "";
+  const r = await fetch(base + "/admin/account-cooldowns" + q, { headers: headers(key) });
+  const data = await asJson(r);
+  return (data.cooldowns ?? []) as AccountCooldown[];
+}
+
+/** Mở khóa ngay một account (không chờ hết cooldown). */
+export async function clearAccountCooldown(
+  key: string,
+  recipe_slug: string,
+  account_key: string,
+): Promise<void> {
+  const base = await apiBase();
+  const q =
+    "?recipe_slug=" + encodeURIComponent(recipe_slug) +
+    "&account_key=" + encodeURIComponent(account_key);
+  const r = await fetch(base + "/admin/account-cooldowns" + q, {
+    method: "DELETE",
+    headers: headers(key),
+  });
+  await asJson(r);
+}
+
 export async function closeProfile(key: string, name: string): Promise<void> {
   const base = await apiBase();
   const r = await fetch(base + "/admin/profiles/" + encodeURIComponent(name) + "/close", {

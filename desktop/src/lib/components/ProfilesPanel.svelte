@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { apiKey, showToast } from "../stores";
-  import { ensureProfiles, profiles, profilesError, profilesLoading, profilesMeta, refreshProfiles, domains, ensureDomains } from "../sync";
+  import { cooldowns, ensureProfiles, profiles, profilesError, profilesLoading, profilesMeta, refreshCooldowns, refreshProfiles, domains, ensureDomains, isAccountLocked } from "../sync";
   import { cloneProfile, closeProfile, createProfile, deleteProfile, detectProfileDomains, openProfile, removeProfileAccount, updateProfile, type ProfileInfo } from "../api";
   import AccountDialog from "./AccountDialog.svelte";
+  import AccountCooldownsPanel from "./AccountCooldownsPanel.svelte";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Switch } from "$lib/components/ui/switch";
@@ -12,7 +13,7 @@
   import * as Card from "$lib/components/ui/card";
   import * as Select from "$lib/components/ui/select";
   import * as AlertDialog from "$lib/components/ui/alert-dialog";
-  import { Browser, Check, CircleNotch, Copy, FolderOpen, MagnifyingGlass, PencilSimple, Plus, Star, Trash, UserCircle, WarningCircle, X } from "phosphor-svelte";
+  import { Browser, Check, CircleNotch, Copy, FolderOpen, LockKey, MagnifyingGlass, PencilSimple, Plus, Star, Trash, UserCircle, WarningCircle, X } from "phosphor-svelte";
 
   let creating = $state(false); let newName = $state(""); let newMaxTabs = $state(4); let newHeadless = $state(true); let newEngine = $state("playwright"); let creatingBusy = $state(false);
   let busyIds = $state<Set<number>>(new Set());
@@ -45,7 +46,7 @@
   // danh sách rỗng dù kho vẫn còn profile. ensureProfiles() lo cả hai đường mà
   // không gọi API hai lần. Kèm ensureDomains() để có đủ toàn bộ site cho ma
   // trận profile × site bên dưới.
-  onMount(() => { ensureProfiles(); ensureDomains(); });
+  onMount(() => { ensureProfiles(); ensureDomains(); refreshCooldowns(); });
 
   function openAddAccount(p: ProfileInfo, host: string) { dialogProfile = p.name; dialogDomain = host; }
   function closeAccountDialog() { dialogProfile = null; dialogDomain = ""; }
@@ -83,6 +84,9 @@
 <Card.Root class="overflow-hidden" aria-labelledby="profiles-title">
   <Card.Header class="flex-row items-center justify-between gap-4 border-b"><div class="flex items-start gap-3"><div class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><FolderOpen size={19} /></div><div><Card.Title id="profiles-title">Browser profiles</Card.Title><Card.Description>Hạ tầng Chromium dùng chung đăng nhập cho nhiều domain.</Card.Description></div></div><Button variant={creating ? "ghost" : "outline"} size="sm" onclick={() => (creating = !creating)}>{#if creating}<X /> Hủy{:else}<Plus /> Profile mới{/if}</Button></Card.Header>
   <Card.Content class="grid gap-4 p-4 sm:p-6">
+    {#if $cooldowns.length}
+      <AccountCooldownsPanel />
+    {/if}
     {#if panelError}<div class="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive" role="alert"><WarningCircle class="mt-0.5 shrink-0" />{panelError}</div>{/if}
     {#if $profilesError}<div class="flex flex-col gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive sm:flex-row sm:items-center" role="alert"><span class="flex min-w-0 flex-1 items-start gap-2"><WarningCircle class="mt-0.5 shrink-0" />Không nạp được danh sách profile: {$profilesError}</span><Button variant="outline" size="sm" disabled={$profilesLoading} onclick={() => refreshProfiles()}>Thử lại</Button></div>{/if}
     {#if $profilesMeta && !$profilesMeta.persisted}<div class="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning"><WarningCircle class="mt-0.5 shrink-0" />Kho SQLite chưa mở nên chưa quản lý được profile. Xem log khởi động để biết vì sao.</div>
@@ -115,9 +119,13 @@
                   {@const suggested = liveSuggestions[p.id]?.includes(host) ?? false}
                   {#if matched.length}
                     {#each matched as account (account.id)}
-                      <span class="inline-flex items-center gap-1 rounded-full border border-success/40 bg-success/10 px-2.5 py-0.5 text-xs font-data text-success" title={`${account.host} / ${account.label} — đã đăng nhập`}>
-                        <Check size={12} class="shrink-0" />
+                      {@const locked = isAccountLocked($cooldowns, account.id)}
+                      <span class={locked
+                        ? "inline-flex items-center gap-1 rounded-full border border-warning/50 bg-warning/10 px-2.5 py-0.5 text-xs font-data text-warning"
+                        : "inline-flex items-center gap-1 rounded-full border border-success/40 bg-success/10 px-2.5 py-0.5 text-xs font-data text-success"} title={locked ? `${account.host} / ${account.label} — đang bị khóa limit, mở khóa ở bảng trên` : `${account.host} / ${account.label} — đã đăng nhập`}>
+                        {#if locked}<LockKey size={12} class="shrink-0" />{:else}<Check size={12} class="shrink-0" />{/if}
                         <span>{account.host} / {account.label}</span>
+                        {#if locked}<span class="font-sans font-medium">bị khóa</span>{/if}
                         <button class="ml-1 rounded-full p-0.5 text-success/70 transition-colors hover:bg-destructive/15 hover:text-destructive" aria-label={`Gỡ ${account.host} khỏi ${p.name}`} title={`Gỡ ${account.host} khỏi ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => onRemoveAccount(p, account.id)}>
                           <X size={12} />
                         </button>
@@ -141,9 +149,13 @@
             {:else if p.accounts.length}
               <div class="flex flex-wrap gap-1.5">
                 {#each p.accounts as account (account.id)}
-                  <span class="inline-flex items-center gap-1 rounded-full border border-success/40 bg-success/10 px-2.5 py-0.5 text-xs font-data text-success">
-                    <Check size={12} class="shrink-0" />
+                  {@const lockedElse = isAccountLocked($cooldowns, account.id)}
+                  <span class={lockedElse
+                    ? "inline-flex items-center gap-1 rounded-full border border-warning/50 bg-warning/10 px-2.5 py-0.5 text-xs font-data text-warning"
+                    : "inline-flex items-center gap-1 rounded-full border border-success/40 bg-success/10 px-2.5 py-0.5 text-xs font-data text-success"} title={lockedElse ? "Đang bị khóa limit" : "Đã đăng nhập"}>
+                    {#if lockedElse}<LockKey size={12} class="shrink-0" />{:else}<Check size={12} class="shrink-0" />{/if}
                     <span>{account.host} / {account.label}</span>
+                    {#if lockedElse}<span class="font-sans font-medium">bị khóa</span>{/if}
                     <button class="ml-1 rounded-full p-0.5 text-success/70 transition-colors hover:bg-destructive/15 hover:text-destructive" aria-label={`Gỡ ${account.host} khỏi ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => onRemoveAccount(p, account.id)}>
                       <X size={12} />
                     </button>

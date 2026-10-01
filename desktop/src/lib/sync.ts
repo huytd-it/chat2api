@@ -2,6 +2,7 @@ import { get, writable } from "svelte/store";
 import { apiKey, showToast } from "./stores";
 import {
   fetchAccounts,
+  fetchAccountCooldowns,
   fetchCombos,
   fetchDomains,
   fetchModels,
@@ -9,6 +10,7 @@ import {
   fetchOverview,
   fetchProfiles,
   fetchRecipes,
+  type AccountCooldown,
   type ComboInfo,
   type DomainAccounts,
   type DomainInfo,
@@ -232,4 +234,38 @@ export async function refreshAfterRecipeDelete() {
 
 export async function refreshAfterOpenAIChange() {
   await Promise.all([refreshOpenAIProviders(), refreshModels()]);
+}
+
+// Account bị khóa tạm vì dính limit (bảng account_cooldown: recipe × key).
+// Chỉ nạp khi UI cần (panel mở khóa, badge trên account) để không tốn thêm
+// một lượt API cho mọi lần bootstrap.
+export const cooldowns = writable<AccountCooldown[]>([]);
+export const cooldownsLoading = writable(false);
+export const cooldownsError = writable("");
+
+let cooldownsInflight: Promise<void> | null = null;
+
+export function refreshCooldowns(recipe = ""): Promise<void> {
+  if (cooldownsInflight) return cooldownsInflight;
+  cooldownsLoading.set(true);
+  const run = (async () => {
+    try {
+      cooldowns.set(await fetchAccountCooldowns(get(apiKey), recipe));
+      cooldownsError.set("");
+    } catch (e) {
+      cooldowns.set([]);
+      cooldownsError.set((e as Error).message);
+    } finally {
+      cooldownsLoading.set(false);
+      cooldownsInflight = null;
+    }
+  })();
+  cooldownsInflight = run;
+  return run;
+}
+
+/** true khi profile account này đang bị khóa ở bất kỳ recipe nào. */
+export function isAccountLocked(cooldownList: AccountCooldown[], accountId: number): boolean {
+  const key = `db:${accountId}`;
+  return cooldownList.some((c) => c.account_key === key);
 }
