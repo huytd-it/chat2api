@@ -5,7 +5,7 @@ prompt:
   input_mode: fill
   submit: Enter
 response:
-  last_message_selector: '#messages-container'
+  last_message_selector: '#response-content-container'
   done_signal:
     type: copy_button
     scope: after
