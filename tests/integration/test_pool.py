@@ -2,7 +2,7 @@ import pytest
 
 from chat2api.browserpool import BrowserPool
 
-pytest.importorskip("playwright.async_api")
+pytest.importorskip("scrapling.fetchers")
 
 
 async def test_context_reuse_and_eviction():
@@ -31,61 +31,5 @@ async def test_drop_context():
         assert pool.size == 0
         second = await pool.context_for("a")
         assert second is not first
-    finally:
-        await pool.aclose()
-
-
-async def test_headed_context_uses_separate_browser_only_created_on_demand(monkeypatch):
-    # Không mở cửa sổ Chromium thật khi chạy test: fake launch(headless=False)
-    # để CI không cần display server.
-    pool = BrowserPool(max_contexts=2)
-    await pool.start()
-    try:
-        assert pool._browser_headed is None
-        await pool.context_for("a")
-        assert pool._browser_headed is None
-
-        launched = []
-
-        class FakeContext:
-            # BrowserContext thật có backref .browser — pool dựa vào nó để biết
-            # cửa sổ còn sống hay đã bị đóng tay.
-            def __init__(self, browser):
-                self.browser = browser
-
-            async def close(self):
-                pass
-
-        class FakeHeadedBrowser:
-            connected = True
-
-            def is_connected(self):
-                return self.connected
-
-            async def new_context(self, storage_state=None):
-                return FakeContext(self)
-
-            async def close(self):
-                pass
-
-        async def fake_launch(headless):
-            launched.append(headless)
-            return FakeHeadedBrowser()
-
-        monkeypatch.setattr(pool._pw.chromium, "launch", fake_launch)
-
-        await pool.context_for("b", headed=True)
-        assert launched == [False]
-        assert pool._browser_headed is not None
-        assert pool._browser_headed is not pool._browser
-
-        # Context headed thứ 2 tái dùng browser headed đã mở, không launch lại.
-        await pool.context_for("c", headed=True)
-        assert launched == [False]
-
-        # Người dùng tắt tay cửa sổ headed: context cũ bị bỏ, browser mở lại.
-        pool._browser_headed.connected = False
-        await pool.context_for("c", headed=True)
-        assert launched == [False, False]
     finally:
         await pool.aclose()

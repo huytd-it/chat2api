@@ -18,7 +18,7 @@ def test_config_defaults(monkeypatch, tmp_path):
         monkeypatch.delenv(k, raising=False)
     cfg = Config()
     assert cfg.api_keys == []
-    assert cfg.browser_engine == "playwright"
+    assert cfg.scrapling_mode == "dynamic"
     assert cfg.recipe_timeout_ms == 120000
     assert cfg.enable_fallback is False
     assert cfg.anon_trial_limit == 20

@@ -99,9 +99,9 @@ if (-not (Test-CommandExists "python")) {
 
 Push-Location $Root
 try {
-    Invoke-NativeQuiet { python -c "import chat2api, playwright" 2>$null } | Out-Null
+    Invoke-NativeQuiet { python -c "import chat2api, scrapling.fetchers" 2>$null } | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        throw "chat2api or Playwright is not installed. Run desktop/scripts/setup-and-run.ps1 first."
+        throw "chat2api or Scrapling is not installed. Run desktop/scripts/setup-and-run.ps1 first."
     }
 } finally {
     Pop-Location

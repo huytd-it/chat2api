@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import store
+from .browserpool import MODES
 
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 DEFAULT_PROFILE = "main"
@@ -37,7 +38,7 @@ class Profile:
     user_data_dir: str
     headless: bool
     max_tabs: int
-    engine: str
+    scrapling_mode: str
     proxy: str | None
     user_agent: str | None
     locale: str
@@ -62,7 +63,7 @@ def _row_to_profile(row: sqlite3.Row) -> Profile:
     return Profile(
         id=row["id"], name=row["name"], user_data_dir=row["user_data_dir"],
         headless=bool(row["headless"]), max_tabs=int(row["max_tabs"]),
-        engine=row["engine"], proxy=row["proxy"], user_agent=row["user_agent"],
+        scrapling_mode=row["scrapling_mode"], proxy=row["proxy"], user_agent=row["user_agent"],
         locale=row["locale"], timezone=row["timezone"], viewport=row["viewport"],
     )
 
@@ -263,7 +264,7 @@ def profile_for_recipe(slug: str, default_name: str = DEFAULT_PROFILE) -> str:
 # Cột người dùng được sửa từ UI. `name` và `user_data_dir` không nằm ở đây: đổi
 # tên profile là đổi thư mục Chromium đang giữ toàn bộ đăng nhập, không phải
 # thao tác một dropdown nên làm.
-EDITABLE = ("engine", "headless", "max_tabs", "proxy", "user_agent",
+EDITABLE = ("scrapling_mode", "headless", "max_tabs", "proxy", "user_agent",
             "locale", "timezone", "viewport", "notes")
 
 
@@ -345,11 +346,11 @@ def _clean(values: dict) -> dict:
             if not 1 <= tabs <= 32:
                 raise ValueError("max_tabs phải từ 1 đến 32")
             out[key] = tabs
-        elif key == "engine":
-            engine = str(value).strip().lower()
-            if engine not in {"playwright", "cloak", "scrapling"}:
-                raise ValueError("engine phải là playwright, cloak hoặc scrapling")
-            out[key] = engine
+        elif key == "scrapling_mode":
+            mode = str(value).strip().lower()
+            if mode not in MODES:
+                raise ValueError(f"scrapling_mode phải là {', '.join(MODES)}")
+            out[key] = mode
         elif key == "viewport":
             viewport = str(value).strip().lower()
             if not re.fullmatch(r"\d{3,5}x\d{3,5}", viewport):
@@ -425,8 +426,8 @@ def clone(source_id: int, name: str, profiles_dir: Path,
     """Nhân bản profile: copy cả user_data_dir lẫn account đã khai báo.
 
     Đây là cách "dùng lại đăng nhập" mà không đụng vào bản gốc — ví dụ muốn thử
-    engine `cloak` trên một profile Playwright đang chạy tốt. (Đổi thẳng
-    `engine` bằng PATCH cũng giữ nguyên đăng nhập vì cùng một `user_data_dir`;
+    chế độ `stealthy` trên một profile `dynamic` đang chạy tốt. (Đổi thẳng
+    `scrapling_mode` bằng PATCH cũng giữ nguyên đăng nhập vì cùng một `user_data_dir`;
     clone chỉ cần khi muốn giữ lại đường lui.)
 
     `values` ghi đè các cột sửa được; cột nào không nói thì thừa kế từ nguồn.

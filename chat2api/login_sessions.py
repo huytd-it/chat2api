@@ -1,10 +1,11 @@
 import asyncio
-import inspect
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .browserpool import (DEFAULT_MODE, BrowserModeError, open_session,
+                          seed_storage_state)
 
 
 class LoginSessionError(RuntimeError):
@@ -17,7 +18,7 @@ class LoginSession:
     slug: str
     url: str
     recipe_dir: Path
-    browser: Any
+    browser: Any  # session Scrapling của phiên tạm; None khi ghi trong profile
     context: Any
     page: Any
     created_at: float
@@ -74,39 +75,27 @@ async def _close_session_resources(session) -> None:
 
 
 class LoginSessionManager:
-    def __init__(self, playwright_factory: Callable[[], Any] | None = None):
-        self._playwright_factory = playwright_factory
-        self._playwright = None
+    def __init__(self, mode: str = DEFAULT_MODE,
+                 launcher: Callable[[Path | None], Any] | None = None):
+        # `launcher(storage_state)` trả về session Scrapling đã start (có
+        # `.context` và `.close()`); test thay nó bằng fake.
+        self._mode = mode
+        self._launcher = launcher or self._launch
         self._sessions: dict[str, LoginSession] = {}
         self._pending: dict[str, asyncio.Task] = {}
         self._closing = False
         self._lock = asyncio.Lock()
-        self._driver_lock = asyncio.Lock()
 
     async def has(self, job_id: str) -> bool:
         async with self._lock:
             return job_id in self._sessions
 
-    async def _new_driver(self):
-        if self._playwright_factory is None:
-            from playwright.async_api import async_playwright
-
-            return await async_playwright().start()
-        driver = self._playwright_factory()
-        if inspect.isawaitable(driver):
-            return await driver
-        return driver
-
-    async def _ensure_driver(self):
-        async with self._driver_lock:
-            if self._playwright is not None:
-                return self._playwright
-            try:
-                self._playwright = await self._new_driver()
-            except BaseException:
-                self._playwright = None
-                raise
-            return self._playwright
+    async def _launch(self, storage_state: Path | None):
+        """Cửa sổ Scrapling headed, danh tính tạm, nạp sẵn storage_state nếu có."""
+        session = await open_session(self._mode, headless=False)
+        if storage_state is not None:
+            await seed_storage_state(session.context, storage_state)
+        return session
 
     async def _remove_pending(self, job_id: str, task: asyncio.Task) -> None:
         async with self._lock:
@@ -126,8 +115,8 @@ class LoginSessionManager:
         browser = None
         page = None
         try:
-            playwright = await self._ensure_driver()
-            launch = asyncio.create_task(playwright.chromium.launch(headless=False))
+            state = storage_state if storage_state and storage_state.exists() else None
+            launch = asyncio.create_task(self._launcher(state))
             try:
                 browser = await asyncio.shield(launch)
             except asyncio.CancelledError:
@@ -136,9 +125,10 @@ class LoginSessionManager:
                 except Exception:
                     pass
                 raise
-            state = str(storage_state) if storage_state and storage_state.exists() else None
-            context = await browser.new_context(storage_state=state)
-            page = await context.new_page()
+            context = browser.context
+            # Persistent context của Scrapling mở sẵn một about:blank — dùng
+            # luôn nó thay vì để lại một tab trống cạnh trang đăng nhập.
+            page = context.pages[0] if context.pages else await context.new_page()
             await page.goto(url)
             session = LoginSession(
                 job_id=job_id,
@@ -161,6 +151,8 @@ class LoginSessionManager:
             await _finish_cleanup(_close(browser, "close"))
             if isinstance(error, LoginSessionError):
                 raise
+            if isinstance(error, BrowserModeError):
+                raise LoginSessionError(str(error)) from error
             raise LoginSessionError("Unable to start login session") from error
         finally:
             await _finish_cleanup(self._remove_pending(job_id, current_task))
@@ -331,9 +323,5 @@ class LoginSessionManager:
         async def cleanup() -> None:
             for session in sessions:
                 await _close_session_resources(session)
-            async with self._driver_lock:
-                playwright = self._playwright
-                self._playwright = None
-                await _close(playwright, "stop")
 
         await _finish_cleanup(cleanup())

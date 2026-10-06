@@ -568,15 +568,15 @@ Ma trận ghép account↔recipe xem ở §16.
 ### 15.1 Profiles (DB)
 
 ```bash
-# Liệt kê: [{id, name, headless, max_tabs, engine, domains, open, tabs, accounts[], ...}]
+# Liệt kê: [{id, name, headless, max_tabs, scrapling_mode, domains, open, tabs, accounts[], ...}]
 curl http://127.0.0.1:8100/admin/profiles -H "Authorization: Bearer $ADMIN"
 
-# Tạo (name chữ thường; engine: playwright|cloak|scrapling)
+# Tạo (name chữ thường; scrapling_mode: fetcher|stealthy|dynamic)
 curl -X POST http://127.0.0.1:8100/admin/profiles \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
-  -d '{"name":"main","engine":"playwright","headless":false,"max_tabs":8}'
+  -d '{"name":"main","scrapling_mode":"dynamic","headless":false,"max_tabs":8}'
 
-# Sửa: engine, headless, max_tabs, proxy, user_agent, locale, timezone,
+# Sửa: scrapling_mode, headless, max_tabs, proxy, user_agent, locale, timezone,
 # viewport "1280x800", notes, is_default. KHÔNG đổi được name.
 curl -X PATCH http://127.0.0.1:8100/admin/profiles/main \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
@@ -585,7 +585,7 @@ curl -X PATCH http://127.0.0.1:8100/admin/profiles/main \
 # Nhân bản (giữ đăng nhập) — profile nguồn phải ĐÓNG
 curl -X POST http://127.0.0.1:8100/admin/profiles/main/clone \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
-  -d '{"name":"main-test","engine":"cloak"}'
+  -d '{"name":"main-test","scrapling_mode":"stealthy"}'
 
 # Xoá (?purge=true xoá luôn thư mục Chromium; 409 nếu recipe còn dựa vào)
 curl -X DELETE "http://127.0.0.1:8100/admin/profiles/main-test?purge=false" \
@@ -614,8 +614,9 @@ curl -X POST http://127.0.0.1:8100/admin/profiles/main/close \
   -H "Authorization: Bearer $ADMIN"
 ```
 
-Lưu ý: đổi `engine` của profile đang mở có hiệu lực khi rảnh (giữ nguyên
-đăng nhập, cùng `user_data_dir`).
+Lưu ý: đổi `scrapling_mode` của profile đang mở có hiệu lực khi rảnh (giữ nguyên
+đăng nhập, cùng `user_data_dir`). `fetcher` chỉ gửi HTTP nên `/open` trả 400
+`no_browser_mode`.
 
 ### 15.2 Accounts file-mode (storage_state)
 
@@ -720,7 +721,7 @@ curl -X PUT http://127.0.0.1:8100/admin/settings \
 | `RECIPE_INPUT_DELAY_MS` | 400 | Browser | reload |
 | `RECIPE_READY_TIMEOUT_MS` | 20000 | Browser | reload |
 | `POOL_MAX_CONTEXTS` | 3 | Browser | restart |
-| `BROWSER_ENGINE` | playwright (cloak\|scrapling) | Browser | restart |
+| `SCRAPLING_MODE` | dynamic (stealthy\|fetcher) | Browser | restart |
 | `BROWSER_PROFILE_MODE` | storage_state (profile) | Browser | restart |
 | `POOL_MAX_PROFILES` | 6 | Browser | restart |
 | `PROFILE_MAX_TABS` | 8 | Browser | restart |
@@ -756,7 +757,7 @@ curl -X DELETE "http://127.0.0.1:8100/admin/api-keys/3?purge=true" -H "Authoriza
 ## 19. Giám sát: overview + logs
 
 ```bash
-# Snapshot dashboard: engine/contexts/models/recipes, unhealthy[],
+# Snapshot dashboard: engine/mode/contexts/models/recipes, unhealthy[],
 # domains/accounts, open_browsers[], request_routes[] (20 dòng),
 # requests_last_minute, session_distribution[] (8 nhánh), routes_persisted
 curl http://127.0.0.1:8100/admin/overview -H "Authorization: Bearer $ADMIN"
@@ -952,8 +953,8 @@ Quy trình sửa an toàn: `source` → `preview` → `test` (§11) → `PUT` �
 - Trial `fail` ở preflight: đọc `steps[]` — `fail` = 0 khớp/sai cú pháp,
   `warn` = khớp nhiều (mơ hồ), `skip` = không khai báo.
 - `/admin/flows/*` 410: flows đã xoá, mọi flow giờ là recipe + BrowserRecipe.
-- Profile clone/đổi engine hỏng: clone khi profile đang mở; engine mới có
-  hiệu lực khi profile rảnh.
+- Profile clone/đổi chế độ Scrapling hỏng: clone khi profile đang mở; chế độ
+  mới có hiệu lực khi profile rảnh.
 - Xoá profile/account 409: recipe còn dựa vào — thêm account thay thế hoặc
   bỏ ghim trước.
 - `503 store_unavailable`: kho SQLite chưa mở — settings/key/profile/session

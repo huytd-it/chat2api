@@ -327,7 +327,7 @@ class SaveAccountRequest(BaseModel):
 
 class ProfileCreateRequest(BaseModel):
     name: str
-    engine: str | None = None
+    scrapling_mode: str | None = None
     headless: bool | None = None
     max_tabs: int | None = None
     proxy: str | None = None
@@ -345,7 +345,7 @@ class ProfileUpdateRequest(ProfileCreateRequest):
 
 class ProfileCloneRequest(ProfileCreateRequest):
     """Nhân bản một profile. `name` là tên bản sao; cột nào bỏ trống thì thừa
-    kế từ profile nguồn (thường chỉ đổi mỗi `engine`)."""
+    kế từ profile nguồn (thường chỉ đổi mỗi `scrapling_mode`)."""
 
 
 class ProfileOpenRequest(BaseModel):

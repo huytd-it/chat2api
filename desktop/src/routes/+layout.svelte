@@ -19,7 +19,7 @@
     for (let attempt = 0; attempt < 40; attempt++) {
       try {
         const h = await fetchHealth();
-        serverStatus.set({ state: "ok", contexts: String(h.contexts), engine: h.engine });
+        serverStatus.set({ state: "ok", contexts: String(h.contexts), engine: h.mode ? `${h.engine} · ${h.mode}` : h.engine });
         return true;
       } catch {
         serverStatus.set({ state: "loading", contexts: "-", engine: "-" });

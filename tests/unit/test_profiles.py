@@ -262,10 +262,10 @@ def test_clone_copies_logins_but_not_cache_or_lock_files(db, profiles_dir):
     source = profiles.ensure_profile("main", profiles_dir, make_default=True)
     _seed_dir(source)
 
-    copy = profiles.clone(source.id, "main-cloak", profiles_dir, {"engine": "cloak"})
+    copy = profiles.clone(source.id, "main-stealthy", profiles_dir, {"scrapling_mode": "stealthy"})
 
     target = Path(copy["user_data_dir"])
-    assert target == profiles_dir / "main-cloak"
+    assert target == profiles_dir / "main-stealthy"
     assert (target / "Default" / "Cookies").read_text(encoding="utf-8") == "cookie-thật"
     assert (target / "Local State").is_file()
     # Cache tự dựng lại được; khoá mang theo là Chromium tưởng profile đang bị giữ.
@@ -277,16 +277,16 @@ def test_clone_copies_logins_but_not_cache_or_lock_files(db, profiles_dir):
 
 def test_clone_inherits_settings_except_the_overridden_ones(db, profiles_dir):
     source = profiles.create("main", profiles_dir,
-                             {"engine": "playwright", "max_tabs": 7, "headless": False,
+                             {"scrapling_mode": "dynamic", "max_tabs": 7, "headless": False,
                               "notes": "máy chính", "viewport": "1600x900"})
-    copy = profiles.clone(source["id"], "main-cloak", profiles_dir, {"engine": "cloak"})
+    copy = profiles.clone(source["id"], "main-stealthy", profiles_dir, {"scrapling_mode": "stealthy"})
 
-    assert copy["engine"] == "cloak"
+    assert copy["scrapling_mode"] == "stealthy"
     assert copy["max_tabs"] == 7 and copy["headless"] == 0
     assert copy["viewport"] == "1600x900" and copy["notes"] == "máy chính"
     # Bản sao không cướp cờ mặc định, không mang theo khoá của bản gốc.
     assert copy["is_default"] == 0 and copy["lock_pid"] is None
-    assert profiles.get_by_id(source["id"])["engine"] == "playwright"
+    assert profiles.get_by_id(source["id"])["scrapling_mode"] == "dynamic"
 
 
 def test_clone_carries_the_accounts_so_the_router_can_see_it(db, profiles_dir, tmp_path):
@@ -296,7 +296,7 @@ def test_clone_carries_the_accounts_so_the_router_can_see_it(db, profiles_dir, t
     _account(db, source.id, "chat.qwen.ai", "codex1", state)
     _account(db, source.id, "chatgpt.com", "work", None)
 
-    copy = profiles.clone(source.id, "main-cloak", profiles_dir)
+    copy = profiles.clone(source.id, "main-stealthy", profiles_dir)
 
     got = [(a["host"], a["label"]) for a in profiles.accounts_of(copy["id"])]
     assert got == [("chat.qwen.ai", "codex1"), ("chatgpt.com", "work")]
@@ -334,9 +334,9 @@ def test_clone_refuses_while_chromium_still_holds_the_source(db, profiles_dir, m
     monkeypatch.setattr(profiles, "_pid_alive", lambda pid: True)
 
     with pytest.raises(profiles.ProfileLocked):
-        profiles.clone(source.id, "main-cloak", profiles_dir)
+        profiles.clone(source.id, "main-stealthy", profiles_dir)
     # Không để lại thư mục dở dang.
-    assert not (profiles_dir / "main-cloak").exists()
+    assert not (profiles_dir / "main-stealthy").exists()
 
 
 def test_clone_of_unknown_profile_returns_none(db, profiles_dir):
@@ -345,7 +345,7 @@ def test_clone_of_unknown_profile_returns_none(db, profiles_dir):
 
 def test_viewport_size_parsing():
     def make(viewport):
-        return profiles.Profile(1, "p", "/tmp/p", True, 4, "playwright", None, None,
+        return profiles.Profile(1, "p", "/tmp/p", True, 4, "dynamic", None, None,
                                 "en-US", None, viewport)
 
     assert make("1280x800").viewport_size == {"width": 1280, "height": 800}

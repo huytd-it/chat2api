@@ -48,9 +48,9 @@ if (-not (Test-CommandExists "python")) {
 
 Push-Location $RepoRoot
 try {
-    & python -c "import chat2api, playwright" | Out-Null
+    & python -c "import chat2api, scrapling.fetchers" | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        throw "chat2api or Playwright is not installed. Run .\desktop\scripts\setup-and-run.ps1 first."
+        throw "chat2api or Scrapling is not installed. Run .\desktop\scripts\setup-and-run.ps1 first."
     }
 } finally {
     Pop-Location

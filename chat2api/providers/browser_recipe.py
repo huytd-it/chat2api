@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from .. import account_limits as limits
 from .. import accounts, applog, flows, settings, store
 from .. import attachments as attach
+from ..browserpool import BrowserModeError
 from ..errors import OpenAIError
 from ..prompt import flatten_messages
 from .base import ModelInfo, Provider
@@ -1022,9 +1023,8 @@ class BrowserRecipe(Provider):
         `storage_state` (mặc định): một context riêng cho mỗi ctx_key, y như cũ.
         `profile`: một persistent context dùng chung cho nhiều recipe, mỗi
         recipe một tab — nên các recipe khác nhau chạy song song được. Cả hai
-        engine đều vào được đường này (cloak mở profile bằng
-        `launch_persistent_context_async`); chỉ request headed thủ công là rơi
-        về cách cũ vì nó cần cửa sổ riêng.
+        chế độ Scrapling có browser đều vào được đường này; chỉ request headed
+        thủ công là rơi về cách cũ vì nó cần cửa sổ riêng.
         """
         profile = None
         if self._profile_mode and not headed and self.pool is not None:
@@ -1044,6 +1044,10 @@ class BrowserRecipe(Provider):
         if profile is not None:
             try:
                 return await self.pool.page_for(profile, self.slug)
+            except BrowserModeError:
+                # Profile chọn `fetcher`: rơi về storage_state sẽ lặng lẽ chạy
+                # bằng chế độ chung, trái với thứ người dùng vừa chọn.
+                raise
             except Exception as error:
                 print(f"[chat2api] mở profile '{profile.name}' thất bại, dùng storage_state: "
                       f"{error}", file=sys.stderr)
@@ -1055,7 +1059,10 @@ class BrowserRecipe(Provider):
         page = self._pages.get(ctx_key)
         if page is not None and not page.is_closed():
             return page
-        page = await ctx.new_page()
+        # Context của Scrapling là persistent nên mở sẵn một about:blank; nhận
+        # nó làm tab của recipe thay vì để một tab trống treo bên cạnh.
+        blank = [p for p in ctx.pages if not p.is_closed() and p.url in ("about:blank", "")]
+        page = blank[0] if blank else await ctx.new_page()
         self._pages[ctx_key] = page
         return page
 

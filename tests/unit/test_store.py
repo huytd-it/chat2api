@@ -57,6 +57,30 @@ def test_migrate_reopens_existing_db(tmp_path):
         second.close()
 
 
+def test_engine_column_migrates_to_scrapling_mode(db):
+    """Kho cũ có cột `engine` + khoá BROWSER_ENGINE: 0006 đổi sang chế độ Scrapling."""
+    db.migrate()
+    conn = db.connection()
+    with conn:  # dựng lại hình dạng ngay trước 0006
+        conn.execute("DELETE FROM schema_migrations WHERE version = 6")
+        conn.execute("ALTER TABLE profile DROP COLUMN scrapling_mode")
+        conn.execute("ALTER TABLE profile ADD COLUMN engine TEXT NOT NULL DEFAULT 'playwright'")
+        for name, engine in (("pw", "playwright"), ("ck", "cloak"), ("sc", "scrapling")):
+            conn.execute("INSERT INTO profile(name, user_data_dir, engine, created_at)"
+                         " VALUES (?, ?, ?, 1)", (name, f"/p/{name}", engine))
+        conn.execute("INSERT INTO setting(key, value, is_secret, updated_at)"
+                     " VALUES ('BROWSER_ENGINE', 'cloak', 0, 1)")
+
+    assert db.migrate() == LATEST
+
+    rows = db.query("SELECT name, scrapling_mode FROM profile ORDER BY name")
+    assert {r["name"]: r["scrapling_mode"] for r in rows} == {
+        "pw": "dynamic", "ck": "stealthy", "sc": "stealthy"}
+    assert "engine" not in {r["name"] for r in db.query("PRAGMA table_info(profile)")}
+    assert {r["key"]: r["value"] for r in db.query("SELECT key, value FROM setting")} == {
+        "SCRAPLING_MODE": "stealthy"}
+
+
 def test_wal_and_foreign_keys_on(db):
     db.migrate()
     assert db.query("PRAGMA journal_mode")[0][0] == "wal"

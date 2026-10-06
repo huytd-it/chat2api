@@ -18,21 +18,95 @@ PROFILE_ARGS = [
 ]
 
 
-def _signature_of(fn) -> tuple[set[str], bool]:
-    """(tên tham số `fn` khai báo, nó có nhận **kwargs không).
+# Ba chế độ của Scrapling (tài liệu Scrapling, mục "Fetchers"):
+#   fetcher  — Fetcher/FetcherSession: chỉ gửi HTTP, KHÔNG có browser.
+#   stealthy — StealthyFetcher/StealthySession: Chromium đã vá chống bot.
+#   dynamic  — DynamicFetcher/DynamicSession: Chromium thường qua Playwright.
+MODES = ("fetcher", "stealthy", "dynamic")
+BROWSER_MODES = ("stealthy", "dynamic")
+DEFAULT_MODE = "dynamic"
+_INSTALL_HINT = "pip install 'scrapling[fetchers]>=0.4.15' && scrapling install"
 
-    Dùng để gọi cloakbrowser mà không đoán mò: mỗi bản đặt tên tham số một kiểu
-    (`timezone` chứ không `timezone_id`) nên cứ ném hết vào là dính TypeError,
-    mất luôn lớp chống bot vì phải rơi về Chromium thường.
-    """
-    import inspect
 
+class BrowserModeError(RuntimeError):
+    """Chế độ đang chọn không mở được browser (fetcher chỉ gửi HTTP)."""
+
+
+def normalize_mode(value, default: str = DEFAULT_MODE) -> str:
+    mode = str(value or "").strip().lower()
+    return mode if mode in MODES else default
+
+
+def _session_class(mode: str):
+    """Lớp session Scrapling của một chế độ có browser."""
+    if mode not in BROWSER_MODES:
+        raise BrowserModeError(
+            f"Chế độ Scrapling '{mode}' chỉ gửi HTTP, không mở browser — thao tác này "
+            "cần trang web thật. Đổi sang 'stealthy' hoặc 'dynamic'.")
     try:
-        params = inspect.signature(fn).parameters
-    except (TypeError, ValueError):
-        return set(), True
-    extra = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
-    return set(params), extra
+        from scrapling import fetchers
+    except ImportError as error:
+        raise RuntimeError(f"Scrapling chưa cài: {_INSTALL_HINT}") from error
+    return fetchers.AsyncStealthySession if mode == "stealthy" else fetchers.AsyncDynamicSession
+
+
+async def open_session(mode: str, *, headless: bool, user_data_dir=None,
+                       max_pages: int = 1, profile=None):
+    """Mở một session Scrapling đã start; `session.context` là context Playwright.
+
+    Không có `user_data_dir` thì Scrapling tự tạo thư mục tạm, nên mỗi session
+    là một danh tính trình duyệt riêng.
+    """
+    cls = _session_class(mode)
+    kwargs = {
+        "headless": headless,
+        "max_pages": max(1, int(max_pages)),
+        "extra_flags": list(PROFILE_ARGS),
+    }
+    if mode == "stealthy":
+        kwargs.update(hide_canvas=True, block_webrtc=True)
+    if user_data_dir:
+        kwargs["user_data_dir"] = str(user_data_dir)
+    if profile is not None:
+        viewport = profile.viewport_size
+        if viewport:
+            kwargs["additional_args"] = {"viewport": viewport}
+        for key, value in (("proxy", profile.proxy),
+                           ("useragent", profile.user_agent),
+                           ("locale", profile.locale),
+                           ("timezone_id", profile.timezone)):
+            if value:
+                kwargs[key] = value
+
+    session = cls(**kwargs)
+    await session.start()
+    if session.context is None:
+        await session.close()
+        raise RuntimeError("Scrapling không tạo được browser context")
+    return session
+
+
+async def seed_storage_state(ctx, path: Path) -> None:
+    """Nạp storage_state vào persistent context do Scrapling sở hữu."""
+    try:
+        state = json.loads(Path(path).read_text(encoding="utf-8"))
+        cookies = state.get("cookies") or []
+        if cookies:
+            await ctx.add_cookies(cookies)
+        for origin in state.get("origins") or []:
+            items = origin.get("localStorage") or []
+            if not items:
+                continue
+            page = await ctx.new_page()
+            try:
+                await page.goto(origin["origin"], wait_until="domcontentloaded", timeout=20000)
+                await page.evaluate(
+                    "(items) => { for (const it of items)"
+                    " localStorage.setItem(it.name, it.value); }", items)
+            finally:
+                await page.close()
+    except Exception as error:
+        logger.warning("Scrapling: không nạp được storage_state %s: %s", path, error)
 
 
 async def _finish_cleanup(cleanup) -> None:
@@ -45,38 +119,35 @@ async def _finish_cleanup(cleanup) -> None:
 
 
 class BrowserPool:
-    """Một BrowserContext dài hạn cho mỗi slug.
+    """Một BrowserContext dài hạn cho mỗi slug, mở bằng Scrapling.
 
-    ponytail: engine cloak tạo 1 browser riêng mỗi context (nặng hơn) —
-    chấp nhận vì cloak chỉ bật cho site bot-detect khó. Đường profile bên dưới
-    chạy được với các engine stealth (`launch_persistent_context_async` của
-    cloakbrowser hoặc `AsyncStealthySession` của Scrapling), nên "chống bot"
-    và "giữ đăng nhập" không còn loại trừ nhau.
+    Scrapling là engine duy nhất; `mode` chọn fetcher của nó (xem MODES). Mỗi
+    context là một session Scrapling riêng (một tiến trình Chromium) — nặng
+    hơn chia context trong một browser, đổi lại "chống bot" và "giữ đăng nhập"
+    đi cùng nhau ở cả hai chế độ có browser.
     """
 
-    def __init__(self, engine: str = "playwright", max_contexts: int = 10,
+    def __init__(self, mode: str = DEFAULT_MODE, max_contexts: int = 10,
                  max_profiles: int = 2):
-        self.engine = engine
+        self.mode = normalize_mode(mode)
         self.max_contexts = max(1, int(max_contexts))
         self.max_profiles = max(1, int(max_profiles))
         self._contexts: OrderedDict[str, object] = OrderedDict()
         self._lock = asyncio.Lock()
-        self._pw = None
-        self._browser = None
         # Scrapling sở hữu cả Playwright driver bên dưới context. Giữ session
         # theo context để đóng driver cùng lúc, tránh rò tiến trình Chromium.
-        self._scrapling_sessions: dict[int, object] = {}
+        self._sessions: dict[int, object] = {}
         # Đường profile (BROWSER_PROFILE_MODE=profile) — sống SONG SONG với
         # _contexts ở trên, không thay thế. Mỗi profile là một persistent
         # context (vừa là browser vừa là context), giữ nhiều tab bên trong.
         self._profiles: OrderedDict[str, object] = OrderedDict()
         self._profile_ids: dict[str, int] = {}
         self._profile_headless: dict[str, bool] = {}
-        # Engine mà mỗi profile đang mở ĐÃ thật sự được mở bằng. Cột
-        # `profile.engine` đổi được bất cứ lúc nào từ trang Profiles, nên không
-        # nhớ cái này thì context cũ cứ được tái dùng và việc đổi engine im lặng
-        # không có tác dụng cho tới khi restart server.
-        self._profile_engines: dict[str, str] = {}
+        # Chế độ mà mỗi profile đang mở ĐÃ thật sự được mở bằng. Cột
+        # `profile.scrapling_mode` đổi được bất cứ lúc nào từ trang Profiles,
+        # nên không nhớ cái này thì context cũ cứ được tái dùng và việc đổi chế
+        # độ im lặng không có tác dụng cho tới khi restart server.
+        self._profile_modes: dict[str, str] = {}
         self._pages: OrderedDict[str, object] = OrderedDict()
         self._profile_lock = asyncio.Lock()
         # Đếm việc đang chạy trên từng profile / từng tab. Trần max_profiles và
@@ -85,49 +156,28 @@ class BrowserPool:
         # chạy lâu cũng bị cắt giữa chừng.
         self._busy_profiles: dict[str, int] = {}
         self._busy_tabs: dict[str, int] = {}
-        # Browser headed (cửa sổ hiện ra) dùng khi test recipe trong lúc
-        # Integrate, để xem trực quan trang web bên cạnh app — chỉ khởi
-        # động khi có context nào đó yêu cầu headed=True.
-        self._browser_headed = None
 
     @property
     def size(self) -> int:
         return len(self._contexts)
 
     async def start(self):
-        if self.engine == "scrapling":
-            try:
-                from scrapling.fetchers import AsyncStealthySession  # noqa: F401
-            except ImportError as e:
-                raise RuntimeError(
-                    "BROWSER_ENGINE=scrapling cần: pip install 'scrapling[fetchers]>=0.4.15' "
-                    "&& scrapling install"
-                ) from e
-            return
-        if self.engine == "cloak":
-            try:
-                from cloakbrowser import launch_context_async  # noqa: F401
-            except ImportError as e:
-                raise RuntimeError("BROWSER_ENGINE=cloak cần: pip install cloakbrowser") from e
-            return
-        from playwright.async_api import async_playwright
-
-        self._pw = await async_playwright().start()
-        self._browser = await self._pw.chromium.launch(headless=True)
-
-    @staticmethod
-    def _alive(ctx) -> bool:
-        """Context chết khi người dùng tự tay tắt cửa sổ browser headed."""
-        browser = getattr(ctx, "browser", None)
-        if browser is None:
-            return True
-        return browser.is_connected()
+        """Kiểm Scrapling đã cài cho chế độ đang chọn; browser chỉ mở khi cần."""
+        try:
+            from scrapling import fetchers
+        except ImportError as error:
+            raise RuntimeError(f"SCRAPLING_MODE={self.mode} cần: {_INSTALL_HINT}") from error
+        if self.mode == "fetcher":
+            if not hasattr(fetchers, "FetcherSession"):
+                raise RuntimeError(f"SCRAPLING_MODE=fetcher cần: {_INSTALL_HINT}")
+            logger.warning("BrowserPool: chế độ fetcher chỉ gửi HTTP — recipe browser, "
+                           "đăng nhập và Integrate sẽ báo lỗi cho tới khi đổi chế độ")
 
     def _cached(self, slug: str):
         ctx = self._contexts.get(slug)
         if ctx is None:
             return None
-        if not self._alive(ctx):
+        if not self._profile_alive(ctx):
             del self._contexts[slug]
             logger.info("BrowserPool: browser của '%s' đã bị đóng tay, sẽ mở lại", slug)
             return None
@@ -149,31 +199,11 @@ class BrowserPool:
                 logger.warning(
                     "BrowserPool context evicted for slug (max_contexts=%s)", self.max_contexts
                 )
-            state = str(storage_state) if storage_state and storage_state.exists() else None
-            if self.engine == "scrapling":
-                ctx = await self._launch_scrapling(headless=not headed)
-                if state:
-                    await self._seed_storage_state(ctx, Path(state))
-            elif self.engine == "cloak":
-                from cloakbrowser import launch_context_async
-
-                ctx = await launch_context_async(headless=not headed, storage_state=state)
-            else:
-                browser = await self._browser_for(headed)
-                ctx = await browser.new_context(storage_state=state)
+            ctx = await self._launch(self.mode, headless=not headed)
+            if storage_state and storage_state.exists():
+                await seed_storage_state(ctx, storage_state)
             self._contexts[slug] = ctx
             return ctx
-
-    async def _browser_for(self, headed: bool):
-        if not headed:
-            return self._browser
-        # Người dùng tắt tay cửa sổ headed thì browser mất kết nối — mở lại cho
-        # request kế tiếp thay vì để nó lỗi.
-        if self._browser_headed is not None and not self._browser_headed.is_connected():
-            self._browser_headed = None
-        if self._browser_headed is None:
-            self._browser_headed = await self._pw.chromium.launch(headless=False)
-        return self._browser_headed
 
     # ------------------------------------------------------- đường profile
 
@@ -186,23 +216,23 @@ class BrowserPool:
         from . import profiles as profiles_mod
 
         ctx = self._profiles.get(profile.name)
-        if ctx is not None and self._profile_alive(ctx) and not self._engine_changed(profile):
+        if ctx is not None and self._profile_alive(ctx) and not self._mode_changed(profile):
             self._profiles.move_to_end(profile.name)
             return ctx
         async with self._profile_lock:
             ctx = self._profiles.get(profile.name)
             if ctx is not None and self._profile_alive(ctx):
-                if not self._engine_changed(profile):
+                if not self._mode_changed(profile):
                     self._profiles.move_to_end(profile.name)
                     return ctx
-                # Đổi engine chỉ có tác dụng khi mở lại bằng tiến trình mới.
-                # Đăng nhập KHÔNG mất: engine mới nhận đúng `user_data_dir` cũ
+                # Đổi chế độ chỉ có tác dụng khi mở lại bằng tiến trình mới.
+                # Đăng nhập KHÔNG mất: session mới nhận đúng `user_data_dir` cũ
                 # nên cookie/localStorage đi theo — nhưng phải đóng trước để nhả
-                # khoá pid, không thì engine mới đụng thư mục Chromium đang bị giữ.
-                logger.info("BrowserPool: profile '%s' đổi engine %s -> %s, mở lại "
+                # khoá pid, không thì nó đụng thư mục Chromium đang bị giữ.
+                logger.info("BrowserPool: profile '%s' đổi chế độ %s -> %s, mở lại "
                             "trên cùng user_data_dir (giữ nguyên đăng nhập)",
-                            profile.name, self._profile_engines.get(profile.name),
-                            self.profile_engine(profile))
+                            profile.name, self._profile_modes.get(profile.name),
+                            self.profile_mode(profile))
                 await self._close_profile(profile.name, self._profiles.pop(profile.name))
             self._profiles.pop(profile.name, None)
             while len(self._profiles) >= self.max_profiles:
@@ -226,7 +256,7 @@ class BrowserPool:
                 raise
             self._profiles[profile.name] = ctx
             self._profile_headless[profile.name] = bool(profile.headless)
-            self._profile_engines[profile.name] = self.profile_engine(profile)
+            self._profile_modes[profile.name] = self.profile_mode(profile)
             self._profile_ids[profile.name] = profile.id
             await self._seed_profile(profile, ctx)
             await asyncio.to_thread(profiles_mod.touch, profile.id)
@@ -259,177 +289,46 @@ class BrowserPool:
                 else:
                     self._busy_tabs[tab_key] -= 1
 
-    def profile_engine(self, profile) -> str:
-        """Engine mở profile này: cột `profile.engine` thắng cấu hình chung."""
-        return (getattr(profile, "engine", "") or self.engine or "playwright").strip().lower()
+    def profile_mode(self, profile) -> str:
+        """Chế độ mở profile này: cột `scrapling_mode` thắng cấu hình chung."""
+        return normalize_mode(getattr(profile, "scrapling_mode", ""), self.mode)
 
-    def launched_engine(self, profile_name: str) -> str | None:
-        """Engine mà context đang mở của profile này ĐÃ được mở bằng.
+    def launched_mode(self, profile_name: str) -> str | None:
+        """Chế độ mà context đang mở của profile này ĐÃ được mở bằng.
 
-        None khi profile chưa mở. Khác `profile_engine()` — cái đó đọc ý muốn
+        None khi profile chưa mở. Khác `profile_mode()` — cái đó đọc ý muốn
         hiện tại trong DB, cái này đọc thực tế đang chạy.
         """
         if self.open_context(profile_name) is None:
             return None
-        return self._profile_engines.get(profile_name)
+        return self._profile_modes.get(profile_name)
 
     def profile_busy(self, profile_name: str) -> bool:
         """Có request nào đang giữ profile này không (xem `hold`)."""
         return bool(self._busy_profiles.get(profile_name))
 
-    def _engine_changed(self, profile) -> bool:
-        """Context đang mở được mở bằng engine khác với cột `engine` bây giờ."""
-        launched = self._profile_engines.get(profile.name)
-        return launched is not None and launched != self.profile_engine(profile)
+    def _mode_changed(self, profile) -> bool:
+        """Context đang mở được mở bằng chế độ khác với cột `scrapling_mode` bây giờ."""
+        launched = self._profile_modes.get(profile.name)
+        return launched is not None and launched != self.profile_mode(profile)
 
-    async def _ensure_pw(self):
-        """Driver Playwright, mở lần đầu khi cần.
+    async def _launch(self, mode: str, **kwargs):
+        """Mở session Scrapling, nhớ nó theo context để `_close_context` đóng cả driver."""
+        session = await open_session(mode, **kwargs)
+        self._sessions[id(session.context)] = session
+        return session.context
 
-        `start()` bỏ qua bước này khi engine là cloak (đường storage_state không
-        đụng tới Playwright), nhưng profile vẫn có thể cần nó: profile
-        `engine='playwright'` nằm chung một pool cloak, và cả đường rơi về khi
-        bản cloakbrowser đang cài không mở được persistent profile.
-        """
-        if self._pw is None:
-            from playwright.async_api import async_playwright
-
-            self._pw = await async_playwright().start()
-        return self._pw
-
-    async def _launch_cloak_profile(self, profile):
-        """Persistent context bằng CloakBrowser; None nếu bản đang cài không có.
-
-        `launch_persistent_context_async` nhận thư mục profile ở tham số đầu và
-        trả về đúng một Playwright `BrowserContext`, nên phần còn lại của pool
-        (seed, chia tab, evict, khoá pid) không cần biết profile mở bằng engine
-        nào. Bản cũ chỉ có `launch_context_async`: báo một dòng rồi mở bằng
-        Chromium thường — thà mất lớp chống bot còn hơn mất luôn đăng nhập đã
-        lưu trong `user_data_dir`.
-        """
-        try:
-            import cloakbrowser
-
-            launch = cloakbrowser.launch_persistent_context_async
-        except (ImportError, AttributeError) as error:
-            logger.warning("profile '%s': cloakbrowser không mở được persistent profile "
-                           "(%s) — mở bằng Chromium thường", profile.name, error)
-            return None
-        names, extra = _signature_of(launch)
-        kwargs = {"headless": profile.headless, "args": list(PROFILE_ARGS)}
-        viewport = profile.viewport_size
-        if viewport:
-            kwargs["viewport"] = viewport
-        for key, value in (("user_agent", profile.user_agent), ("locale", profile.locale)):
-            if value:
-                kwargs[key] = value
-        if profile.timezone:
-            # Tham số riêng của cloakbrowser tên là `timezone`; kwargs dư được nó
-            # chuyển thẳng xuống Playwright, ở đó tên là `timezone_id`.
-            kwargs["timezone" if "timezone" in names else "timezone_id"] = profile.timezone
-        if profile.proxy:
-            # Cùng lý do: cloakbrowser nhận chuỗi URL, Playwright nhận dict.
-            kwargs["proxy"] = profile.proxy if "proxy" in names else {"server": profile.proxy}
-        if not extra:
-            kwargs = {k: v for k, v in kwargs.items() if k in names}
-        return await launch(profile.user_data_dir, **kwargs)
-
-    async def _launch_scrapling(self, *, headless: bool, user_data_dir=None,
-                                max_pages: int = 1, profile=None):
-        """Mở Scrapling stealth session và trả context Playwright dài hạn."""
-        try:
-            from scrapling.fetchers import AsyncStealthySession
-        except ImportError as error:
-            raise RuntimeError(
-                "Engine scrapling cần: pip install 'scrapling[fetchers]>=0.4.15' "
-                "&& scrapling install"
-            ) from error
-
-        kwargs = {
-            "headless": headless,
-            "max_pages": max(1, int(max_pages)),
-            "extra_flags": list(PROFILE_ARGS),
-            "hide_canvas": True,
-            "block_webrtc": True,
-        }
-        if user_data_dir:
-            kwargs["user_data_dir"] = str(user_data_dir)
-        if profile is not None:
-            viewport = profile.viewport_size
-            if viewport:
-                kwargs["additional_args"] = {"viewport": viewport}
-            for key, value in (("proxy", profile.proxy),
-                               ("useragent", profile.user_agent),
-                               ("locale", profile.locale),
-                               ("timezone_id", profile.timezone)):
-                if value:
-                    kwargs[key] = value
-
-        session = AsyncStealthySession(**kwargs)
-        await session.start()
-        ctx = session.context
-        if ctx is None:
-            await session.close()
-            raise RuntimeError("Scrapling không tạo được browser context")
-        self._scrapling_sessions[id(ctx)] = session
-        return ctx
-
-    async def _launch_scrapling_profile(self, profile):
-        return await self._launch_scrapling(
+    async def _launch_profile(self, profile):
+        return await self._launch(
+            self.profile_mode(profile),
             headless=profile.headless,
             user_data_dir=profile.user_data_dir,
             max_pages=profile.max_tabs,
             profile=profile,
         )
 
-    async def _launch_profile(self, profile):
-        engine = self.profile_engine(profile)
-        if engine == "scrapling":
-            return await self._launch_scrapling_profile(profile)
-        if engine == "cloak":
-            ctx = await self._launch_cloak_profile(profile)
-            if ctx is not None:
-                return ctx
-        kwargs = {
-            "user_data_dir": profile.user_data_dir,
-            "headless": profile.headless,
-            "args": list(PROFILE_ARGS),
-        }
-        viewport = profile.viewport_size
-        if viewport:
-            kwargs["viewport"] = viewport
-        for key, value in (("proxy", {"server": profile.proxy} if profile.proxy else None),
-                           ("user_agent", profile.user_agent),
-                           ("locale", profile.locale),
-                           ("timezone_id", profile.timezone)):
-            if value:
-                kwargs[key] = value
-        pw = await self._ensure_pw()
-        return await pw.chromium.launch_persistent_context(**kwargs)
-
-    async def _seed_storage_state(self, ctx, path: Path) -> None:
-        """Nạp storage_state vào persistent context do Scrapling sở hữu."""
-        try:
-            state = json.loads(path.read_text(encoding="utf-8"))
-            cookies = state.get("cookies") or []
-            if cookies:
-                await ctx.add_cookies(cookies)
-            for origin in state.get("origins") or []:
-                items = origin.get("localStorage") or []
-                if not items:
-                    continue
-                page = await ctx.new_page()
-                try:
-                    await page.goto(origin["origin"], wait_until="domcontentloaded", timeout=20000)
-                    await page.evaluate(
-                        "(items) => { for (const it of items)"
-                        " localStorage.setItem(it.name, it.value); }", items)
-                finally:
-                    await page.close()
-        except Exception as error:
-            logger.warning("Scrapling: không nạp được storage_state %s: %s", path, error)
-
     async def _close_context(self, ctx) -> None:
-        session = self._scrapling_sessions.pop(id(ctx), None)
+        session = self._sessions.pop(id(ctx), None)
         try:
             if session is not None:
                 await session.close()
@@ -563,7 +462,7 @@ class BrowserPool:
         await self._close_context(ctx)
         profile_id = self._profile_ids.pop(name, None)
         self._profile_headless.pop(name, None)
-        self._profile_engines.pop(name, None)
+        self._profile_modes.pop(name, None)
         if profile_id is not None:
             await asyncio.to_thread(profiles_mod.release_lock, profile_id)
 
@@ -631,18 +530,3 @@ class BrowserPool:
             await self._close_profile(name, ctx)
         self._profiles.clear()
         self._pages.clear()
-        if self._browser:
-            try:
-                await self._browser.close()
-            except Exception:
-                pass
-        if self._browser_headed:
-            try:
-                await self._browser_headed.close()
-            except Exception:
-                pass
-        if self._pw:
-            try:
-                await self._pw.stop()
-            except Exception:
-                pass

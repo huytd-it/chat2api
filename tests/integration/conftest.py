@@ -15,11 +15,18 @@ UNSAFE_PORTS = {
     587,601,636,989,1000,1067,1068,1069,1085,1719,1720,1723,2049,3659,4045,5060,5061,6000,6566,6665,6666,6667,6668,6669,6697,10080,
 }
 
+class _SiteServer(socketserver.ThreadingTCPServer):
+    # Mỗi context là một tiến trình Chromium riêng (session Scrapling), và
+    # Chromium giữ sẵn socket rảnh: server một luồng sẽ kẹt ở socket đó trong
+    # khi browser thứ hai chờ tới timeout.
+    daemon_threads = True
+
+
 @pytest.fixture
 def site():
     handler = partial(http.server.SimpleHTTPRequestHandler, directory=str(FIXTURES))
     for _ in range(20):
-        httpd = socketserver.TCPServer(("127.0.0.1", 0), handler, bind_and_activate=False)
+        httpd = _SiteServer(("127.0.0.1", 0), handler, bind_and_activate=False)
         httpd.allow_reuse_address = True
         httpd.server_bind()
         port = httpd.server_address[1]
@@ -35,7 +42,7 @@ def site():
             httpd.server_close()
         return
     # fallback: use whatever port (let Chromium flag allow it)
-    with socketserver.TCPServer(("127.0.0.1", 0), handler) as httpd:
+    with _SiteServer(("127.0.0.1", 0), handler) as httpd:
         port = httpd.server_address[1]
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         yield f"http://127.0.0.1:{port}"

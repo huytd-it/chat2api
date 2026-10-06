@@ -130,7 +130,7 @@ async def test_put_settings_writes_store_when_it_is_open(tmp_path, monkeypatch):
 async def test_put_settings_says_when_dotenv_still_wins(tmp_path, monkeypatch):
     from chat2api import settings, store
 
-    monkeypatch.setenv("BROWSER_ENGINE", "playwright")
+    monkeypatch.setenv("SCRAPLING_MODE", "dynamic")
     store.shutdown()
     db = store.connect(tmp_path / "store" / "chat2api.db")
     db.migrate()
@@ -138,12 +138,12 @@ async def test_put_settings_says_when_dotenv_still_wins(tmp_path, monkeypatch):
     try:
         client, _ = await _client(tmp_path)
         async with client:
-            r = await client.put("/admin/settings", json={"values": {"BROWSER_ENGINE": "cloak"}})
-            assert r.json()["shadowed"] == ["BROWSER_ENGINE"]
+            r = await client.put("/admin/settings", json={"values": {"SCRAPLING_MODE": "stealthy"}})
+            assert r.json()["shadowed"] == ["SCRAPLING_MODE"]
 
             field = next(f for f in (await client.get("/admin/settings")).json()["fields"]
-                         if f["key"] == "BROWSER_ENGINE")
+                         if f["key"] == "SCRAPLING_MODE")
             assert field["env_locked"] is True
-            assert field["value"] == "playwright"  # .env vẫn là thứ đang chạy
+            assert field["value"] == "dynamic"  # .env vẫn là thứ đang chạy
     finally:
         store.shutdown()

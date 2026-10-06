@@ -52,16 +52,17 @@ def set_login_policy(recipe_path: Path, strategy: str | None, quota: int | None)
 
 async def _login(cfg, slug: str, account: str | None = None,
                  strategy: str | None = None, quota: int | None = None) -> None:
-    from playwright.async_api import async_playwright
+    from .browserpool import BrowserPool
 
     rdir = resolve_recipe_path(cfg.recipes_dir, slug)
     recipe = yaml.safe_load((rdir / "recipe.yaml").read_text(encoding="utf-8"))
     url = recipe["url"]
     rel_path = f"auth/{account}/state.json" if account else "auth/state.json"
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=False)
-        ctx = await browser.new_context()
-        page = await ctx.new_page()
+    pool = BrowserPool(cfg.scrapling_mode)
+    await pool.start()
+    try:
+        ctx = await pool.context_for("login", headed=True)
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
         await page.goto(url)
         label = f" (account: {account})" if account else ""
         print(f"Đăng nhập trên trang {url}{label} rồi nhấn Enter ở terminal...")
@@ -69,7 +70,8 @@ async def _login(cfg, slug: str, account: str | None = None,
         state_path = rdir / rel_path
         state_path.parent.mkdir(parents=True, exist_ok=True)
         await ctx.storage_state(path=str(state_path))
-        await browser.close()
+    finally:
+        await pool.aclose()
     rp = rdir / "recipe.yaml"
     add_storage_state(rp, account, rel_path)
     set_login_policy(rp, strategy, quota)
@@ -80,7 +82,7 @@ async def _integrate(cfg, url: str) -> None:
     from .agents.analyzer import integrate
     from .browserpool import BrowserPool
 
-    pool = BrowserPool(cfg.browser_engine, cfg.pool_max_contexts)
+    pool = BrowserPool(cfg.scrapling_mode, cfg.pool_max_contexts)
     await pool.start()
     try:
         result = await integrate(url, pool, cfg, lambda m: print(m, flush=True))

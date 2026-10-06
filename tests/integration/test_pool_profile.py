@@ -1,8 +1,8 @@
 """Pool khoá theo profile + tab song song (pha 4, docs/design-v2.md §3).
 
-Chromium thật chỉ được mở ở đúng một test cuối file (đánh dấu bằng
-`playwright.importorskip`). Phần còn lại dùng fake context để kiểm logic khoá,
-eviction và seed mà không tốn vài giây mỗi lần chạy.
+Chromium thật chỉ được mở ở đúng một test cuối file. Phần còn lại thay session
+Scrapling bằng fake để kiểm logic khoá, eviction và seed mà không tốn vài giây
+mỗi lần chạy.
 """
 
 import asyncio
@@ -11,7 +11,8 @@ import json
 import pytest
 
 from chat2api import profiles, store
-from chat2api.browserpool import PROFILE_ARGS, BrowserPool
+from chat2api import browserpool
+from chat2api.browserpool import PROFILE_ARGS, BrowserModeError, BrowserPool
 
 
 class FakePage:
@@ -65,23 +66,62 @@ def db(tmp_path):
         store.shutdown()
 
 
+def install_fake_scrapling(monkeypatch):
+    """Thay `scrapling.fetchers` bằng fake; trả về danh sách session đã mở.
+
+    Mỗi session nhớ `mode` (lớp nào được chọn) và `kwargs` (thứ pool gửi xuống
+    Scrapling) — đó là toàn bộ bề mặt mà pool chạm vào thư viện thật.
+    """
+    import sys
+    import types
+
+    sessions = []
+
+    class FakeSession:
+        mode = ""
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.context = FakePersistentContext()
+            self.closed = False
+            sessions.append(self)
+
+        async def start(self):
+            return None
+
+        async def close(self):
+            self.closed = True
+            await self.context.close()
+
+    class FakeStealthySession(FakeSession):
+        mode = "stealthy"
+
+    class FakeDynamicSession(FakeSession):
+        mode = "dynamic"
+
+    package = types.ModuleType("scrapling")
+    package.__path__ = []
+    fetchers = types.ModuleType("scrapling.fetchers")
+    fetchers.AsyncStealthySession = FakeStealthySession
+    fetchers.AsyncDynamicSession = FakeDynamicSession
+    fetchers.FetcherSession = object
+    package.fetchers = fetchers
+    monkeypatch.setitem(sys.modules, "scrapling", package)
+    monkeypatch.setitem(sys.modules, "scrapling.fetchers", fetchers)
+    return sessions
+
+
 @pytest.fixture
-def pool(monkeypatch, tmp_path):
-    """Pool với launch_persistent_context được thay bằng fake."""
+def pool(monkeypatch):
+    """Pool với session Scrapling được thay bằng fake (`pool.sessions`)."""
     p = BrowserPool(max_contexts=2, max_profiles=2)
-    launched = []
-
-    class FakeChromium:
-        async def launch_persistent_context(self, **kwargs):
-            launched.append(kwargs)
-            return FakePersistentContext(**{})
-
-    class FakePW:
-        chromium = FakeChromium()
-
-    p._pw = FakePW()
-    p.launched = launched
+    p.sessions = install_fake_scrapling(monkeypatch)
     return p
+
+
+def launched(pool):
+    """kwargs của từng lần mở browser, theo thứ tự."""
+    return [session.kwargs for session in pool.sessions]
 
 
 def make_profile(db, tmp_path, name="main", max_tabs=4):
@@ -96,18 +136,19 @@ async def test_same_profile_is_launched_once_and_reused(pool, db, tmp_path):
     first = await pool.context_for_profile(profile)
     second = await pool.context_for_profile(profile)
     assert first is second
-    assert len(pool.launched) == 1
+    assert len(pool.sessions) == 1
     assert pool.profile_count == 1
 
 
 async def test_launch_passes_anti_throttling_flags(pool, db, tmp_path):
     await pool.context_for_profile(make_profile(db, tmp_path))
-    args = pool.launched[0]["args"]
+    kwargs = launched(pool)[0]
     # Thiếu ba cờ này thì tab nền bị Chromium bóp CPU và vòng poll stable_text
     # sẽ timeout — đúng thứ làm chạy song song trở nên vô dụng.
-    assert args == PROFILE_ARGS
-    assert pool.launched[0]["headless"] is True
-    assert pool.launched[0]["viewport"] == {"width": 1280, "height": 800}
+    assert kwargs["extra_flags"] == PROFILE_ARGS
+    assert kwargs["headless"] is True
+    assert kwargs["additional_args"] == {"viewport": {"width": 1280, "height": 800}}
+    assert kwargs["user_data_dir"] == str(tmp_path / "profiles" / "main")
 
 
 async def test_optional_profile_fields_only_passed_when_set(pool, db, tmp_path):
@@ -117,134 +158,36 @@ async def test_optional_profile_fields_only_passed_when_set(pool, db, tmp_path):
         conn.execute("UPDATE profile SET proxy = ?, timezone = ? WHERE id = ?",
                      ("http://127.0.0.1:8888", "Asia/Ho_Chi_Minh", profile.id))
     await pool.context_for_profile(profiles.get_profile("main"))
-    kwargs = pool.launched[0]
-    assert kwargs["proxy"] == {"server": "http://127.0.0.1:8888"}
+    kwargs = launched(pool)[0]
+    assert kwargs["proxy"] == "http://127.0.0.1:8888"
     assert kwargs["timezone_id"] == "Asia/Ho_Chi_Minh"
-    assert "user_agent" not in kwargs   # chưa đặt thì không gửi
+    assert "useragent" not in kwargs   # chưa đặt thì không gửi
 
 
-# ----------------------------------------------------------- engine cloak
+# ------------------------------------------------------- chế độ Scrapling
 
 
-class FakeCloak:
-    """cloakbrowser giả — chữ ký chép đúng README của CloakHQ/cloakbrowser.
-
-    Giữ nguyên cả `**kwargs` (bản thật chuyển tiếp xuống Playwright): đó mới là
-    trường hợp thật, và là chỗ dễ sai nhất — có `**kwargs` thì ném tên nào vào
-    cũng "chạy", nên nếu pool gửi `timezone_id` hay proxy dạng dict thì
-    cloakbrowser lặng lẽ bỏ qua tham số riêng của nó chứ không báo lỗi.
-    """
-
-    def __init__(self):
-        self.calls = []
-
-    async def launch_persistent_context_async(self, user_data_dir, headless=True, proxy=None,
-                                              user_agent=None, viewport=None, locale=None,
-                                              timezone=None, color_scheme=None, geoip=False,
-                                              extension_paths=None, args=None, **kwargs):
-        self.calls.append({"user_data_dir": user_data_dir, "headless": headless,
-                           "args": args, "viewport": viewport, "user_agent": user_agent,
-                           "locale": locale, "timezone": timezone, "proxy": proxy,
-                           "extra": kwargs})
-        return FakePersistentContext()
-
-
-def install_fake_scrapling(monkeypatch):
-    import sys
-    import types
-
-    sessions = []
-
-    class FakeScraplingSession:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-            self.context = FakePersistentContext()
-            self.closed = False
-            sessions.append(self)
-
-        async def start(self):
-            return None
-
-        async def close(self):
-            self.closed = True
-            await self.context.close()
-
-    package = types.ModuleType("scrapling")
-    package.__path__ = []
-    fetchers = types.ModuleType("scrapling.fetchers")
-    fetchers.AsyncStealthySession = FakeScraplingSession
-    package.fetchers = fetchers
-    monkeypatch.setitem(sys.modules, "scrapling", package)
-    monkeypatch.setitem(sys.modules, "scrapling.fetchers", fetchers)
-    return sessions
-
-
-async def test_cloak_profile_opens_a_persistent_context(pool, db, tmp_path, monkeypatch):
-    """Bug cũ: profile engine=cloak không mở được, giờ đi qua cloakbrowser."""
-    import sys
-
-    fake = FakeCloak()
-    monkeypatch.setitem(sys.modules, "cloakbrowser", fake)
-    profile = make_profile(db, tmp_path)
+def set_mode(db, profile_id, mode):
     conn = db.connection()
     with conn:
-        conn.execute("UPDATE profile SET engine = 'cloak', proxy = ?, timezone = ? WHERE id = ?",
-                     ("http://127.0.0.1:8888", "Asia/Ho_Chi_Minh", profile.id))
-
-    ctx = await pool.context_for_profile(profiles.get_profile("main"))
-
-    assert ctx is not None
-    assert pool.launched == []           # KHÔNG rơi về Chromium thường
-    call = fake.calls[0]
-    assert call["user_data_dir"] == str(tmp_path / "profiles" / "main")
-    assert call["args"] == PROFILE_ARGS
-    assert call["viewport"] == {"width": 1280, "height": 800}
-    # cloakbrowser đặt tên `timezone` và nhận proxy dạng chuỗi — khác Playwright.
-    assert call["timezone"] == "Asia/Ho_Chi_Minh"
-    assert call["proxy"] == "http://127.0.0.1:8888"
-    # Không rơi vào **kwargs: rơi vào đó là trôi thẳng xuống Playwright và lớp
-    # vân tay của cloakbrowser không thấy proxy/timezone để khớp theo.
-    assert call["extra"] == {}
+        conn.execute("UPDATE profile SET scrapling_mode = ? WHERE id = ?", (mode, profile_id))
 
 
-async def test_cloak_without_persistent_api_falls_back_to_chromium(pool, db, tmp_path,
-                                                                    monkeypatch):
-    """Bản cloakbrowser cũ: mất lớp chống bot, KHÔNG được mất đăng nhập."""
-    import sys
-    import types
-
-    monkeypatch.setitem(sys.modules, "cloakbrowser", types.ModuleType("cloakbrowser"))
-    profile = make_profile(db, tmp_path)
-    conn = db.connection()
-    with conn:
-        conn.execute("UPDATE profile SET engine = 'cloak' WHERE id = ?", (profile.id,))
-
-    ctx = await pool.context_for_profile(profiles.get_profile("main"))
-
-    assert ctx is not None
-    assert pool.launched[0]["user_data_dir"] == str(tmp_path / "profiles" / "main")
-
-
-async def test_profile_engine_beats_the_pool_engine(pool, db, tmp_path, monkeypatch):
-    """Pool chạy cloak nhưng profile khai playwright thì mở bằng Playwright."""
-    import sys
-
-    fake = FakeCloak()
-    monkeypatch.setitem(sys.modules, "cloakbrowser", fake)
-    pool.engine = "cloak"
+async def test_new_profile_defaults_to_the_dynamic_session(pool, db, tmp_path):
     await pool.context_for_profile(make_profile(db, tmp_path))
 
-    assert fake.calls == []
-    assert len(pool.launched) == 1
+    session = pool.sessions[0]
+    assert session.mode == "dynamic"
+    # Cờ vân tay là của StealthySession; DynamicSession từ chối tham số lạ.
+    assert "hide_canvas" not in session.kwargs and "block_webrtc" not in session.kwargs
 
 
-async def test_scrapling_profile_uses_stealth_session(pool, db, tmp_path, monkeypatch):
-    sessions = install_fake_scrapling(monkeypatch)
+async def test_stealthy_profile_uses_stealth_session(pool, db, tmp_path):
     profile = make_profile(db, tmp_path)
     conn = db.connection()
     with conn:
         conn.execute(
-            "UPDATE profile SET engine = 'scrapling', proxy = ?, user_agent = ?, "
+            "UPDATE profile SET scrapling_mode = 'stealthy', proxy = ?, user_agent = ?, "
             "locale = ?, timezone = ?, viewport = ? WHERE id = ?",
             ("http://127.0.0.1:8888", "agent", "vi-VN", "Asia/Ho_Chi_Minh",
              "1440x900", profile.id),
@@ -252,8 +195,8 @@ async def test_scrapling_profile_uses_stealth_session(pool, db, tmp_path, monkey
 
     ctx = await pool.context_for_profile(profiles.get_profile("main"))
 
-    assert pool.launched == []
-    kwargs = sessions[0].kwargs
+    assert pool.sessions[0].mode == "stealthy"
+    kwargs = pool.sessions[0].kwargs
     assert kwargs["user_data_dir"] == str(tmp_path / "profiles" / "main")
     assert kwargs["headless"] is True
     assert kwargs["max_pages"] == profile.max_tabs
@@ -266,44 +209,63 @@ async def test_scrapling_profile_uses_stealth_session(pool, db, tmp_path, monkey
     assert kwargs["additional_args"] == {"viewport": {"width": 1440, "height": 900}}
 
     await pool.drop_profile("main")
-    assert sessions[0].closed and ctx.closed
+    assert pool.sessions[0].closed and ctx.closed
 
 
-def set_engine(db, profile_id, engine):
-    conn = db.connection()
-    with conn:
-        conn.execute("UPDATE profile SET engine = ? WHERE id = ?", (engine, profile_id))
+async def test_profile_mode_beats_the_pool_mode(pool, db, tmp_path):
+    """Pool chạy stealthy nhưng profile khai dynamic thì mở bằng DynamicSession."""
+    pool.mode = "stealthy"
+    await pool.context_for_profile(make_profile(db, tmp_path))
+
+    assert [session.mode for session in pool.sessions] == ["dynamic"]
 
 
-async def test_switching_engine_to_scrapling_reopens_the_same_user_data_dir(
-        pool, db, tmp_path, monkeypatch):
-    """Đổi engine sang Scrapling phải mở lại — và mở lại trên ĐÚNG profile cũ.
-
-    Bug: context Playwright đang mở được tái dùng vô điều kiện, nên đổi engine
-    từ trang Profiles im lặng không có tác dụng cho tới khi restart server.
-    """
-    sessions = install_fake_scrapling(monkeypatch)
+async def test_fetcher_profile_refuses_to_open_a_browser(pool, db, tmp_path):
+    """fetcher chỉ gửi HTTP: báo lỗi rõ ràng, không lặng lẽ mở Chromium."""
     profile = make_profile(db, tmp_path)
-    playwright_ctx = await pool.context_for_profile(profile)
-    assert len(pool.launched) == 1
+    set_mode(db, profile.id, "fetcher")
 
-    set_engine(db, profile.id, "scrapling")
-    scrapling_ctx = await pool.context_for_profile(profiles.get_profile("main"))
+    with pytest.raises(BrowserModeError, match="stealthy"):
+        await pool.context_for_profile(profiles.get_profile("main"))
 
-    assert scrapling_ctx is not playwright_ctx
-    assert playwright_ctx.closed, "context engine cũ phải đóng để nhả khoá pid"
+    assert pool.sessions == [] and pool.profile_count == 0
+    db.flush(timeout=10)
+    # Khoá pid không được treo lại sau một lần từ chối.
+    assert db.query("SELECT lock_pid FROM profile")[0]["lock_pid"] is None
+
+
+async def test_fetcher_pool_refuses_plain_contexts_too(pool):
+    pool.mode = "fetcher"
+    await pool.start()                   # fetcher vẫn khởi động được server
+
+    with pytest.raises(BrowserModeError):
+        await pool.context_for("site")
+    assert pool.sessions == [] and pool.size == 0
+
+
+async def test_switching_mode_reopens_the_same_user_data_dir(pool, db, tmp_path):
+    """Đổi chế độ phải mở lại — và mở lại trên ĐÚNG profile cũ.
+
+    Bug: context đang mở được tái dùng vô điều kiện, nên đổi chế độ từ trang
+    Profiles im lặng không có tác dụng cho tới khi restart server.
+    """
+    profile = make_profile(db, tmp_path)
+    dynamic_ctx = await pool.context_for_profile(profile)
+
+    set_mode(db, profile.id, "stealthy")
+    stealthy_ctx = await pool.context_for_profile(profiles.get_profile("main"))
+
+    assert stealthy_ctx is not dynamic_ctx
+    assert dynamic_ctx.closed, "context chế độ cũ phải đóng để nhả khoá pid"
+    assert [session.mode for session in pool.sessions] == ["dynamic", "stealthy"]
     # Cùng user_data_dir = cùng cookie/localStorage: đăng nhập không mất.
-    assert sessions[0].kwargs["user_data_dir"] == str(tmp_path / "profiles" / "main")
-    assert sessions[0].kwargs["user_data_dir"] == profile.user_data_dir
-    assert len(pool.launched) == 1              # không mở thêm Chromium thường
-    assert pool.launched[0]["user_data_dir"] == sessions[0].kwargs["user_data_dir"]
-    assert pool.launched_engine("main") == "scrapling"
+    assert [kwargs["user_data_dir"] for kwargs in launched(pool)] == [profile.user_data_dir] * 2
+    assert pool.launched_mode("main") == "stealthy"
 
 
-async def test_engine_switch_releases_the_pid_lock_before_relaunching(
+async def test_mode_switch_releases_the_pid_lock_before_relaunching(
         pool, db, tmp_path, monkeypatch):
-    """Engine mới đụng đúng thư mục engine cũ đang giữ — khoá phải nhả trước."""
-    install_fake_scrapling(monkeypatch)
+    """Session mới đụng đúng thư mục session cũ đang giữ — khoá phải nhả trước."""
     profile = make_profile(db, tmp_path)
     await pool.context_for_profile(profile)
     locks = []
@@ -312,38 +274,37 @@ async def test_engine_switch_releases_the_pid_lock_before_relaunching(
     monkeypatch.setattr(profiles, "acquire_lock",
                         lambda p: locks.append(("acquire", p.id)))
 
-    set_engine(db, profile.id, "scrapling")
+    set_mode(db, profile.id, "stealthy")
     await pool.context_for_profile(profiles.get_profile("main"))
 
     assert locks == [("release", profile.id), ("acquire", profile.id)]
 
 
-async def test_unchanged_engine_still_reuses_the_open_context(pool, db, tmp_path):
-    """Guard đổi engine không được làm profile mở lại sau mỗi request."""
+async def test_unchanged_mode_still_reuses_the_open_context(pool, db, tmp_path):
+    """Guard đổi chế độ không được làm profile mở lại sau mỗi request."""
     profile = make_profile(db, tmp_path)
     first = await pool.context_for_profile(profile)
     second = await pool.context_for_profile(profiles.get_profile("main"))
     assert first is second
-    assert len(pool.launched) == 1
+    assert len(pool.sessions) == 1
 
 
-async def test_launched_engine_reports_what_is_actually_running(pool, db, tmp_path):
-    """Cột `engine` là ý muốn; `launched_engine` là thực tế đang chạy."""
+async def test_launched_mode_reports_what_is_actually_running(pool, db, tmp_path):
+    """Cột `scrapling_mode` là ý muốn; `launched_mode` là thực tế đang chạy."""
     profile = make_profile(db, tmp_path)
-    assert pool.launched_engine("main") is None
+    assert pool.launched_mode("main") is None
     await pool.context_for_profile(profile)
-    assert pool.launched_engine("main") == "playwright"
+    assert pool.launched_mode("main") == "dynamic"
 
-    # Đổi cột engine mà chưa mở lại: thực tế vẫn là Playwright.
-    set_engine(db, profile.id, "scrapling")
-    assert pool.launched_engine("main") == "playwright"
+    # Đổi cột mà chưa mở lại: thực tế vẫn là dynamic.
+    set_mode(db, profile.id, "stealthy")
+    assert pool.launched_mode("main") == "dynamic"
 
     await pool.drop_profile("main")
-    assert pool.launched_engine("main") is None
+    assert pool.launched_mode("main") is None
 
 
-async def test_scrapling_storage_state_is_seeded_and_session_is_closed(tmp_path, monkeypatch):
-    sessions = install_fake_scrapling(monkeypatch)
+async def test_storage_state_is_seeded_and_session_is_closed(pool, tmp_path):
     state = tmp_path / "state.json"
     state.write_text(
         '{"cookies":[{"name":"sid","value":"x","domain":"example.test","path":"/"}],'
@@ -351,14 +312,19 @@ async def test_scrapling_storage_state_is_seeded_and_session_is_closed(tmp_path,
         '[{"name":"token","value":"y"}]}]}',
         encoding="utf-8",
     )
-    pool = BrowserPool(engine="scrapling")
 
     ctx = await pool.context_for("site", state)
 
     assert ctx.cookies[0]["name"] == "sid"
     assert any(page.goto_calls == ["https://example.test"] for page in ctx.pages)
     await pool.drop("site")
-    assert sessions[0].closed
+    assert pool.sessions[0].closed
+
+
+async def test_headed_context_opens_a_visible_session(pool):
+    await pool.context_for("a")
+    await pool.context_for("b", headed=True)
+    assert [kwargs["headless"] for kwargs in launched(pool)] == [True, False]
 
 
 # ------------------------------------------------------------ tab song song
@@ -372,7 +338,7 @@ async def test_each_recipe_gets_its_own_tab_in_one_profile(pool, db, tmp_path):
 
     assert len({id(chat), id(gpt), id(claude)}) == 3
     # Ba recipe, một tiến trình Chromium duy nhất.
-    assert len(pool.launched) == 1
+    assert len(pool.sessions) == 1
     assert pool.tab_count("main") == 3
 
 
@@ -411,7 +377,7 @@ async def test_tabs_evicted_past_max_tabs_but_profile_stays_open(pool, db, tmp_p
     assert pool.tab_count("main") == 2
     assert a.is_closed()                 # tab ít dùng nhất bị đóng
     assert pool.profile_count == 1       # browser vẫn sống
-    assert len(pool.launched) == 1
+    assert len(pool.sessions) == 1
 
 
 # ------------------------------------------------------------- eviction
@@ -533,16 +499,16 @@ async def test_locked_profile_refuses_to_open(pool, db, tmp_path, monkeypatch):
 
     with pytest.raises(profiles.ProfileLocked):
         await pool.context_for_profile(profiles.get_profile("main"))
-    assert pool.launched == []           # không được chạm vào user_data_dir
+    assert pool.sessions == []           # không được chạm vào user_data_dir
 
 
-async def test_failed_launch_releases_the_lock(pool, db, tmp_path):
+async def test_failed_launch_releases_the_lock(pool, db, tmp_path, monkeypatch):
     profile = make_profile(db, tmp_path)
 
-    async def boom(**kwargs):
+    async def boom(mode, **kwargs):
         raise RuntimeError("Chromium không chạy được")
 
-    pool._pw.chromium.launch_persistent_context = boom
+    monkeypatch.setattr(browserpool, "open_session", boom)
     with pytest.raises(RuntimeError):
         await pool.context_for_profile(profile)
     db.flush(timeout=10)
@@ -625,7 +591,7 @@ async def test_default_mode_never_touches_the_profile_path(pool, db, tmp_path, m
     pool.context_for = fake_context_for
     await provider._acquire_page("chat", None, False)
     assert calls == ["chat"]
-    assert pool.launched == []           # không profile nào được mở
+    assert pool.sessions == []           # không profile nào được mở
 
 
 async def test_profile_mode_routes_through_the_profile(pool, db, tmp_path, monkeypatch):
@@ -645,23 +611,8 @@ async def test_profile_mode_routes_through_the_profile(pool, db, tmp_path, monke
 
     page = await provider._acquire_page("chat", None, False)
     assert page is not None
-    assert len(pool.launched) == 1
+    assert len(pool.sessions) == 1
     assert pool.tab_count("main") == 1
-
-
-async def test_cloak_engine_also_uses_the_profile_path(tmp_path, monkeypatch):
-    """cloakbrowser CÓ launch_persistent_context_async — cloak không bị loại nữa."""
-    from chat2api.providers.browser_recipe import BrowserRecipe
-
-    monkeypatch.setenv("BROWSER_PROFILE_MODE", "profile")
-    monkeypatch.setenv("BROWSER_ENGINE", "cloak")
-    recipe = {
-        "slug": "chat", "url": "https://chat.qwen.ai/",
-        "prompt": {"input_selector": "textarea"},
-        "response": {"last_message_selector": ".m", "done_signal": {"type": "stable_text"}},
-        "models": [{"id": "m1"}],
-    }
-    assert BrowserRecipe(recipe, tmp_path, None)._profile_mode is True
 
 
 async def test_headed_request_falls_back_to_the_old_path(pool, db, tmp_path, monkeypatch):
@@ -688,7 +639,7 @@ async def test_headed_request_falls_back_to_the_old_path(pool, db, tmp_path, mon
     pool.context_for = fake_context_for
     await provider._acquire_page("chat", None, True)
     assert seen == [True]
-    assert pool.launched == []
+    assert pool.sessions == []
 
 
 async def test_profile_failure_falls_back_instead_of_killing_chat(pool, db, tmp_path,
@@ -729,11 +680,9 @@ async def test_profile_failure_falls_back_instead_of_killing_chat(pool, db, tmp_
 
 
 async def test_real_chromium_shares_one_process_across_two_tabs(db, tmp_path):
-    pytest.importorskip("playwright.async_api")
-    from playwright.async_api import async_playwright
+    pytest.importorskip("scrapling.fetchers")
 
     pool = BrowserPool(max_profiles=1)
-    pool._pw = await async_playwright().start()
     profile = make_profile(db, tmp_path, "main", max_tabs=4)
     try:
         chat = await pool.page_for(profile, "chat")
@@ -752,6 +701,5 @@ async def test_real_chromium_shares_one_process_across_two_tabs(db, tmp_path):
         assert db.query("SELECT lock_pid FROM profile")[0]["lock_pid"] == os.getpid()
     finally:
         await pool.aclose()
-        await pool._pw.stop()
     db.flush(timeout=10)
     assert db.query("SELECT lock_pid FROM profile")[0]["lock_pid"] is None

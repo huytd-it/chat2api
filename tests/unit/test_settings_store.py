@@ -16,17 +16,18 @@ def test_validate_coerces_types():
     clean, errs = settings.validate({
         "RECIPE_READY_DELAY_MS": " 900 ",
         "ENABLE_AGENT_FALLBACK": "YES",
-        "BROWSER_ENGINE": "cloak",
+        "SCRAPLING_MODE": "stealthy",
     })
     assert errs == []
     assert clean == {"RECIPE_READY_DELAY_MS": "900", "ENABLE_AGENT_FALLBACK": "true",
-                     "BROWSER_ENGINE": "cloak"}
+                     "SCRAPLING_MODE": "stealthy"}
 
 
-def test_validate_accepts_scrapling_engine():
-    clean, errs = settings.validate({"BROWSER_ENGINE": "scrapling"})
-    assert errs == []
-    assert clean == {"BROWSER_ENGINE": "scrapling"}
+def test_validate_accepts_every_scrapling_mode():
+    for mode in ("fetcher", "stealthy", "dynamic"):
+        clean, errs = settings.validate({"SCRAPLING_MODE": mode})
+        assert errs == []
+        assert clean == {"SCRAPLING_MODE": mode}
 
 
 def test_validate_reports_bad_values():
@@ -34,8 +35,9 @@ def test_validate_reports_bad_values():
     assert "số nguyên" in errs[0]
     _, errs = settings.validate({"POOL_MAX_CONTEXTS": "-1"})
     assert ">= 0" in errs[0]
-    _, errs = settings.validate({"BROWSER_ENGINE": "firefox"})
-    assert "playwright" in errs[0]
+    # Tên engine cũ không còn là lựa chọn: Scrapling là engine duy nhất.
+    _, errs = settings.validate({"SCRAPLING_MODE": "playwright"})
+    assert "stealthy" in errs[0]
 
 
 def test_empty_secret_means_keep_current():
@@ -112,10 +114,10 @@ def test_save_marks_secret_rows(tmp_path, clean_settings, monkeypatch):
     monkeypatch.delenv("AGENT_LLM_API_KEY", raising=False)
     db = _open(tmp_path)
 
-    settings.save(tmp_path / ".env", {"AGENT_LLM_API_KEY": "sk-x", "BROWSER_ENGINE": "cloak"})
+    settings.save(tmp_path / ".env", {"AGENT_LLM_API_KEY": "sk-x", "SCRAPLING_MODE": "stealthy"})
 
     rows = {r["key"]: r["is_secret"] for r in db.query("SELECT key, is_secret FROM setting")}
-    assert rows == {"AGENT_LLM_API_KEY": 1, "BROWSER_ENGINE": 0}
+    assert rows == {"AGENT_LLM_API_KEY": 1, "SCRAPLING_MODE": 0}
 
 
 def test_save_upserts_instead_of_duplicating(tmp_path, clean_settings, monkeypatch):
@@ -131,21 +133,21 @@ def test_save_upserts_instead_of_duplicating(tmp_path, clean_settings, monkeypat
 
 def test_preload_fills_env_for_keys_dotenv_left_alone(tmp_path, clean_settings, monkeypatch):
     monkeypatch.delenv("RECIPE_INPUT_DELAY_MS", raising=False)
-    monkeypatch.setenv("BROWSER_ENGINE", "playwright")  # .env của người vận hành
+    monkeypatch.setenv("SCRAPLING_MODE", "dynamic")  # .env của người vận hành
     db_path = tmp_path / "s.db"
     _open(tmp_path)
     settings.capture_env()
-    settings.save(tmp_path / ".env", {"RECIPE_INPUT_DELAY_MS": "250", "BROWSER_ENGINE": "cloak"})
+    settings.save(tmp_path / ".env", {"RECIPE_INPUT_DELAY_MS": "250", "SCRAPLING_MODE": "stealthy"})
     store.shutdown()
 
     # Giả lập vòng khởi động sau trong một tiến trình mới: os.environ chỉ còn
-    # thứ .env đặt, và .env ghim BROWSER_ENGINE nên hàng DB không chen vào được.
+    # thứ .env đặt, và .env ghim SCRAPLING_MODE nên hàng DB không chen vào được.
     os.environ.pop("RECIPE_INPUT_DELAY_MS", None)
     settings._injected.clear()
     settings.capture_env()
     assert settings.preload(db_path) == 1
     assert os.environ["RECIPE_INPUT_DELAY_MS"] == "250"
-    assert os.environ["BROWSER_ENGINE"] == "playwright"
+    assert os.environ["SCRAPLING_MODE"] == "dynamic"
 
 
 def test_preload_ignores_missing_or_unmigrated_db(tmp_path, clean_settings):
@@ -175,7 +177,7 @@ def test_preloaded_keys_do_not_lock_themselves(tmp_path, clean_settings, monkeyp
 
 def test_describe_reports_source_and_env_lock(tmp_path, clean_settings, monkeypatch):
     monkeypatch.delenv("RECIPE_READY_DELAY_MS", raising=False)
-    monkeypatch.setenv("BROWSER_ENGINE", "cloak")
+    monkeypatch.setenv("SCRAPLING_MODE", "stealthy")
     _open(tmp_path)
     settings.capture_env()
     settings.save(tmp_path / ".env", {"RECIPE_READY_DELAY_MS": "900"})
@@ -183,21 +185,21 @@ def test_describe_reports_source_and_env_lock(tmp_path, clean_settings, monkeypa
     fields = {f["key"]: f for f in settings.describe()}
     assert fields["RECIPE_READY_DELAY_MS"]["source"] == "db"
     assert fields["RECIPE_READY_DELAY_MS"]["value"] == "900"
-    assert fields["BROWSER_ENGINE"]["source"] == "env"
-    assert fields["BROWSER_ENGINE"]["env_locked"] is True
+    assert fields["SCRAPLING_MODE"]["source"] == "env"
+    assert fields["SCRAPLING_MODE"]["env_locked"] is True
     assert fields["POOL_MAX_PROFILES"]["source"] == "default"
 
 
 def test_env_locked_key_is_saved_but_reported_shadowed(tmp_path, clean_settings, monkeypatch):
-    monkeypatch.setenv("BROWSER_ENGINE", "playwright")
+    monkeypatch.setenv("SCRAPLING_MODE", "dynamic")
     db = _open(tmp_path)
     settings.capture_env()
 
-    settings.save(tmp_path / ".env", {"BROWSER_ENGINE": "cloak"})
+    settings.save(tmp_path / ".env", {"SCRAPLING_MODE": "stealthy"})
 
-    assert settings.shadowed(["BROWSER_ENGINE"]) == ["BROWSER_ENGINE"]
+    assert settings.shadowed(["SCRAPLING_MODE"]) == ["SCRAPLING_MODE"]
     # Ghi xuống kho để lần bỏ dòng .env đi là dùng được ngay...
     assert db.query("SELECT value FROM setting WHERE key = ?",
-                    ("BROWSER_ENGINE",))[0]["value"] == "cloak"
+                    ("SCRAPLING_MODE",))[0]["value"] == "stealthy"
     # ...nhưng tiến trình đang chạy vẫn giữ giá trị của .env.
-    assert os.environ["BROWSER_ENGINE"] == "playwright"
+    assert os.environ["SCRAPLING_MODE"] == "dynamic"

@@ -4,6 +4,8 @@ export interface HealthInfo {
   models: number;
   contexts: number;
   engine: string;
+  /** Chế độ Scrapling đang chạy: fetcher | stealthy | dynamic. */
+  mode: string;
 }
 
 export interface ModelInfo {
@@ -176,6 +178,7 @@ export interface SessionDistribution {
 
 export interface Overview {
   engine: string;
+  mode: string;
   contexts: number;
   models: number;
   recipes: number;
@@ -1195,7 +1198,8 @@ export interface ProfileInfo {
   user_data_dir: string;
   headless: number;
   max_tabs: number;
-  engine: string;
+  /** fetcher | stealthy | dynamic */
+  scrapling_mode: string;
   is_default: number;
   domains: number;
   locked: boolean;
@@ -1217,7 +1221,7 @@ export interface ProfileList {
 
 /** Các cột người dùng sửa được từ UI (tên profile là thư mục Chromium, không đổi). */
 export interface ProfileValues {
-  engine?: string;
+  scrapling_mode?: string;
   headless?: boolean;
   max_tabs?: number;
   proxy?: string;
@@ -1271,7 +1275,7 @@ export async function updateProfile(
 
 /** Nhân bản profile: copy thư mục Chromium (mọi đăng nhập) + account đã khai
  * báo sang một profile mới. `values` ghi đè cột nào muốn khác nguồn — thường
- * chỉ là `engine`. Server trả 409 khi profile nguồn đang mở. */
+ * chỉ là `scrapling_mode`. Server trả 409 khi profile nguồn đang mở. */
 export async function cloneProfile(
   key: string,
   ident: string | number,

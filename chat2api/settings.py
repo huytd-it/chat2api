@@ -37,15 +37,20 @@ FIELDS: list[dict] = [
      "apply": "reload", "label": "Hạn chờ ô input xuất hiện (ms)"},
     {"key": "POOL_MAX_CONTEXTS", "type": "int", "default": "3", "group": "Browser",
      "apply": "restart", "label": "Số browser context tối đa"},
-    {"key": "BROWSER_ENGINE", "type": "choice", "default": "playwright", "group": "Browser",
-     "apply": "restart", "label": "Engine browser",
-     "choices": ["playwright", "cloak", "scrapling"]},
+    {"key": "SCRAPLING_MODE", "type": "choice", "default": "dynamic", "group": "Browser",
+     "apply": "restart", "label": "Chế độ Scrapling",
+     "choices": ["fetcher", "stealthy", "dynamic"],
+     "help": "Scrapling là engine duy nhất. dynamic: Chromium thường (DynamicFetcher). "
+             "stealthy: Chromium chống bot, qua được Cloudflare (StealthyFetcher). "
+             "fetcher: chỉ gửi HTTP, KHÔNG mở browser — recipe browser, đăng nhập và "
+             "Integrate sẽ báo lỗi. Mỗi profile chọn riêng ở tab Profiles; giá trị này "
+             "dùng cho context không gắn profile và cửa sổ đăng nhập."},
     {"key": "BROWSER_PROFILE_MODE", "type": "choice", "default": "storage_state",
      "group": "Browser", "apply": "restart", "label": "Chế độ danh tính trình duyệt",
      "choices": ["storage_state", "profile"],
      "help": "storage_state: mỗi recipe một context, chỉ cookie + localStorage. "
              "profile: một Chromium profile giữ đăng nhập mọi domain, mỗi recipe một tab "
-              "chạy song song. Chạy được với playwright, cloak và scrapling."},
+              "chạy song song. Cần chế độ Scrapling có browser (stealthy hoặc dynamic)."},
     {"key": "POOL_MAX_PROFILES", "type": "int", "default": "6", "group": "Browser",
      "apply": "restart", "label": "Số profile mở cùng lúc",
      "help": "Mỗi profile là một tiến trình Chromium. Chỉ dùng ở chế độ profile. "

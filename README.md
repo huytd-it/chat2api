@@ -67,7 +67,7 @@ Thêm website bằng agent, quản lý recipe/account và vận hành Chromium p
 | Thành phần | Phiên bản / mục đích |
 |---|---|
 | Python | `3.11+` |
-| Chromium | Cài qua Playwright |
+| Chromium | Cài qua `scrapling install` |
 | Git | Clone và cập nhật mã nguồn |
 | Node.js + Rust + MSVC + WebView2 | Chỉ cần khi chạy desktop app trên Windows |
 
@@ -91,19 +91,23 @@ Kích hoạt virtual environment:
 source .venv/bin/activate
 ```
 
-Cài package và Chromium:
+Cài package và Chromium. Browser engine duy nhất là [Scrapling](https://github.com/D4Vinci/Scrapling);
+lệnh `scrapling install` tải Chromium cho nó một lần:
 
 ```bash
 python -m pip install --upgrade pip
 pip install -e ".[dev]"
-playwright install chromium
-```
-
-Nếu dùng engine Scrapling để tăng stealth/anti-bot, cài browser riêng của nó một lần:
-
-```bash
 scrapling install
 ```
+
+Chọn chế độ Scrapling ở Settings → Browser (`SCRAPLING_MODE`) hoặc riêng cho từng
+profile ở tab Profiles:
+
+| Chế độ | Fetcher của Scrapling | Dùng khi |
+|---|---|---|
+| `dynamic` (mặc định) | `DynamicFetcher` | Chromium thường, site không chặn bot |
+| `stealthy` | `StealthyFetcher` | Site có Cloudflare / chống bot |
+| `fetcher` | `Fetcher` | Chỉ gửi HTTP, **không mở browser** — recipe browser, đăng nhập và Integrate sẽ báo lỗi |
 
 ### 2. Chạy server
 
@@ -122,7 +126,8 @@ Kết quả mẫu:
 ```json
 {
   "status": "ok",
-  "engine": "playwright",
+  "engine": "scrapling",
+  "mode": "dynamic",
   "contexts": 0,
   "models": 2
 }
@@ -519,7 +524,7 @@ RECIPES_DIR=./recipes
 CHAT2API_DATA_DIR=./data
 
 # Browser
-BROWSER_ENGINE=playwright
+SCRAPLING_MODE=dynamic
 BROWSER_PROFILE_MODE=storage_state
 POOL_MAX_CONTEXTS=4
 POOL_MAX_PROFILES=6
@@ -617,10 +622,12 @@ Cấu trúc test bao phủ router, config/auth, store, recipe validation, browse
 <summary><strong>Browser không mở hoặc Playwright báo thiếu executable</strong></summary>
 
 ```bash
-playwright install chromium
+scrapling install
 ```
 
-Đảm bảo lệnh được chạy trong đúng virtual environment đã cài `chat2api`.
+Đảm bảo lệnh được chạy trong đúng virtual environment đã cài `chat2api`. Nếu log
+báo chế độ `fetcher` không mở browser, đổi `SCRAPLING_MODE` (hoặc chế độ của profile)
+sang `stealthy` hoặc `dynamic`.
 </details>
 
 <details>

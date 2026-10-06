@@ -116,28 +116,27 @@ async def test_patch_updates_fields_and_default(client):
     assert by_name.json()["notes"] == "máy phụ"
 
 
-async def test_engine_is_chosen_when_creating_a_profile(client):
-    """Form "Tạo profile mới" gửi engine — mọi lựa chọn phải xuống tới DB."""
+async def test_scrapling_mode_is_chosen_when_creating_a_profile(client):
+    """Form "Tạo profile mới" gửi chế độ Scrapling — mọi lựa chọn phải xuống tới DB."""
     c, *_ = client
-    cloak = (await _create(c, "kin", engine="cloak")).json()
-    assert cloak["engine"] == "cloak"
-    # Không chọn thì mặc định là playwright, không phải NULL.
-    assert (await _create(c, "main")).json()["engine"] == "playwright"
+    stealthy = (await _create(c, "kin", scrapling_mode="stealthy")).json()
+    assert stealthy["scrapling_mode"] == "stealthy"
+    # Không chọn thì mặc định là dynamic, không phải NULL.
+    assert (await _create(c, "main")).json()["scrapling_mode"] == "dynamic"
     # Và đổi lại được ở form sửa.
-    back = await c.patch(f"/admin/profiles/{cloak['id']}", json={"engine": "playwright"})
-    assert back.json()["engine"] == "playwright"
-    scrapling = (await _create(c, "stealth", engine="scrapling")).json()
-    assert scrapling["engine"] == "scrapling"
+    back = await c.patch(f"/admin/profiles/{stealthy['id']}", json={"scrapling_mode": "dynamic"})
+    assert back.json()["scrapling_mode"] == "dynamic"
+    fetcher = (await _create(c, "http-only", scrapling_mode="fetcher")).json()
+    assert fetcher["scrapling_mode"] == "fetcher"
 
 
-async def test_open_no_longer_refuses_a_cloak_profile(client, monkeypatch):
-    """Trước đây nút Mở trả 400 'Engine cloak không mở được persistent profile'."""
+async def test_open_passes_the_profile_mode_to_the_pool(client, monkeypatch):
     c, app, db, cfg = client
-    created = (await _create(c, "kin", engine="cloak")).json()
+    created = (await _create(c, "kin", scrapling_mode="stealthy")).json()
     opened = []
 
     async def fake_page_for(profile, slug):
-        opened.append((profile.name, profile.engine, slug))
+        opened.append((profile.name, profile.scrapling_mode, slug))
         return FakePage()
 
     monkeypatch.setattr(app.state.pool, "page_for", fake_page_for)
@@ -146,14 +145,26 @@ async def test_open_no_longer_refuses_a_cloak_profile(client, monkeypatch):
 
     assert response.status_code == 200, response.text
     assert response.json()["profile"] == "kin"
-    # Pool nhận đúng engine của hàng DB để chọn cloakbrowser hay Chromium.
-    assert opened == [("kin", "cloak", "__manual__")]
+    # Pool nhận đúng chế độ của hàng DB để chọn StealthySession hay DynamicSession.
+    assert opened == [("kin", "stealthy", "__manual__")]
+
+
+async def test_open_explains_that_a_fetcher_profile_has_no_window(client):
+    """fetcher chỉ gửi HTTP: nút Mở phải nói rõ lý do, không phải lỗi 500 chung chung."""
+    c, *_ = client
+    created = (await _create(c, "http-only", scrapling_mode="fetcher")).json()
+
+    response = await c.post(f"/admin/profiles/{created['id']}/open", json={})
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "no_browser_mode"
+    assert "stealthy" in response.json()["error"]["message"]
 
 
 async def test_patch_rejects_nonsense_values(client):
     c, *_ = client
     created = (await _create(c, "main")).json()
-    for values in ({"viewport": "to-bang-man-hinh"}, {"max_tabs": 999}, {"engine": "firefox"}):
+    for values in ({"viewport": "to-bang-man-hinh"}, {"max_tabs": 999}, {"scrapling_mode": "playwright"}):
         response = await c.patch(f"/admin/profiles/{created['id']}", json=values)
         assert response.status_code == 400, values
 
@@ -292,29 +303,29 @@ async def test_domains_endpoint_merges_disk_and_recipes(client):
     assert domains["chat.qwen.ai"]["accounts"] == 1
 
 
-async def test_clone_duplicates_logins_and_accounts_into_a_new_engine(client):
-    """Đường "đổi sang CloakBrowser mà vẫn giữ bản Playwright đang chạy tốt"."""
+async def test_clone_duplicates_logins_and_accounts_into_a_new_mode(client):
+    """Đường "đổi sang stealthy mà vẫn giữ bản dynamic đang chạy tốt"."""
     c, app, db, cfg = client
-    source = (await _create(c, "main", engine="playwright", max_tabs=6)).json()
+    source = (await _create(c, "main", scrapling_mode="dynamic", max_tabs=6)).json()
     await c.post(f"/admin/profiles/{source['id']}/accounts",
                  json={"domain": "chat.qwen.ai", "label": "codex1"})
     (cfg.profiles_dir / "main" / "Default").mkdir(parents=True, exist_ok=True)
     (cfg.profiles_dir / "main" / "Default" / "Cookies").write_text("phiên", encoding="utf-8")
 
     response = await c.post(f"/admin/profiles/{source['id']}/clone",
-                            json={"name": "main-cloak", "engine": "cloak"})
+                            json={"name": "main-stealthy", "scrapling_mode": "stealthy"})
 
     assert response.status_code == 200, response.text
     copy = response.json()
-    assert copy["engine"] == "cloak" and copy["max_tabs"] == 6 and copy["is_default"] == 0
-    assert (cfg.profiles_dir / "main-cloak" / "Default" / "Cookies").read_text(
+    assert copy["scrapling_mode"] == "stealthy" and copy["max_tabs"] == 6 and copy["is_default"] == 0
+    assert (cfg.profiles_dir / "main-stealthy" / "Default" / "Cookies").read_text(
         encoding="utf-8") == "phiên"
 
     listing = {p["name"]: p for p in (await c.get("/admin/profiles")).json()["profiles"]}
-    assert [(a["host"], a["label"]) for a in listing["main-cloak"]["accounts"]] == \
+    assert [(a["host"], a["label"]) for a in listing["main-stealthy"]["accounts"]] == \
         [("chat.qwen.ai", "codex1")]
-    # Bản gốc giữ nguyên engine lẫn cờ mặc định.
-    assert listing["main"]["engine"] == "playwright" and listing["main"]["is_default"] == 1
+    # Bản gốc giữ nguyên chế độ lẫn cờ mặc định.
+    assert listing["main"]["scrapling_mode"] == "dynamic" and listing["main"]["is_default"] == 1
 
 
 async def test_clone_refuses_while_the_source_profile_is_open(client):

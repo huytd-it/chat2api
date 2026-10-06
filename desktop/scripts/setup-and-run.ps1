@@ -202,7 +202,7 @@ if (Test-CommandExists "python") {
 
 Push-Location $RepoRoot
 try {
-    Invoke-NativeQuiet { python -c "import chat2api, fastapi, uvicorn, playwright" 2>$null } | Out-Null
+    Invoke-NativeQuiet { python -c "import chat2api, fastapi, uvicorn, scrapling.fetchers" 2>$null } | Out-Null
     if ($LASTEXITCODE -eq 0) {
         Write-Ok "chat2api + dependencies importable"
     } else {

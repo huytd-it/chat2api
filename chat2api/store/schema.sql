@@ -66,7 +66,6 @@ CREATE TABLE IF NOT EXISTS profile (
   id            INTEGER PRIMARY KEY,
   name          TEXT    NOT NULL UNIQUE,         -- slug [a-z0-9-]
   user_data_dir TEXT    NOT NULL,                -- đường dẫn tuyệt đối
-  engine        TEXT    NOT NULL DEFAULT 'playwright',  -- playwright | cloak
   headless      INTEGER NOT NULL DEFAULT 1,
   max_tabs      INTEGER NOT NULL DEFAULT 4,      -- số recipe chạy song song trong profile
   proxy         TEXT,
@@ -81,7 +80,8 @@ CREATE TABLE IF NOT EXISTS profile (
   lock_at       INTEGER,
   last_used_at  INTEGER,
   notes         TEXT    NOT NULL DEFAULT '',
-  created_at    INTEGER NOT NULL
+  created_at    INTEGER NOT NULL,
+  scrapling_mode TEXT   NOT NULL DEFAULT 'dynamic'  -- fetcher | stealthy | dynamic
 );
 CREATE UNIQUE INDEX IF NOT EXISTS profile_one_default
   ON profile(is_default) WHERE is_default = 1;

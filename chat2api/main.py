@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from . import (account_limits, accounts, apikeys, applog, attachments, auth, errors, flows,  # noqa: F401  (import auth để đăng ký dependency)
                profiles, sessions, settings, store)
+from .browserpool import BrowserModeError, normalize_mode
 from .config import Config
 from .errors import OpenAIError
 from .providers.browser_recipe import AccountLimitExceeded, TrialLimitExceeded
@@ -143,9 +144,9 @@ def create_app(cfg: Config) -> FastAPI:
     from .login_sessions import LoginSessionManager
     from .store import importer
 
-    pool = BrowserPool(cfg.browser_engine, cfg.pool_max_contexts,
+    pool = BrowserPool(cfg.scrapling_mode, cfg.pool_max_contexts,
                        max_profiles=cfg.pool_max_profiles)
-    login_manager = LoginSessionManager()
+    login_manager = LoginSessionManager(mode=cfg.scrapling_mode)
     router = Router(cfg.recipes_dir, pool)
     router.reload()
 
@@ -167,7 +168,7 @@ def create_app(cfg: Config) -> FastAPI:
         # đường xác thực (auth.require_key chỉ tra dict sau bước này).
         active_keys = await asyncio.to_thread(apikeys.active)
         await pool.start()
-        applog.log(f"Server khởi động (engine={cfg.browser_engine})")
+        applog.log(f"Server khởi động (scrapling mode={cfg.scrapling_mode})")
         if active_keys:
             applog.log(f"auth: {len(active_keys)} api key đang hoạt động")
         elif cfg.api_keys:
@@ -269,7 +270,7 @@ def create_app(cfg: Config) -> FastAPI:
 
     @app.get("/health")
     async def health(request: Request):
-        return {"status": "ok", "engine": cfg.browser_engine,
+        return {"status": "ok", "engine": "scrapling", "mode": cfg.scrapling_mode,
                 "contexts": request.app.state.pool.size,
                 "models": len(request.app.state.router.all_models())}
 
@@ -1245,29 +1246,29 @@ def register_admin(app: FastAPI, admin) -> None:
             raise OpenAIError(404, "not_found", f"Profile '{ident}' không tồn tại")
         return row
 
-    async def _apply_engine_switch(pool_, name: str, updated: dict | None) -> None:
-        """Đổi engine của một profile ĐANG MỞ thì phải mở lại mới có tác dụng.
+    async def _apply_mode_switch(pool_, name: str, updated: dict | None) -> None:
+        """Đổi chế độ Scrapling của một profile ĐANG MỞ thì phải mở lại mới có tác dụng.
 
-        Đăng nhập không mất: engine mới nhận đúng `user_data_dir` cũ nên toàn bộ
+        Đăng nhập không mất: session mới nhận đúng `user_data_dir` cũ nên toàn bộ
         cookie/localStorage đi theo. Chỉ đóng khi profile đang rảnh — cắt ngang
-        một request đang stream chỉ để đổi engine là đánh đổi tệ, và pool tự mở
-        lại bằng engine mới ngay lần dùng kế tiếp.
+        một request đang stream chỉ để đổi chế độ là đánh đổi tệ, và pool tự mở
+        lại bằng chế độ mới ngay lần dùng kế tiếp.
         """
         if not updated:
             return
-        running = pool_.launched_engine(name)
+        running = pool_.launched_mode(name)
         if running is None:
             return
-        wanted = (updated.get("engine") or "").strip().lower() or (pool_.engine or "playwright")
+        wanted = normalize_mode(updated.get("scrapling_mode"), pool_.mode)
         if running == wanted:
             return
         if pool_.profile_busy(name):
-            applog.log(f"profile: '{name}' đổi engine {running} -> {wanted} nhưng đang "
-                       "chạy request — mở lại bằng engine mới khi rảnh", "warn")
+            applog.log(f"profile: '{name}' đổi chế độ {running} -> {wanted} nhưng đang "
+                       "chạy request — mở lại bằng chế độ mới khi rảnh", "warn")
             return
         await pool_.drop_profile(name)
-        applog.log(f"profile: '{name}' đổi engine {running} -> {wanted}, đã đóng để mở lại "
-                   "bằng engine mới (giữ nguyên đăng nhập, cùng user_data_dir)")
+        applog.log(f"profile: '{name}' đổi chế độ {running} -> {wanted}, đã đóng để mở lại "
+                   "bằng chế độ mới (giữ nguyên đăng nhập, cùng user_data_dir)")
 
     @admin.post("/profiles")
     async def profile_create(body: ProfileCreateRequest, request: Request):
@@ -1285,8 +1286,8 @@ def register_admin(app: FastAPI, admin) -> None:
     async def profile_clone(ident: str, body: ProfileCloneRequest, request: Request):
         """Bản sao đầy đủ của một profile: thư mục Chromium + account đã khai báo.
 
-        Dùng khi muốn thử engine khác (playwright / cloak / scrapling) mà vẫn
-        giữ đường lui. Đổi thẳng `engine` bằng PATCH cũng không mất đăng nhập —
+        Dùng khi muốn thử chế độ Scrapling khác (stealthy / dynamic) mà vẫn
+        giữ đường lui. Đổi thẳng `scrapling_mode` bằng PATCH cũng không mất đăng nhập —
         cùng một `user_data_dir` — nên clone chỉ cần khi không muốn đụng bản gốc.
         """
         cfg = request.app.state.cfg
@@ -1330,7 +1331,7 @@ def register_admin(app: FastAPI, admin) -> None:
         except ValueError as error:
             raise OpenAIError(400, "invalid_profile", str(error))
         applog.log(f"profile: cập nhật '{row['name']}'")
-        await _apply_engine_switch(request.app.state.pool, row["name"], updated)
+        await _apply_mode_switch(request.app.state.pool, row["name"], updated)
         return updated
 
     @admin.delete("/profiles/{ident}")
@@ -1377,6 +1378,8 @@ def register_admin(app: FastAPI, admin) -> None:
             page = await pool_.page_for(replace(profile, headless=False), manual_slug)
         except profiles.ProfileLocked as error:
             raise OpenAIError(409, "profile_locked", str(error))
+        except BrowserModeError as error:
+            raise OpenAIError(400, "no_browser_mode", str(error))
         except Exception as error:
             applog.log(f"profile: không mở được '{profile.name}': {error}", "error")
             raise OpenAIError(500, "profile_open_failed",
@@ -2667,7 +2670,8 @@ def register_admin(app: FastAPI, admin) -> None:
         # combo là provider ảo, không tính vào số recipe cho dashboard
         recipe_count = len([p for p in rt.providers.values() if p.slug != "combo"])
         return {
-            "engine": cfg.browser_engine,
+            "engine": "scrapling",
+            "mode": cfg.scrapling_mode,
             "contexts": request.app.state.pool.size,
             "models": len(rt.all_models()),
             "recipes": recipe_count,

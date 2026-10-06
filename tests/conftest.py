@@ -23,7 +23,7 @@ def _isolate_settings_env():
     `settings.save()` và `settings.preload()` cố ý ghi vào `os.environ` — đó là
     cách giá trị trong bảng `setting` đến được Config và các provider. Nhưng
     trong một tiến trình pytest thì os.environ dùng chung cho cả phiên: một test
-    lưu `BROWSER_ENGINE=cloak` sẽ lặng lẽ đổi engine của mọi test chạy sau nó.
+    lưu `SCRAPLING_MODE=stealthy` sẽ lặng lẽ đổi chế độ của mọi test chạy sau nó.
     """
     keys = tuple(settings.BY_KEY)
     before = {key: os.environ.get(key) for key in keys}

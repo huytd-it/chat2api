@@ -4,6 +4,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from . import settings
+from .browserpool import normalize_mode
 
 
 def _env(name: str, default: str = "") -> str:
@@ -32,7 +33,8 @@ class Config:
         self.enable_fallback = _env("ENABLE_AGENT_FALLBACK", "false").lower() == "true"
         self.pool_max_contexts = int(_env("POOL_MAX_CONTEXTS", "3"))
         self.pool_acquire_timeout = int(_env("POOL_ACQUIRE_TIMEOUT", "30"))
-        self.browser_engine = _env("BROWSER_ENGINE", "playwright")
+        # Chế độ Scrapling: fetcher | stealthy | dynamic (xem browserpool.MODES).
+        self.scrapling_mode = normalize_mode(_env("SCRAPLING_MODE"))
         # storage_state (mặc định) | profile. Đường profile dùng
         # launch_persistent_context: một profile giữ đăng nhập của MỌI domain và
         # chạy nhiều recipe song song, mỗi recipe một tab. Đây là opt-in lâu dài,
