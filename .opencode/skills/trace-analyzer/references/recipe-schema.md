@@ -17,6 +17,10 @@ prompt:
   input_selector: "textarea"           # CSS selector bền (ưu tiên id/data-testid/role)
   input_mode: fill                     # fill | type
   submit: Enter                        # Enter | click:<selector>
+  attach_selector: "input[type=file]"  # optional: ô/nút upload file-ảnh đính kèm
+  attach_action: "click:.plus-menu"    # optional: mở menu chứa ô upload trước
+  attach_ready_selector: ".preview"    # optional: hiện ra khi upload xong
+  attach_wait_ms: 1500                 # optional: chờ thêm sau upload
 
 response:
   last_message_selector: ".assistant-message"
@@ -83,6 +87,7 @@ anon_trial_limit: 20
 
 - **input_selector**: lấy từ event `fill` đầu tiên của flow `text` (ô nhập chính). Ưu tiên `attributes[id]` / `data-testid`.
 - **submit**: nếu trace có `press key=Enter` ngay sau `fill` → `Enter`, nếu có `click` lên nút gửi → `click:<selector>`.
+- **attach_selector**: ưu tiên `input[type=file]` trong DOM (thường ẩn sau nút kẹp giấy — vẫn dùng được); không có thì trỏ vào nút mở hộp chọn file. Bỏ trống để runner tự tìm `input[type=file]` đầu tiên.
 - **last_message_selector**: suy từ snapshot cuối (dòng `---TEXT---`) hoặc `outerHTML` của message cuối trong `snapshotDiff`.
 - **done_signal**: mặc định `copy_button`; nếu site không có nút Copy, dùng `stable_text`.
 - **flows[].action**: click chuyển tab/mode trước khi fill (thường là flow `select_model` hoặc `image`/`video`).

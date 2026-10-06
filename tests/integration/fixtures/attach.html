@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+<body>
+<!-- Giống web chat thật: input file ẩn, người dùng chỉ thấy nút kẹp giấy. -->
+<input id="file" type="file" multiple hidden>
+<input id="single" type="file" hidden>
+<button id="clip">Attach</button>
+<div id="chips"></div>
+<textarea id="prompt"></textarea>
+<button id="send">Send</button>
+<div id="messages"></div>
+<script>
+const picked = [];
+function take(input) {
+  for (const f of input.files) {
+    picked.push(f);
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.textContent = f.name;
+    document.getElementById("chips").appendChild(chip);
+  }
+}
+for (const id of ["file", "single"]) {
+  document.getElementById(id).onchange = (e) => take(e.target);
+}
+document.getElementById("clip").onclick = () => document.getElementById("file").click();
+document.getElementById("send").onclick = async () => {
+  const parts = [];
+  for (const f of picked) parts.push(`${f.name}|${f.type}|${f.size}|${await f.text()}`);
+  const m = document.createElement("div");
+  m.className = "msg";
+  m.textContent = `files=${parts.join(";")} text=${document.getElementById("prompt").value}`;
+  document.getElementById("messages").appendChild(m);
+};
+</script>
+</body>
+</html>

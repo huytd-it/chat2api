@@ -11,10 +11,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import sqlite3
 import uuid
 from dataclasses import dataclass
 from html import escape
+from pathlib import Path
 
 from . import store
 
@@ -55,8 +57,67 @@ def _client_fingerprint(authorization: str, user_agent: str,
     return hashlib.sha256(raw).hexdigest()[:20]
 
 
+def _attachments_root(db) -> Path:
+    """Thư mục giữ file đính kèm, nằm cạnh file DB (tức là trong data_dir)."""
+    return Path(db.db_path).parent / "attachments"
+
+
+def _save_attachments(conn: sqlite3.Connection, db, session_id: str, message_id: int,
+                      items: list, now: int) -> None:
+    """Chép file của một message xuống đĩa để trang Sessions xem lại được.
+
+    Hỏng ở đây (đĩa đầy, quyền ghi) không được làm hỏng request chat: file đã
+    nằm trong bộ nhớ và vẫn được gửi tới site, chỉ là bản ghi thiếu preview.
+    """
+    folder = _attachments_root(db) / session_id
+    for item in items:
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            suffix = Path(item.name).suffix[:16]
+            stored = folder / (uuid.uuid4().hex + suffix)
+            stored.write_bytes(item.data)
+        except OSError:
+            continue
+        conn.execute(
+            "INSERT INTO attachment(message_id, kind, path, mime, bytes, name, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (message_id, item.kind, f"attachments/{session_id}/{stored.name}", item.mime,
+             len(item.data), item.name, now),
+        )
+
+
+def _drop_attachment_files(db, session_ids: list[str] | None) -> None:
+    root = _attachments_root(db)
+    if session_ids is None:
+        shutil.rmtree(root, ignore_errors=True)
+        return
+    for session_id in session_ids:
+        if normalize_session_id(session_id):
+            shutil.rmtree(root / session_id, ignore_errors=True)
+
+
+def attachment_file(session_id: str, attachment_id: int) -> tuple[Path, str, str] | None:
+    """``(đường dẫn, mime, tên gốc)`` của một file đính kèm thuộc đúng session đó."""
+    db = store.default()
+    if db is None:
+        return None
+    rows = db.query(
+        "SELECT a.path, a.mime, a.name FROM attachment a JOIN message m ON m.id = a.message_id "
+        "WHERE a.id = ? AND m.session_id = ?", (attachment_id, session_id))
+    if not rows:
+        return None
+    data_dir = Path(db.db_path).parent.resolve()
+    path = (data_dir / rows[0]["path"]).resolve()
+    # `path` do chính server ghi, nhưng vẫn chặn mọi đường dẫn thoát khỏi data_dir.
+    if not path.is_relative_to(data_dir) or not path.is_file():
+        return None
+    return path, rows[0]["mime"], rows[0]["name"] or path.name
+
+
 def _title(messages: list[dict]) -> str:
-    text = next((str(m.get("content", "")) for m in messages if m.get("role") == "user"), "")
+    first = next((m for m in messages if m.get("role") == "user"), {})
+    text = str(first.get("content", "")) or ", ".join(
+        a.name for a in first.get("attachments") or [])
     text = " ".join(text.split())
     return text[:77] + "..." if len(text) > 80 else text
 
@@ -143,20 +204,23 @@ def begin(
         # prefix chính xác; nếu client sửa nhánh cũ, chỉ lấy message cuối để
         # tránh nhân đôi cả hội thoại trong cùng session.
         incoming = [(str(m.get("role", "user")), str(m.get("content", ""))) for m in messages]
+        files = [m.get("attachments") or [] for m in messages]
         stored = [(r["role"], r["content"]) for r in existing]
         if incoming[:len(stored)] == stored:
-            pending = incoming[len(stored):]
+            first_pending = len(stored)
         elif incoming:
-            pending = [incoming[-1]]
+            first_pending = len(incoming) - 1
         else:
-            pending = []
+            first_pending = 0
         seq = len(stored)
-        for role, content in pending:
-            conn.execute(
+        for (role, content), items in zip(incoming[first_pending:], files[first_pending:]):
+            inserted = conn.execute(
                 "INSERT INTO message(session_id, seq, role, content, char_count, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (session_id, seq, role, content, len(content), now),
             )
+            if items:
+                _save_attachments(conn, db, session_id, int(inserted.lastrowid), items, now)
             seq += 1
 
         prompt_chars = sum(len(content) for _, content in incoming)
@@ -293,6 +357,9 @@ def get_session(session_id: str) -> dict | None:
         item = dict(row)
         item["artifacts"] = [dict(a) for a in db.query(
             "SELECT * FROM artifact WHERE message_id = ? ORDER BY idx", (row["id"],))]
+        item["attachments"] = [dict(a) for a in db.query(
+            "SELECT id, kind, name, mime, bytes FROM attachment WHERE message_id = ? ORDER BY id",
+            (row["id"],))]
         request = db.query(
             "SELECT rq.*, a.label AS account_label, p.name AS profile_name, "
             "       d.host AS account_host "
@@ -338,6 +405,7 @@ def delete_session(session_id: str) -> bool:
     conn = db.connection()
     with conn:
         cursor = conn.execute("DELETE FROM session WHERE id = ?", (session_id,))
+    _drop_attachment_files(db, [session_id])
     return cursor.rowcount > 0
 
 
@@ -355,6 +423,7 @@ def delete_sessions(session_ids: list[str] | None = None) -> int:
                 return 0
             placeholders = ",".join("?" for _ in ids)
             cursor = conn.execute(f"DELETE FROM session WHERE id IN ({placeholders})", ids)
+    _drop_attachment_files(db, session_ids)
     return cursor.rowcount
 
 

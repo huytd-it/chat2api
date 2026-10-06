@@ -41,6 +41,7 @@ export class RecipeForm {
   inputMode = $state<InputMode>("fill");
   submitMode = $state<SubmitMode>("enter");
   submitSelector = $state("");
+  attachSelector = $state("");
   lastMessageSelector = $state("");
   doneType = $state<DoneType>("copy_button");
   doneSelector = $state("");
@@ -110,6 +111,7 @@ export class RecipeForm {
     this.inputMode = "fill";
     this.submitMode = "enter";
     this.submitSelector = "";
+    this.attachSelector = "";
     this.lastMessageSelector = "";
     this.doneType = "copy_button";
     this.doneSelector = "";
@@ -158,6 +160,7 @@ export class RecipeForm {
     this.url = str(recipe.url);
     this.inputSelector = str(prompt.input_selector);
     this.inputMode = prompt.input_mode === "type" ? "type" : "fill";
+    this.attachSelector = str(prompt.attach_selector);
     const submit = str(prompt.submit) || "Enter";
     if (submit.startsWith("click:")) {
       this.submitMode = "click";
@@ -324,6 +327,7 @@ export class RecipeForm {
         input_selector: this.inputSelector.trim(),
         input_mode: this.inputMode,
         submit: this.submitMode === "enter" ? "Enter" : `click:${this.submitSelector.trim()}`,
+        ...(this.attachSelector.trim() ? { attach_selector: this.attachSelector.trim() } : {}),
       },
       response: {
         last_message_selector: this.lastMessageSelector.trim(),
@@ -398,6 +402,7 @@ export class RecipeForm {
         input_selector: this.inputSelector.trim(),
         input_mode: this.inputMode,
         submit: this.submitMode === "enter" ? "Enter" : `click:${this.submitSelector.trim()}`,
+        attach_selector: this.attachSelector.trim() || null,
       },
       response: {
         last_message_selector: this.lastMessageSelector.trim(),

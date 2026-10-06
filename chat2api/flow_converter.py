@@ -143,6 +143,9 @@ def convert_recipe(recipe: dict) -> list[dict]:
             add("fill-input", {
                 "selector": input_selector,
                 "mode": prompt.get("input_mode", "fill"),
+                **{key: prompt[key] for key in ("attach_selector", "attach_action",
+                                                "attach_ready_selector", "attach_wait_ms")
+                   if prompt.get(key) is not None},
             })
         submit = str(prompt.get("submit", "Enter"))
         if submit.startswith("click:"):

@@ -50,6 +50,8 @@ class FlowContext:
         self.deadline: float = 0.0
         self.media_tag: str = "img"
         self.flow_kind: str = "text"
+        # File/ảnh đính kèm của request, upload ở node submit ngay trước khi gõ.
+        self.files: list = []
 
     def set(self, name: str, value: Any) -> None:
         self.vars[str(name)] = value
@@ -155,6 +157,7 @@ class FlowRunnerMixin:
         await _sleep_ms(int(params.get("ready_delay_ms") or
                             getattr(self, "_ready_delay_ms", 0)))
         ctx.box = box
+        ctx.set("attach_cfg", {k: v for k, v in params.items() if k.startswith("attach_")})
 
     async def _node_submit(self, ctx: FlowContext, params: dict, clicked: bool) -> None:
         box = ctx.box
@@ -163,6 +166,10 @@ class FlowRunnerMixin:
         await _sleep_ms(int(params.get("input_delay_ms") or
                             getattr(self, "_input_delay_ms", 0)))
         mode = str(params.get("mode") or "fill")
+        if ctx.files:
+            # Khóa attach_* nằm ở node fill-input; node submit khai lại thì thắng.
+            attach_cfg = {**(ctx.vars.get("attach_cfg") or {}), **params}
+            await self._attach_files(ctx.page, attach_cfg, ctx.files)  # type: ignore[attr-defined]
         if mode == "type":
             await box.click()
             await box.type(ctx.prompt)

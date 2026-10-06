@@ -22,6 +22,8 @@ class ComboProvider(Provider):
     """
 
     slug = "combo"
+    # Member tự quyết: recipe upload vào site, passthrough chuyển part đi tiếp.
+    supports_attachments = True
 
     def __init__(self, router=None):
         # router được gán sau khi Router khởi tạo, để tránh vòng import

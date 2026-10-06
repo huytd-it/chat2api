@@ -1,18 +1,28 @@
 <script lang="ts">
-  import { ArrowRight, Link, LinkBreak, Plus, Stop, Target, TestTube, X } from "phosphor-svelte";
-  import type { ChatTarget, TestTarget } from "../../api";
-  import { headedBrowser } from "../../stores";
+  import { ArrowRight, Link, LinkBreak, Paperclip, Plus, Stop, Target, TestTube, X } from "phosphor-svelte";
+  import {
+    ATTACHMENT_MAX_BYTES,
+    ATTACHMENT_MAX_COUNT,
+    formatBytes,
+    readAttachment,
+    type ChatAttachment,
+    type ChatTarget,
+    type TestTarget,
+  } from "../../api";
+  import { headedBrowser, showToast } from "../../stores";
   import { models, selectedModel } from "../../sync";
   import { Button } from "$lib/components/ui/button";
   import { Switch } from "$lib/components/ui/switch";
   import { Textarea } from "$lib/components/ui/textarea";
   import * as Select from "$lib/components/ui/select";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
+  import AttachmentTile from "./AttachmentTile.svelte";
   import { TEST_PROMPTS, type RotationMode } from "./shared";
 
   let {
     prompt = $bindable(),
     extraPrompts = $bindable(),
+    attachments = $bindable([]),
     keepContext = $bindable(true),
     hasActive = false,
     selected,
@@ -33,6 +43,8 @@
   }: {
     prompt: string;
     extraPrompts: string[];
+    /** File/ảnh gửi kèm lượt tới; workspace xóa trắng ngay khi gửi. */
+    attachments?: ChatAttachment[];
     keepContext?: boolean;
     /** Có session đang mở không — chưa có thì toggle giữ context vô nghĩa. */
     hasActive?: boolean;
@@ -57,6 +69,59 @@
   // IME tiếng Việt: Enter trong lúc đang ghép ký tự là "chốt chữ", không phải
   // "gửi" — nên chỉ gửi khi bộ gõ đã nhả.
   let composing = $state(false);
+  let fileEl = $state<HTMLInputElement | null>(null);
+  let dragging = $state(false);
+
+  /** Nhận file từ nút kẹp giấy, kéo-thả và dán — cùng một trần số lượng/dung lượng. */
+  async function addFiles(files: Iterable<File>) {
+    const incoming = [...files];
+    if (!incoming.length) return;
+    const room = ATTACHMENT_MAX_COUNT - attachments.length;
+    const tooBig = incoming.filter((file) => file.size > ATTACHMENT_MAX_BYTES);
+    const accepted = incoming.filter((file) => file.size <= ATTACHMENT_MAX_BYTES).slice(0, Math.max(0, room));
+    if (tooBig.length) {
+      showToast(`${tooBig[0].name} vượt ${formatBytes(ATTACHMENT_MAX_BYTES)} — bỏ qua.`);
+    } else if (accepted.length < incoming.length) {
+      showToast(`Tối đa ${ATTACHMENT_MAX_COUNT} file mỗi lượt gửi.`);
+    }
+    try {
+      const read = await Promise.all(accepted.map(readAttachment));
+      attachments = [...attachments, ...read];
+    } catch (error) {
+      showToast("Không đọc được file: " + (error as Error).message);
+    }
+    promptEl?.focus();
+  }
+
+  function onPick(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    void addFiles(input.files ?? []);
+    // Xóa value để chọn lại đúng file vừa gỡ vẫn bắn `change`.
+    input.value = "";
+  }
+
+  function onPaste(event: ClipboardEvent) {
+    const files = [...(event.clipboardData?.files ?? [])];
+    if (!files.length) return;
+    // Có file trong clipboard (ảnh chụp màn hình) thì nhận file, không dán tên file thành chữ.
+    event.preventDefault();
+    void addFiles(files);
+  }
+
+  function hasFiles(event: DragEvent): boolean {
+    return [...(event.dataTransfer?.types ?? [])].includes("Files");
+  }
+
+  function onDrop(event: DragEvent) {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    dragging = false;
+    void addFiles(event.dataTransfer?.files ?? []);
+  }
+
+  function removeAttachment(index: number) {
+    attachments = attachments.filter((_, position) => position !== index);
+  }
 
   const profileCount = $derived(new Set(selected.map((item) => item.profile_name)).size);
   const domainCount = $derived(new Set(selected.map((item) => item.domain)).size);
@@ -101,7 +166,58 @@
   }
 </script>
 
-<div class="flex-none border-t border-border bg-card px-3 py-3 md:px-6">
+<div
+  class="relative flex-none border-t border-border bg-card px-3 py-3 md:px-6"
+  role="group"
+  aria-label="Soạn tin nhắn"
+  ondragover={(event) => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    dragging = true;
+  }}
+  ondragleave={(event) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) dragging = false;
+  }}
+  ondrop={onDrop}
+>
+  {#if dragging}
+    <div
+      class="pointer-events-none absolute inset-1.5 z-10 grid place-items-center rounded-lg border border-dashed border-primary bg-primary/8 text-xs font-medium text-primary"
+    >
+      Thả file hoặc ảnh để đính kèm
+    </div>
+  {/if}
+
+  <input
+    class="hidden"
+    type="file"
+    multiple
+    tabindex="-1"
+    aria-hidden="true"
+    bind:this={fileEl}
+    onchange={onPick}
+  />
+
+  {#if attachments.length}
+    <ul class="mb-2.5 flex flex-wrap gap-2 pt-1" aria-label="File sẽ gửi kèm">
+      {#each attachments as item, index (index)}
+        <li>
+          <AttachmentTile
+            attachment={{
+              id: -1 - index,
+              kind: item.mime.startsWith("image/") ? "image" : "file",
+              name: item.name,
+              mime: item.mime,
+              bytes: item.size,
+              preview_url: item.dataUrl,
+            }}
+            onremove={() => removeAttachment(index)}
+          />
+        </li>
+      {/each}
+    </ul>
+  {/if}
+
   <Textarea
     class="max-h-45 min-h-11 resize-none"
     aria-label="Tin nhắn mới"
@@ -115,6 +231,7 @@
     bind:ref={promptEl}
     oninput={autoGrow}
     onkeydown={onKeydown}
+    onpaste={onPaste}
     oncompositionstart={() => (composing = true)}
     oncompositionend={() => (composing = false)}
   />
@@ -164,6 +281,18 @@
         </Select.Content>
       </Select.Root>
     {/if}
+
+    <Button
+      size="sm"
+      variant={attachments.length ? "secondary" : "outline"}
+      class="text-[11px]"
+      title="Đính kèm file hoặc ảnh — cũng có thể kéo-thả hay dán (Ctrl+V) vào ô nhập"
+      disabled={attachments.length >= ATTACHMENT_MAX_COUNT}
+      onclick={() => fileEl?.click()}
+    >
+      <Paperclip />
+      Đính kèm{attachments.length ? ` · ${attachments.length}` : ""}
+    </Button>
 
     <label
       class="flex items-center gap-2 text-[11px] text-muted-foreground"
@@ -254,7 +383,9 @@
       {:else}
         <Button
           size="sm"
-          disabled={!prompt.trim() || (!selected.length && !$selectedModel)}
+          disabled={selected.length
+            ? !prompt.trim()
+            : (!prompt.trim() && !attachments.length) || !$selectedModel}
           onclick={onSend}
         >
           <ArrowRight />
@@ -286,7 +417,7 @@
 
   <p class="mt-2 text-[10px] text-muted-foreground">
     {#if selected.length}
-      {planLine} · Enter để gửi
+      {planLine}{attachments.length ? ` · kèm ${attachments.length} file ở mọi request` : ""} · Enter để gửi
     {:else if hasActive}
       {keepContext ? "Đang nối vào session đang mở" : "Lượt tới sẽ tạo session mới"} · Enter gửi · Shift+Enter xuống dòng
     {:else}

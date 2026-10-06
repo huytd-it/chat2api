@@ -4,10 +4,13 @@ from typing import AsyncIterator
 
 import httpx
 
+from .. import attachments
 from .base import ModelInfo, Provider
 
 
 class OpenAIPassthrough(Provider):
+    supports_attachments = True
+
     def __init__(self, cfg: dict):
         self.slug = cfg["slug"]
         self.base_url = cfg["base_url"].rstrip("/")
@@ -54,7 +57,8 @@ class OpenAIPassthrough(Provider):
         return h
 
     async def stream(self, messages: list[dict], model_id: str) -> AsyncIterator[str]:
-        payload = {"model": model_id, "messages": messages, "stream": self.supports_stream}
+        payload = {"model": model_id, "messages": attachments.openai_messages(messages),
+                   "stream": self.supports_stream}
         async with httpx.AsyncClient(timeout=300) as client:
             if not self.supports_stream:
                 r = await client.post(f"{self.base_url}/chat/completions",

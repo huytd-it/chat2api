@@ -249,9 +249,89 @@ export async function fetchModels(key: string): Promise<ModelInfo[]> {
   return ((data.data ?? []) as ModelInfo[]).filter((m) => m.ready !== false);
 }
 
+/** File/ảnh người dùng vừa chọn trong composer, đã đọc sẵn thành data URL. */
+export interface ChatAttachment {
+  name: string;
+  mime: string;
+  size: number;
+  dataUrl: string;
+}
+
+/** Part của `content` theo đúng khuôn OpenAI mà server tách ra khi nhận. */
+export type ChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string; name?: string } }
+  | { type: "file"; file: { filename: string; file_data: string } };
+
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
-  content: string;
+  content: string | ChatContentPart[];
+}
+
+/** Trần phía client, khớp mặc định của server (ATTACHMENT_MAX_MB / _COUNT). */
+export const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024;
+export const ATTACHMENT_MAX_COUNT = 10;
+
+export function readAttachment(file: File): Promise<ChatAttachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error("Không đọc được file"));
+    reader.onload = () =>
+      resolve({
+        name: file.name || "attachment",
+        mime: file.type || "application/octet-stream",
+        size: file.size,
+        dataUrl: String(reader.result),
+      });
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Không có file thì giữ nguyên chuỗi — request gọn và giống hệt trước đây. */
+export function chatContent(text: string, attachments: ChatAttachment[] = []): ChatMessage["content"] {
+  if (!attachments.length) return text;
+  const parts: ChatContentPart[] = text ? [{ type: "text", text }] : [];
+  for (const item of attachments) {
+    parts.push(
+      item.mime.startsWith("image/")
+        ? { type: "image_url", image_url: { url: item.dataUrl, name: item.name } }
+        : { type: "file", file: { filename: item.name, file_data: item.dataUrl } },
+    );
+  }
+  return parts;
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** File đính kèm đã lưu cùng message. `preview_url` chỉ có ở bản optimistic
+ * (vẽ trước khi server chốt); bản đã lưu thì tải qua `fetchAttachmentUrl`. */
+export interface SessionAttachment {
+  id: number;
+  kind: "image" | "file" | "screenshot";
+  name: string;
+  mime: string;
+  bytes: number;
+  preview_url?: string;
+}
+
+/** Tải file đính kèm về object URL: `<img src>` không tự gửi được header
+ * Authorization nên không trỏ thẳng vào endpoint. Người gọi tự revoke. */
+export async function fetchAttachmentUrl(
+  key: string,
+  sessionId: string,
+  attachmentId: number,
+): Promise<string> {
+  const base = await apiBase();
+  const r = await fetch(
+    `${base}/admin/sessions/${encodeURIComponent(sessionId)}/attachments/${attachmentId}`,
+    { headers: headers(key) },
+  );
+  if (!r.ok) throw new Error(r.statusText);
+  return URL.createObjectURL(await r.blob());
 }
 
 export interface RequestRecord {
@@ -300,6 +380,7 @@ export interface SessionMessage {
   char_count: number;
   created_at: number;
   artifacts: SessionArtifact[];
+  attachments: SessionAttachment[];
   request: RequestRecord | null;
 }
 
@@ -550,6 +631,8 @@ export interface ManualRecipeSpec {
     input_selector: string;
     input_mode: "fill" | "type";
     submit: string; // "Enter" hoặc "click:<css selector>"
+    /** `input[type=file]` hoặc nút mở hộp chọn file; null = gỡ khỏi recipe. */
+    attach_selector?: string | null;
   };
   response: {
     last_message_selector: string;

@@ -299,7 +299,8 @@ CREATE TABLE IF NOT EXISTS attachment (
   bytes      INTEGER NOT NULL DEFAULT 0,
   width      INTEGER,
   height     INTEGER,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  name       TEXT    NOT NULL DEFAULT ''        -- tên file gốc client gửi lên
 );
 CREATE INDEX IF NOT EXISTS attachment_by_msg ON attachment(message_id);
 

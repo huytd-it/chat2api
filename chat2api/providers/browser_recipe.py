@@ -12,6 +12,8 @@ from urllib.parse import urlsplit
 
 from .. import account_limits as limits
 from .. import accounts, applog, flows, settings, store
+from .. import attachments as attach
+from ..errors import OpenAIError
 from ..prompt import flatten_messages
 from .base import ModelInfo, Provider
 
@@ -160,6 +162,13 @@ def validate_recipe(d: dict) -> list[str]:
     errs += flows.validate_flows(d, DONE_SIGNALS, COPY_SCOPES)
     resp = d.get("response") or {}
     ds = resp.get("done_signal") or {}
+    prompt_block = d.get("prompt") if isinstance(d.get("prompt"), dict) else {}
+    for key in ("attach_selector", "attach_action", "attach_ready_selector"):
+        if prompt_block.get(key) is not None and not isinstance(prompt_block.get(key), str):
+            errs.append(f"invalid field: prompt.{key} (phải là string)")
+    wait = prompt_block.get("attach_wait_ms")
+    if wait is not None and (isinstance(wait, bool) or not isinstance(wait, int) or wait < 0):
+        errs.append("invalid field: prompt.attach_wait_ms (số nguyên >= 0)")
     if not declared_flows:
         need("prompt.input_selector", bool((d.get("prompt") or {}).get("input_selector")))
         # image recipe có thể dùng image_selector thay vì last_message_selector
@@ -2265,11 +2274,72 @@ class BrowserRecipe(Provider):
             await box.wait_for(state="visible", timeout=self._ready_timeout_ms)
         await _sleep_ms(self._ready_delay_ms)
 
+    supports_attachments = True
+
+    async def _attach_files(self, page, cfg: dict, files: "list[attach.Attachment]") -> None:
+        """Upload file/ảnh vào ô chọn file của site trước khi gõ prompt.
+
+        `attach_selector` trỏ thẳng vào `input[type=file]` (kể cả khi nó ẩn),
+        hoặc vào nút mở hộp chọn file của hệ điều hành — khi đó bấm nút và bắt
+        file chooser. Không khai báo thì thử `input[type=file]` đầu tiên của
+        trang: phần lớn web chat có sẵn một cái ẩn sau nút kẹp giấy.
+        """
+        if not files:
+            return
+        action = str(cfg.get("attach_action") or "")
+        if action:
+            await self._exec_action_steps(page, action)
+        selector = str(cfg.get("attach_selector") or "").strip()
+        target = _resolve_locator(page, selector or 'input[type="file"]').first
+        try:
+            await target.wait_for(state="attached", timeout=8000)
+        except Exception:
+            if selector:
+                raise OpenAIError(
+                    502, "attach_failed",
+                    f"Recipe '{self.slug}': không thấy prompt.attach_selector ({selector})",
+                    "api_error")
+            raise OpenAIError(
+                400, "attachments_unsupported",
+                f"Recipe '{self.slug}' chưa khai báo prompt.attach_selector và trang không có "
+                "input[type=file] — chưa gửi được file/ảnh đính kèm tới site này")
+        payloads = [item.payload() for item in files]
+        is_input = await target.evaluate(
+            "el => el.tagName === 'INPUT' && el.type === 'file'")
+        if is_input:
+            if len(payloads) == 1 or await target.evaluate("el => el.multiple"):
+                await target.set_input_files(payloads)
+            else:
+                # Ô chỉ nhận một file mỗi lần: nạp lần lượt, site tự gom lại.
+                for payload in payloads:
+                    await target.set_input_files(payload)
+                    await _sleep_ms(300)
+        else:
+            queue = list(payloads)
+            while queue:
+                async with page.expect_file_chooser(timeout=10000) as pending:
+                    await target.click()
+                chooser = await pending.value
+                batch = queue if chooser.is_multiple() else queue[:1]
+                await chooser.set_files(batch)
+                queue = queue[len(batch):]
+                if queue:
+                    await _sleep_ms(300)
+        ready = str(cfg.get("attach_ready_selector") or "").strip()
+        if ready:
+            await _resolve_locator(page, ready).first.wait_for(state="visible", timeout=60000)
+        wait_ms = cfg.get("attach_wait_ms")
+        await _sleep_ms(1500 if wait_ms is None else max(0, int(wait_ms)))
+        applog.log(f"recipe: '{self.slug}' đã đính kèm {len(files)} file "
+                   f"({', '.join(item.name for item in files)})")
+
     async def stream(self, messages: list[dict], model_id: str,
                      headed: bool | None = None,
                      target_account_id: int | None = None,
                      assignment: "Assignment | None" = None) -> AsyncIterator[str]:
         prompt = flatten_messages(messages)
+        files = attach.collect(messages)
+        extra = {"files": files} if files else {}
         self.last_response_html = None
         # Handler thường gán sẵn (để trả header "đi tới đâu" trước khi stream mở);
         # gọi thẳng stream() không kèm assignment vẫn chạy được, tự gán rồi tự nhả.
@@ -2278,7 +2348,7 @@ class BrowserRecipe(Provider):
             # Assignment của handler: chạy một lượt, dính limit thì ném để
             # handler retry (nó giữ header/session nên nó phải đổi assignment).
             async for delta in self._run(prompt, model_id, assignment, headed,
-                                         self.flow_for_model(model_id)):
+                                         self.flow_for_model(model_id), **extra):
                 yield delta
             return
         assignment = await self.assign(target_account_id)
@@ -2287,7 +2357,7 @@ class BrowserRecipe(Provider):
             while True:
                 try:
                     async for delta in self._run(prompt, model_id, assignment, headed,
-                                                 self.flow_for_model(model_id)):
+                                                 self.flow_for_model(model_id), **extra):
                         yield delta
                     break
                 except AccountLimitExceeded as exc:
@@ -2304,7 +2374,8 @@ class BrowserRecipe(Provider):
             assignment.release()
 
     async def _run(self, prompt: str, model_id: str, assignment: "Assignment",
-                   headed: bool | None, flow: str = "text") -> AsyncIterator[str]:
+                   headed: bool | None, flow: str = "text",
+                   files: "list[attach.Attachment] | None" = None) -> AsyncIterator[str]:
         # Cấu hình đọc theo flow đang chạy, không đọc `self.*` phẳng: một
         # instance provider phục vụ nhiều flow, ghi vào self là flow sau đè lên
         # flow trước. Với recipe đời cũ `flow_prompt("text")` / `flow_done_signal
@@ -2365,6 +2436,8 @@ class BrowserRecipe(Provider):
                 # của nhiều site chỉ liệt kê model hợp lệ cho chế độ đang bật.
                 await self._enter_flow(page, flow)
                 await self._select_model(page, model)
+                # File trước, chữ sau: nhiều site khóa nút gửi tới khi upload xong.
+                await self._attach_files(page, prompt_cfg, files or [])
                 if prompt_cfg.get("input_mode", "fill") == "type":
                     await box.click()
                     await box.type(prompt)

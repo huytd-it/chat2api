@@ -244,3 +244,49 @@ def test_browser_reply_capture_html_is_opt_in(tmp_path):
     assert "qwen-markdown-paragraph" in page.script
     assert 'if (tag === "hr") return "---\\n\\n"' in page.script
     assert 'const marker = tag === "ol" ? `${index + 1}.` : "-"' in page.script
+
+
+async def test_attachments_are_stored_served_and_removed_with_session(session_client, tmp_path):
+    client, db = session_client
+    client._transport.app.state.router.providers["fake"].supports_attachments = True
+    response = await client.post("/v1/chat/completions", json={
+        "model": "fake/m1",
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "xem ảnh"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw==",
+                                                "name": "cat.png"}},
+        ]}],
+    })
+    assert response.status_code == 200
+    session_id = response.headers["X-Chat2api-Session-Id"]
+
+    detail = (await client.get(f"/admin/sessions/{session_id}")).json()
+    user = detail["messages"][0]
+    assert user["content"] == "xem ảnh"
+    assert [(a["name"], a["kind"], a["mime"], a["bytes"]) for a in user["attachments"]] == [
+        ("cat.png", "image", "image/png", 4)]
+    assert detail["messages"][1]["attachments"] == []
+
+    attachment_id = user["attachments"][0]["id"]
+    served = await client.get(f"/admin/sessions/{session_id}/attachments/{attachment_id}")
+    assert served.status_code == 200
+    assert served.content == b"\x89PNG"
+    assert served.headers["content-type"] == "image/png"
+    other = await client.get(f"/admin/sessions/khong-phai-session/attachments/{attachment_id}")
+    assert other.status_code == 404
+
+    folder = tmp_path / "attachments" / session_id
+    assert len(list(folder.iterdir())) == 1
+    assert (await client.delete(f"/admin/sessions/{session_id}")).status_code == 200
+    assert not folder.exists()
+
+
+async def test_attachments_rejected_when_provider_cannot_carry_them(session_client):
+    client, _ = session_client
+    response = await client.post("/v1/chat/completions", json={
+        "model": "fake/m1",
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw=="}}]}],
+    })
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "attachments_unsupported"

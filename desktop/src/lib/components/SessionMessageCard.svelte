@@ -8,11 +8,13 @@
     MagnifyingGlassIcon,
   } from "phosphor-svelte";
   import type { SessionMessage } from "../api";
+  import AttachmentTile from "./sessions/AttachmentTile.svelte";
   import { renderMarkdown } from "../markdown";
   import { Button } from "$lib/components/ui/button";
 
   let {
     message,
+    sessionId,
     model,
     sending = false,
     copied = false,
@@ -23,6 +25,7 @@
     oncopylink,
   }: {
     message: SessionMessage;
+    sessionId: string;
     model: string;
     sending?: boolean;
     copied?: boolean;
@@ -93,6 +96,17 @@
         {@html renderMarkdown(message.reasoning)}
       </div>
     </details>
+  {/if}
+
+  {#if message.attachments?.length}
+    <ul
+      class="mb-1.5 flex max-w-full flex-wrap gap-1.5 {isUser ? 'justify-end' : ''}"
+      aria-label="File đính kèm"
+    >
+      {#each message.attachments as attachment (attachment.id)}
+        <li><AttachmentTile {attachment} {sessionId} /></li>
+      {/each}
+    </ul>
   {/if}
 
   {#if message.content || streaming}

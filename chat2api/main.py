@@ -7,10 +7,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
-from . import (account_limits, accounts, apikeys, applog, auth, errors, flows, profiles, sessions,  # noqa: F401  (import auth để đăng ký dependency)
-               settings, store)
+from . import (account_limits, accounts, apikeys, applog, attachments, auth, errors, flows,  # noqa: F401  (import auth để đăng ký dependency)
+               profiles, sessions, settings, store)
 from .config import Config
 from .errors import OpenAIError
 from .providers.browser_recipe import AccountLimitExceeded, TrialLimitExceeded
@@ -568,6 +568,16 @@ def create_app(cfg: Config) -> FastAPI:
                 # không gán assignment ở đây (để ComboProvider tự gán per-member)
                 pass
 
+        # File/ảnh đính kèm: từ chối sớm nếu provider không đưa được chúng tới
+        # model, và tải các URL về ngay đây — lỗi tải là lỗi 400 của request,
+        # không phải lỗi recipe để rồi bị đếm vào health hay kích agent fallback.
+        has_files = any(m.get("attachments") for m in msgs)
+        if has_files:
+            if not provider.supports_attachments:
+                raise OpenAIError(400, "attachments_unsupported",
+                                  f"Model '{body.model}' không nhận file/ảnh đính kèm")
+            await attachments.resolve(msgs)
+
         target_account_id = None
         raw_target = request.headers.get("x-chat2api-account-id", "").strip()
         if raw_target:
@@ -657,8 +667,9 @@ def create_app(cfg: Config) -> FastAPI:
         def fallback_ok(reason: str) -> bool:
             from .agents import llm
 
+            # Agent fallback chỉ gõ chữ; có file thì thà báo lỗi còn hơn trả lời thiếu file.
             return (isinstance(provider, BR) and target_account_id is None and cfg_.enable_fallback
-                    and llm.configured(cfg_))
+                    and not has_files and llm.configured(cfg_))
 
         async def agent_stream():
             from .agents import fallback
@@ -1501,6 +1512,15 @@ def register_admin(app: FastAPI, admin) -> None:
         if item is None:
             raise OpenAIError(404, "not_found", "Session không tồn tại")
         return item
+
+    @admin.get("/sessions/{session_id}/attachments/{attachment_id}")
+    async def session_attachment(session_id: str, attachment_id: int):
+        found = await asyncio.to_thread(sessions.attachment_file, session_id, attachment_id)
+        if found is None:
+            raise OpenAIError(404, "not_found", "File đính kèm không tồn tại")
+        path, mime, name = found
+        return FileResponse(path, media_type=mime or "application/octet-stream", filename=name,
+                            content_disposition_type="inline")
 
     @admin.patch("/sessions/{session_id}")
     async def session_update(session_id: str, body: SessionUpdateRequest):

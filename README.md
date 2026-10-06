@@ -228,6 +228,31 @@ for await (const chunk of response) {
 }
 ```
 
+### Đính kèm file / ảnh
+
+`content` nhận mảng part theo đúng khuôn OpenAI, nên SDK có sẵn dùng được ngay:
+
+```python
+client.chat.completions.create(
+    model="example-web/example-model",
+    messages=[{"role": "user", "content": [
+        {"type": "text", "text": "Ảnh này chụp gì?"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+        {"type": "file", "file": {"filename": "bao-cao.pdf", "file_data": "data:application/pdf;base64,..."}},
+    ]}],
+)
+```
+
+- `image_url.url` nhận data URL hoặc link `http(s)` (server tự tải về); `file.file_data`
+  nhận data URL hoặc base64 trần. `file_id` không được hỗ trợ.
+- **Browser recipe** upload file vào chính ô chọn file của website trước khi gõ prompt
+  (xem `prompt.attach_selector` bên dưới). **OpenAI passthrough** chuyển nguyên part
+  lên upstream. Provider khác trả `400 attachments_unsupported`.
+- Mặc định tối đa 10 file/request, 20 MB/file — đổi bằng `ATTACHMENT_MAX_COUNT`,
+  `ATTACHMENT_MAX_MB`.
+- Trong desktop app: nút **Đính kèm** ở ô soạn tin, kéo-thả, hoặc dán ảnh bằng Ctrl+V.
+  File được lưu cùng session tại `data/attachments/<session>/` và xóa theo session.
+
 ### Header điều khiển và truy vết
 
 | Header request | Công dụng |
@@ -308,6 +333,14 @@ models:
 input:
   selector: "textarea"
   submit: enter
+
+# Tùy chọn — nơi upload file/ảnh đính kèm. Bỏ trống thì runner tự tìm
+# input[type=file] đầu tiên của trang.
+prompt:
+  attach_selector: "input[type=file]"        # hoặc nút mở hộp chọn file
+  attach_action: "click:.plus-menu"          # mở menu trước, nếu ô upload nằm trong menu
+  attach_ready_selector: ".upload-preview"   # hiện ra khi upload xong
+  attach_wait_ms: 1500                       # chờ thêm sau upload
 
 response:
   last_message_selector: ".assistant-message"
@@ -497,6 +530,10 @@ RECIPE_TIMEOUT_MS=120000
 RECIPE_READY_DELAY_MS=1200
 RECIPE_INPUT_DELAY_MS=400
 RECIPE_READY_TIMEOUT_MS=20000
+
+# File/ảnh đính kèm
+ATTACHMENT_MAX_MB=20
+ATTACHMENT_MAX_COUNT=10
 
 # API routing
 API_ACCOUNT_STRATEGY=least_busy

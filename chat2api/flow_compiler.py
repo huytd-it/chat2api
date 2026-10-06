@@ -73,6 +73,9 @@ def compile_flow(flow: dict) -> dict:
     prompt = {"input_selector": input_selector,
               "input_mode": fill.get("mode", "fill"),
               "submit": submit}
+    for key in ("attach_selector", "attach_action", "attach_ready_selector", "attach_wait_ms"):
+        if fill.get(key) is not None:
+            prompt[key] = fill[key]
 
     ds_type = str(wait_done.get("type") or "stable_text")
     done_signal: dict[str, Any] = {"type": ds_type}

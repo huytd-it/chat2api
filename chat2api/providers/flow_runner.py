@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from .. import account_limits as limits
+from .. import attachments as attach
 from .. import applog
 from ..flow_compiler import compile_flow
 from ..flow_executor import (
@@ -297,9 +298,10 @@ class FlowRunner(FlowRunnerMixin, BrowserRecipe):
                      target_account_id: int | None = None,
                      assignment=None) -> AsyncIterator[str]:
         prompt = flatten_messages(messages)
+        files = attach.collect(messages)
         self.last_response_html = None
         if assignment is not None:
-            async for delta in self._run_flow(prompt, assignment, headed):
+            async for delta in self._run_flow(prompt, assignment, headed, files):
                 yield delta
             return
         assignment = await self.assign(target_account_id)
@@ -307,7 +309,7 @@ class FlowRunner(FlowRunnerMixin, BrowserRecipe):
         try:
             while True:
                 try:
-                    async for delta in self._run_flow(prompt, assignment, headed):
+                    async for delta in self._run_flow(prompt, assignment, headed, files):
                         yield delta
                     break
                 except AccountLimitExceeded as exc:
@@ -324,7 +326,7 @@ class FlowRunner(FlowRunnerMixin, BrowserRecipe):
             assignment.release()
 
     async def _run_flow(self, prompt: str, assignment,
-                        headed: bool | None) -> AsyncIterator[str]:
+                        headed: bool | None, files=None) -> AsyncIterator[str]:
         flow = self.flow_doc
         start_id = entry_node_id(flow)
         target_profile = assignment.profile
@@ -336,6 +338,7 @@ class FlowRunner(FlowRunnerMixin, BrowserRecipe):
         ds = self._flow_done_defaults()
         timeout_ms = int(ds.get("timeout_ms", 120000))
         ctx = FlowContext(prompt)
+        ctx.files = list(files or [])
         ctx.assignment = assignment
         ctx.deadline = time.monotonic() + timeout_ms / 1000
         ctx.media_tag = "video" if self.flow_type_name == "video" else "img"

@@ -13,6 +13,9 @@ class ModelInfo:
 
 class Provider(ABC):
     slug: str = ""
+    # Provider có đưa được file/ảnh trong message tới model không. Mặc định
+    # không: nhận rồi lặng lẽ bỏ file đi thì model trả lời như chưa từng thấy nó.
+    supports_attachments: bool = False
 
     @abstractmethod
     def models(self) -> list[ModelInfo]: ...

@@ -1,9 +1,12 @@
 from pydantic import BaseModel, Field
 
+from . import attachments
+
 
 class Message(BaseModel):
     role: str
-    content: str
+    # Chuỗi, hoặc mảng part kiểu OpenAI (text | image_url | file) khi có đính kèm.
+    content: str | list | None = None
 
 
 class ChatRequest(BaseModel):
@@ -12,7 +15,20 @@ class ChatRequest(BaseModel):
     stream: bool = False
 
     def as_list(self) -> list[dict]:
-        return [{"role": m.role, "content": m.content} for m in self.messages]
+        """Message đã chuẩn hoá: `content` luôn là chữ, file tách sang `attachments`.
+
+        Khóa `attachments` chỉ có mặt khi message thật sự mang file, để mọi
+        chỗ chỉ đọc `role`/`content` chạy y như trước.
+        """
+        out: list[dict] = []
+        for m in self.messages:
+            text, found = attachments.split_content(m.content)
+            item: dict = {"role": m.role, "content": text}
+            if found:
+                item["attachments"] = found
+            out.append(item)
+        attachments.check_limits(out)
+        return out
 
 
 class ImageGenerateRequest(BaseModel):
@@ -74,6 +90,12 @@ class RecipePromptSpec(BaseModel):
     input_selector: str
     input_mode: str = "fill"      # fill | type
     submit: str = "Enter"         # "Enter" hoặc "click:<css selector nút gửi>"
+    # Đính kèm file/ảnh: `input[type=file]` của site, hoặc nút mở hộp chọn file.
+    # Bỏ trống thì runner tự tìm `input[type=file]` đầu tiên trên trang.
+    attach_selector: str | None = None
+    attach_action: str | None = None          # action mở menu trước, vd click:.plus-btn
+    attach_ready_selector: str | None = None  # hiện ra khi upload xong (thumbnail/chip)
+    attach_wait_ms: int | None = None         # chờ thêm sau upload, mặc định 1500
 
 
 class RecipeDoneSignalSpec(BaseModel):

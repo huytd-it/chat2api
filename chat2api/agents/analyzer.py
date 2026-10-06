@@ -23,6 +23,7 @@ prompt:
   input_selector: "<css selector ô nhập tin nhắn>"
   input_mode: fill          # fill | type (contenteditable dùng type)
   submit: "Enter"           # Enter | "click:<css selector nút gửi>"
+  attach_selector: "<css selector input[type=file] để đính kèm file/ảnh>"  # TÙY CHỌN, bỏ nếu DOM không có
 response:
   last_message_selector: "<css selector khối tin nhắn AI; tool luôn lấy phần tử CUỐI cùng>"
   done_signal:

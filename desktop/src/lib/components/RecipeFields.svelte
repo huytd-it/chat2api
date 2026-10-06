@@ -109,6 +109,11 @@
           </Select.Root>
         </label>
       </div>
+      <label class="recipe-field" for={id("attach-sel")}>
+        <span>Selector đính kèm file/ảnh</span>
+        <InlineSelectorPicker id={id("attach-sel")} placeholder="input[type='file']" url={form.url} bind:value={form.attachSelector} label="ô chọn file" />
+        <small>Trỏ vào <code>input[type=file]</code> (kể cả khi ẩn) hoặc nút mở hộp chọn file. Để trống: tự tìm <code>input[type=file]</code> đầu tiên của trang.</small>
+      </label>
     </section>
 
     <section class="recipe-section" aria-labelledby={id("response-title")}>

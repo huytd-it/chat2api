@@ -15,6 +15,8 @@
     openTestTarget,
     streamChat,
     updateSession,
+    chatContent,
+    type ChatAttachment,
     type ChatMessage,
     type ChatTarget,
     type SessionDetail,
@@ -45,6 +47,7 @@
   let loadingDetail = $state(false);
   let prompt = $state("");
   let extraPrompts = $state<string[]>([]);
+  let attachments = $state<ChatAttachment[]>([]);
   /** true = gửi tiếp vào session đang mở (kèm history); false = mỗi lượt gửi
    * tạo session mới. Chỉ áp dụng cho chat 1-1, batch test luôn dùng id mới. */
   let keepContext = $state(
@@ -353,6 +356,9 @@
     }
     const jobs = buildJobs(prompts);
     if (!jobs.length) return;
+    // Bàn test so cùng một đầu vào trên nhiều target, nên mọi job mang chung bộ file.
+    const files = attachments;
+    attachments = [];
     sending = true;
     elapsed = 0;
     batchJobs = jobs;
@@ -367,7 +373,7 @@
         await streamChat(
           $apiKey,
           job.model,
-          [{ role: "user", content: job.prompt }],
+          [{ role: "user", content: chatContent(job.prompt, files) }],
           () => {},
           controllers[index].signal,
           $headedBrowser,
@@ -408,8 +414,10 @@
   async function send() {
     if (selectedTargets.length) return sendBatch();
     const text = prompt.trim();
-    if (!text || !$selectedModel || sending) return;
+    const files = attachments;
+    if ((!text && !files.length) || !$selectedModel || sending) return;
     prompt = "";
+    attachments = [];
     sending = true;
     elapsed = 0;
     ticker = setInterval(() => (elapsed += 1), 1000);
@@ -418,9 +426,8 @@
     const existingId = keepContext
       ? (active?.id ?? crypto.randomUUID().replaceAll("-", ""))
       : crypto.randomUUID().replaceAll("-", "");
-    const outgoing = keepContext
-      ? [...history(), { role: "user" as const, content: text }]
-      : [{ role: "user" as const, content: text }];
+    const turn: ChatMessage = { role: "user", content: chatContent(text, files) };
+    const outgoing = keepContext ? [...history(), turn] : [turn];
 
     // Optimistic trace: phần lưu bền được nạp lại từ server ngay khi stream đóng.
     const temporary: SessionMessage = {
@@ -438,6 +445,14 @@
       char_count: text.length,
       created_at: Date.now(),
       artifacts: [],
+      attachments: files.map((item, index) => ({
+        id: -1 - index,
+        kind: item.mime.startsWith("image/") ? ("image" as const) : ("file" as const),
+        name: item.name,
+        mime: item.mime,
+        bytes: item.size,
+        preview_url: item.dataUrl,
+      })),
       request: null,
     };
     const reply: SessionMessage = {
@@ -447,6 +462,7 @@
       role: "assistant",
       content: "",
       char_count: 0,
+      attachments: [],
     };
     // Optimistic trace: chỉ khi giữ context mới vẽ tạm vào session đang mở.
     // Tách phiên thì session mới chưa tồn tại — đợi server chốt rồi nạp lại.
@@ -714,6 +730,7 @@
         {#each visibleMessages as message (message.id)}
           <SessionMessageCard
             {message}
+            sessionId={active.id}
             model={active.model_public_id}
             {sending}
             copied={copiedId === message.id}
@@ -755,6 +772,7 @@
       bind:this={composer}
       bind:prompt
       bind:extraPrompts
+      bind:attachments
       bind:keepContext
       hasActive={!!active}
       {selected}
