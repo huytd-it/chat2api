@@ -6,6 +6,13 @@ prompt:
   submit: Enter
 response:
   last_message_selector: 'div[id^="response-"]'
+  # Hết quota free Grok: "Free tier limit reached / Try again later or upgrade
+  # to SuperGrok for much higher limits...". Dính pattern thì khóa tạm account
+  # này 24h rồi chuyển account khác cùng recipe. Hết account → 429.
+  limit_patterns:
+    - "Free tier limit reached"
+    - "upgrade to SuperGrok"
+  limit_cooldown_hours: 24
   done_signal:
     type: copy_button
     selector: '[aria-label="Copy response"]'

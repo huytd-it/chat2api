@@ -145,6 +145,10 @@ class FlowRunner(FlowRunnerMixin, BrowserRecipe):
                 _matched_early = limits.match_limit(text, _compiled)
                 if _matched_early:
                     raise self._record_limit_hit(_matched_early, ctx.assignment, flow)
+            if _compiled:
+                _matched_dialog = await self._check_dialog_limit(page, flow)
+                if _matched_dialog:
+                    raise self._record_limit_hit(_matched_dialog, ctx.assignment, flow)
             if reply_html is not None and ctx.assignment is not None:
                 ctx.assignment.html = reply_html
             if text != last:
@@ -186,6 +190,10 @@ class FlowRunner(FlowRunnerMixin, BrowserRecipe):
                     _matched_done = limits.match_limit(last, _compiled)
                     if _matched_done:
                         raise self._record_limit_hit(_matched_done, ctx.assignment, flow)
+                    _matched_dialog_done = await self._check_dialog_limit(page, flow)
+                    if _matched_dialog_done:
+                        raise self._record_limit_hit(
+                            _matched_dialog_done, ctx.assignment, flow)
                     if (_via_fallback and _lcfg["on_missing_copy"]
                             and last.strip() and last.strip() != prompt.strip()):
                         raise self._record_limit_hit(
@@ -266,7 +274,7 @@ class FlowRunner(FlowRunnerMixin, BrowserRecipe):
         return limits.limit_config(self.flow_response(flow) or self.response_cfg)
 
     async def _node_check_limit(self, ctx, params: dict) -> bool:
-        # Node `condition` với {check: limit}: dò limit trên ctx.text.
+        # Node `condition` với {check: limit}: dò limit trên ctx.text + dialog.
         # True (dính) -> ghi cooldown + ném AccountLimitExceeded để stream
         # retry account khác; False -> đi tiếp ra output.
         cfg = self._flow_limit_cfg()
@@ -277,6 +285,15 @@ class FlowRunner(FlowRunnerMixin, BrowserRecipe):
         matched = limits.match_limit(text, compiled)
         if matched:
             raise self._record_limit_hit(matched, ctx.assignment, self.flow_kind)
+        page = getattr(ctx, "page", None)
+        if page is not None:
+            try:
+                dialog_matched = await self._check_dialog_limit(page, self.flow_kind)
+            except Exception:
+                dialog_matched = None
+            if dialog_matched:
+                raise self._record_limit_hit(
+                    dialog_matched, ctx.assignment, self.flow_kind)
         if (cfg["on_missing_copy"] and text.strip()
                 and ctx.vars.get("copy_fallback") and not ctx.vars.get("copied")):
             raise self._record_limit_hit(text[:200] or "missing-copy",
@@ -292,6 +309,16 @@ class FlowRunner(FlowRunnerMixin, BrowserRecipe):
             matched = limits.match_limit(ctx.text, cfg["compiled"])
             if matched:
                 raise self._record_limit_hit(matched, ctx.assignment, self.flow_kind)
+        if cfg["compiled"]:
+            page = getattr(ctx, "page", None)
+            if page is not None:
+                try:
+                    dialog_matched = await self._check_dialog_limit(page, self.flow_kind)
+                except Exception:
+                    dialog_matched = None
+                if dialog_matched:
+                    raise self._record_limit_hit(
+                        dialog_matched, ctx.assignment, self.flow_kind)
 
     async def stream(self, messages: list[dict], model_id: str,
                      headed: bool | None = None,
@@ -301,8 +328,15 @@ class FlowRunner(FlowRunnerMixin, BrowserRecipe):
         files = attach.collect(messages)
         self.last_response_html = None
         if assignment is not None:
-            async for delta in self._run_flow(prompt, assignment, headed, files):
-                yield delta
+            try:
+                async for delta in self._run_flow(prompt, assignment, headed, files):
+                    yield delta
+            except (AccountLimitExceeded, TrialLimitExceeded):
+                raise
+            except Exception as error:
+                self._note_account_failure(assignment, self.flow_kind, error)
+                raise
+            limits.record_account_success(self.slug, account_key_of(assignment))
             return
         assignment = await self.assign(target_account_id)
         tried: set[str] = {account_key_of(assignment)}
@@ -311,6 +345,7 @@ class FlowRunner(FlowRunnerMixin, BrowserRecipe):
                 try:
                     async for delta in self._run_flow(prompt, assignment, headed, files):
                         yield delta
+                    limits.record_account_success(self.slug, account_key_of(assignment))
                     break
                 except AccountLimitExceeded as exc:
                     applog.log(
@@ -322,6 +357,11 @@ class FlowRunner(FlowRunnerMixin, BrowserRecipe):
                     assignment.release()
                     assignment = await self.assign(target_account_id, exclude=tried)
                     tried.add(account_key_of(assignment))
+                except TrialLimitExceeded:
+                    raise
+                except Exception as error:
+                    self._note_account_failure(assignment, self.flow_kind, error)
+                    raise
         finally:
             assignment.release()
 

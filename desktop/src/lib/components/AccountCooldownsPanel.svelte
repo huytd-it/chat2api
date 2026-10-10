@@ -154,6 +154,11 @@
               {c.reason.length > 60 ? c.reason.slice(0, 60) + "…" : c.reason}
             </span>
           {/if}
+          {#if c.conversation_url}
+            <a class="text-xs text-sky-600 underline" href={c.conversation_url} target="_blank" rel="noreferrer" title={c.conversation_url}>
+              Mở lại hội thoại
+            </a>
+          {/if}
           <span class="inline-flex items-center gap-1 text-xs text-warning" title={untilText(c.until_ms)}>
             <WarningCircle size={13} /> {remainingText(c)}
           </span>

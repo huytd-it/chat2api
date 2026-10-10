@@ -23,10 +23,21 @@ import threading
 
 DEFAULT_COOLDOWN_HOURS = 24
 
+# 1 account lỗi liên tiếp N lần → khóa tạm 24h (kể cả lỗi không khớp
+# limit_patterns như timeout/selector sập — limit dính pattern vẫn khóa ngay
+# lần đầu như cũ). Thành công reset về 0.
+FAILSTREAK_THRESHOLD = 3
+FAILSTREAK_COOLDOWN_HOURS = 24
+
 # Mirror in-memory: (recipe_slug, account_key) -> until_ms. Ghi trước khi
 # submit xuống writer để retry cùng request không phải chờ flush.
 _memory: dict[tuple[str, str], int] = {}
 _memory_lock = threading.Lock()
+
+# Đếm lỗi liên tiếp: (recipe_slug, account_key) -> fail_count. Mirror để
+# request kế tiếp thấy ngay không chờ writer flush; DB giữ bền qua restart.
+_streak: dict[tuple[str, str], int] = {}
+_streak_lock = threading.Lock()
 
 
 def anon_key() -> str:
@@ -207,6 +218,7 @@ def mark_cooldown(
     account_key: str,
     cooldown_hours: float = DEFAULT_COOLDOWN_HOURS,
     reason: str = "",
+    conversation_url: str = "",
 ) -> int:
     """Ghi cooldown, trả về until_ms. Anon không khóa (trả 0)."""
     if is_anon_key(account_key) or not recipe_slug:
@@ -226,20 +238,36 @@ def mark_cooldown(
 
     db = store_mod.default()
     if db is not None:
-        db.submit(
-            "INSERT INTO account_cooldown(recipe_slug, account_key, until_ms, reason, updated_at)"
-            " VALUES (?, ?, ?, ?, ?)"
-            " ON CONFLICT(recipe_slug, account_key) DO UPDATE SET"
-            "   until_ms = MAX(account_cooldown.until_ms, excluded.until_ms),"
-            "   reason = excluded.reason, updated_at = excluded.updated_at",
-            (recipe_slug, account_key, until_ms, str(reason or "")[:500], now),
-        )
+        try:
+            db.submit(
+                "INSERT INTO account_cooldown(recipe_slug, account_key, until_ms, reason,"
+                " conversation_url, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(recipe_slug, account_key) DO UPDATE SET"
+                "   until_ms = MAX(account_cooldown.until_ms, excluded.until_ms),"
+                "   reason = excluded.reason, conversation_url = excluded.conversation_url,"
+                "   updated_at = excluded.updated_at",
+                (recipe_slug, account_key, until_ms, str(reason or "")[:500],
+                 str(conversation_url or "")[:2000], now),
+            )
+        except Exception:
+            db.submit(
+                "INSERT INTO account_cooldown(recipe_slug, account_key, until_ms, reason,"
+                " updated_at)"
+                " VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(recipe_slug, account_key) DO UPDATE SET"
+                "   until_ms = MAX(account_cooldown.until_ms, excluded.until_ms),"
+                "   reason = excluded.reason, updated_at = excluded.updated_at",
+                (recipe_slug, account_key, until_ms, str(reason or "")[:500], now),
+            )
     return until_ms
 
 
 def clear_cooldown(recipe_slug: str, account_key: str) -> None:
     with _memory_lock:
         _memory.pop((recipe_slug, account_key), None)
+    with _streak_lock:
+        _streak.pop((recipe_slug, account_key), None)
     from . import store as store_mod
 
     db = store_mod.default()
@@ -248,6 +276,145 @@ def clear_cooldown(recipe_slug: str, account_key: str) -> None:
             "DELETE FROM account_cooldown WHERE recipe_slug = ? AND account_key = ?",
             (recipe_slug, account_key),
         )
+        try:
+            db.submit(
+                "DELETE FROM account_failstreak WHERE recipe_slug = ? AND account_key = ?",
+                (recipe_slug, account_key),
+            )
+        except Exception:
+            pass
+
+
+def failstreak_count(recipe_slug: str, account_key: str) -> int:
+    """Số lỗi liên tiếp hiện tại (mirror trước, DB sau)."""
+    if is_anon_key(account_key) or not recipe_slug:
+        return 0
+    with _streak_lock:
+        if (recipe_slug, account_key) in _streak:
+            return int(_streak[(recipe_slug, account_key)])
+    from . import store as store_mod
+
+    db = store_mod.default()
+    if db is None:
+        return 0
+    try:
+        rows = db.query(
+            "SELECT fail_count FROM account_failstreak WHERE recipe_slug = ? AND account_key = ?",
+            (recipe_slug, account_key),
+        )
+    except Exception:
+        return 0
+    if not rows:
+        return 0
+    try:
+        count = int(rows[0]["fail_count"] or 0)
+    except (TypeError, ValueError):
+        return 0
+    with _streak_lock:
+        _streak[(recipe_slug, account_key)] = max(
+            _streak.get((recipe_slug, account_key), 0), count)
+    return count
+
+
+def record_account_success(recipe_slug: str, account_key: str) -> None:
+    """Request thành công → reset chuỗi lỗi liên tiếp về 0."""
+    if is_anon_key(account_key) or not recipe_slug:
+        return
+    with _streak_lock:
+        _streak.pop((recipe_slug, account_key), None)
+    from . import store as store_mod
+
+    db = store_mod.default()
+    if db is not None:
+        try:
+            db.submit(
+                "DELETE FROM account_failstreak WHERE recipe_slug = ? AND account_key = ?",
+                (recipe_slug, account_key),
+            )
+        except Exception:
+            pass
+
+
+def record_account_failure(
+    recipe_slug: str,
+    account_key: str,
+    error: str = "",
+    conversation_url: str = "",
+    threshold: int = FAILSTREAK_THRESHOLD,
+    cooldown_hours: float = FAILSTREAK_COOLDOWN_HOURS,
+) -> tuple[bool, int]:
+    """Ghi 1 lỗi của account; đủ ``threshold`` lỗi liên tiếp → khóa tạm.
+
+    Trả ``(locked, fail_count)``. Anon không bao giờ bị đếm/khóa.
+    Khóa xong reset chuỗi về 0 để mở khóa được thử lại từ đầu.
+    """
+    if is_anon_key(account_key) or not recipe_slug:
+        return False, 0
+    try:
+        limit = max(2, int(threshold))
+    except (TypeError, ValueError):
+        limit = FAILSTREAK_THRESHOLD
+    count = failstreak_count(recipe_slug, account_key) + 1
+    with _streak_lock:
+        _streak[(recipe_slug, account_key)] = count
+    now = _now_ms()
+    from . import store as store_mod
+
+    db = store_mod.default()
+    if db is not None:
+        try:
+            db.submit(
+                "INSERT INTO account_failstreak(recipe_slug, account_key, fail_count,"
+                " last_error, conversation_url, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(recipe_slug, account_key) DO UPDATE SET"
+                "   fail_count = excluded.fail_count,"
+                "   last_error = excluded.last_error,"
+                "   conversation_url = excluded.conversation_url,"
+                "   updated_at = excluded.updated_at",
+                (recipe_slug, account_key, count, str(error or "")[:500],
+                 str(conversation_url or "")[:2000], now),
+            )
+        except Exception:
+            pass
+    if count < limit:
+        return False, count
+    reason = str(error or "that bai lien tiep")[:200]
+    mark_cooldown(recipe_slug, account_key, cooldown_hours,
+                  f"that bai {count} lan lien tiep: {reason}",
+                  str(conversation_url or ""))
+    record_account_success(recipe_slug, account_key)
+    return True, count
+
+
+def get_failstreak(recipe_slug: str, account_key: str) -> dict | None:
+    """Chi tiết chuỗi lỗi (để UI/debug), None khi chưa từng lỗi."""
+    if is_anon_key(account_key) or not recipe_slug:
+        return None
+    from . import store as store_mod
+
+    db = store_mod.default()
+    if db is None:
+        return None
+    try:
+        rows = db.query(
+            "SELECT recipe_slug, account_key, fail_count, last_error, conversation_url,"
+            " updated_at FROM account_failstreak WHERE recipe_slug = ? AND account_key = ?",
+            (recipe_slug, account_key),
+        )
+    except Exception:
+        return None
+    if not rows:
+        return None
+    row = rows[0]
+    return {
+        "recipe_slug": str(row["recipe_slug"]),
+        "account_key": str(row["account_key"]),
+        "fail_count": int(row["fail_count"] or 0),
+        "last_error": str(row["last_error"] or ""),
+        "conversation_url": str(row["conversation_url"] or ""),
+        "updated_at": row["updated_at"],
+    }
 
 
 def list_cooldowns(recipe_slug: str = "") -> list[dict]:
@@ -263,22 +430,57 @@ def list_cooldowns(recipe_slug: str = "") -> list[dict]:
     try:
         if recipe_slug:
             rows = db.query(
-                "SELECT recipe_slug, account_key, until_ms, reason, updated_at"
-                " FROM account_cooldown WHERE recipe_slug = ? ORDER BY until_ms DESC",
+                "SELECT recipe_slug, account_key, until_ms, reason, conversation_url,"
+                " updated_at FROM account_cooldown WHERE recipe_slug = ?"
+                " ORDER BY until_ms DESC",
                 (recipe_slug,),
             )
         else:
             rows = db.query(
-                "SELECT recipe_slug, account_key, until_ms, reason, updated_at"
-                " FROM account_cooldown ORDER BY until_ms DESC",
+                "SELECT recipe_slug, account_key, until_ms, reason, conversation_url,"
+                " updated_at FROM account_cooldown ORDER BY until_ms DESC",
             )
     except Exception:
-        return []
-    out: list[dict] = []
+        try:
+            if recipe_slug:
+                rows = db.query(
+                    "SELECT recipe_slug, account_key, until_ms, reason, updated_at"
+                    " FROM account_cooldown WHERE recipe_slug = ? ORDER BY until_ms DESC",
+                    (recipe_slug,),
+                )
+            else:
+                rows = db.query(
+                    "SELECT recipe_slug, account_key, until_ms, reason, updated_at"
+                    " FROM account_cooldown ORDER BY until_ms DESC",
+                )
+        except Exception:
+            return []
+        out: list[dict] = []
+        for row in rows:
+            until_ms = int(row["until_ms"] or 0)
+            if until_ms <= now:
+                continue
+            out.append(
+                {
+                    "recipe_slug": str(row["recipe_slug"]),
+                    "account_key": str(row["account_key"]),
+                    "until_ms": until_ms,
+                    "retry_after": max(0, (until_ms - now) // 1000),
+                    "reason": str(row["reason"] or ""),
+                    "conversation_url": "",
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return out
+    out = []
     for row in rows:
         until_ms = int(row["until_ms"] or 0)
         if until_ms <= now:
             continue
+        try:
+            convo = str(row["conversation_url"] or "")
+        except (IndexError, KeyError):
+            convo = ""
         out.append(
             {
                 "recipe_slug": str(row["recipe_slug"]),
@@ -286,6 +488,7 @@ def list_cooldowns(recipe_slug: str = "") -> list[dict]:
                 "until_ms": until_ms,
                 "retry_after": max(0, (until_ms - now) // 1000),
                 "reason": str(row["reason"] or ""),
+                "conversation_url": convo,
                 "updated_at": row["updated_at"],
             }
         )
@@ -296,3 +499,5 @@ def reset_memory() -> None:
     """Xóa mirror in-memory (chỉ dùng trong test)."""
     with _memory_lock:
         _memory.clear()
+    with _streak_lock:
+        _streak.clear()

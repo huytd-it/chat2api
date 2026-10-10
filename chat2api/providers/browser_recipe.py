@@ -704,12 +704,59 @@ class BrowserRecipe(Provider):
     def _record_limit_hit(self, matched: str, assignment, flow: str = "text") -> AccountLimitExceeded:
         cfg = self._limit_cfg(flow)
         key = account_key_of(assignment)
-        until = limits.mark_cooldown(self.slug, key, cfg["cooldown_hours"], matched or "limit")
+        url = ""
+        try:
+            url = str(getattr(assignment, "conversation_url", None) or "")
+        except Exception:
+            url = ""
+        until = limits.mark_cooldown(self.slug, key, cfg["cooldown_hours"], matched or "limit", url)
+        # Account đã khóa riêng vì limit → reset chuỗi lỗi liên tiếp để mở khóa
+        # được thử lại từ đầu thay vì dính failstreak cũ.
+        try:
+            limits.record_account_success(self.slug, key)
+        except Exception:
+            pass
         import time as _time
         retry = max(0, (until - int(_time.time() * 1000)) // 1000) if until else 0
         return AccountLimitExceeded(
             account_key=key, matched=matched or "limit",
             retry_after=retry, recipe_slug=self.slug)
+
+    def _streak_cooldown_hours(self, flow: str = "text") -> float:
+        try:
+            return float(self._limit_cfg(flow)["cooldown_hours"])
+        except Exception:
+            return float(limits.FAILSTREAK_COOLDOWN_HOURS)
+
+    def _note_account_failure(self, assignment, flow: str, error: BaseException) -> None:
+        """Ghi 1 lỗi vào chuỗi failstreak; đủ 3 lần liên tiếp → khóa tạm 24h.
+
+        Limit/Trial/Cancel không tính ở đây (limit khóa ngay, trial là quota
+        dùng thử, cancel là client ngắt). Link hội thoại thất bại được giữ
+        trong cooldown để mở lại xem site đang hiện gì.
+        """
+        try:
+            key = account_key_of(assignment)
+            url = ""
+            try:
+                url = str(getattr(assignment, "conversation_url", None) or "")
+            except Exception:
+                url = ""
+            try:
+                hours = self._streak_cooldown_hours(flow)
+            except Exception:
+                hours = float(limits.FAILSTREAK_COOLDOWN_HOURS)
+            locked, count = limits.record_account_failure(
+                self.slug, key, f"{type(error).__name__}: {error}", url,
+                cooldown_hours=hours)
+            if locked:
+                applog.log(
+                    f"recipe: '{self.slug}' account {key or '?'} "
+                    f"thất bại {count} lần liên tiếp, khóa tạm 24h"
+                    f"{(' — mở lại xem: ' + url) if url else ''}",
+                    level="warn")
+        except Exception:
+            pass
 
     def _min_db_retry_after(self, rows: list[dict]) -> int:
         import time as _time
@@ -2038,6 +2085,55 @@ class BrowserRecipe(Provider):
         text, _ = await self._reply(page, flow)
         return text or ""
 
+    async def _dialog_limit_text(self, page) -> str:
+        """Text của modal/dialog chặn chat (nằm NGOÀI reply selector).
+
+        Ví dụ Kimi hết hạn/quá tải:
+        <div class="modal-container" data-testid="confirm-dialog">...
+        "Too many people are chatting with Kimi; ...". Poll reply-only sẽ
+        không bao giờ thấy nên phải đọc riêng. Trả "" khi không có dialog
+        hoặc trang đang điều hướng — không được ném lỗi.
+        """
+        try:
+            return str(await page.evaluate(
+                r"""() => {
+                  const sels = [
+                    '[data-testid="confirm-dialog"]',
+                    '.modal-container',
+                    '[role="dialog"]',
+                    '[role="alertdialog"]'
+                  ];
+                  const seen = new Set();
+                  const parts = [];
+                  for (const sel of sels) {
+                    let els;
+                    try { els = document.querySelectorAll(sel); }
+                    catch (e) { continue; }
+                    for (const el of els) {
+                      if (seen.has(el)) continue;
+                      seen.add(el);
+                      try {
+                        const t = el.innerText || el.textContent || "";
+                        if (t && t.trim()) parts.push(t.trim());
+                      } catch (e) {}
+                    }
+                  }
+                  return parts.join("\n").slice(0, 2000);
+                }""",
+            ) or "")
+        except Exception:
+            return ""
+
+    async def _check_dialog_limit(self, page, flow: str = "text"):
+        """Dialog có dính limit_patterns không → matched snippet, không thì None."""
+        compiled, _ = self._compiled_limit(flow)
+        if not compiled:
+            return None
+        text = await self._dialog_limit_text(page)
+        if not text:
+            return None
+        return limits.match_limit(text, compiled)
+
     async def _copy_button_ready(self, page, selector: str, scope: str,
                                  exclude: str, flow: str = "text") -> bool:
         """Nút Copy của câu trả lời CUỐI đã hiện và bấm được chưa.
@@ -2354,18 +2450,28 @@ class BrowserRecipe(Provider):
         if not owned:
             # Assignment của handler: chạy một lượt, dính limit thì ném để
             # handler retry (nó giữ header/session nên nó phải đổi assignment).
-            async for delta in self._run(prompt, model_id, assignment, headed,
-                                         self.flow_for_model(model_id), **extra):
-                yield delta
+            _flow = self.flow_for_model(model_id)
+            try:
+                async for delta in self._run(prompt, model_id, assignment, headed,
+                                             _flow, **extra):
+                    yield delta
+            except (AccountLimitExceeded, TrialLimitExceeded):
+                raise
+            except Exception as error:
+                self._note_account_failure(assignment, _flow, error)
+                raise
+            limits.record_account_success(self.slug, account_key_of(assignment))
             return
         assignment = await self.assign(target_account_id)
         tried: set[str] = {account_key_of(assignment)}
         try:
             while True:
+                _flow = self.flow_for_model(model_id)
                 try:
                     async for delta in self._run(prompt, model_id, assignment, headed,
-                                                 self.flow_for_model(model_id), **extra):
+                                                 _flow, **extra):
                         yield delta
+                    limits.record_account_success(self.slug, account_key_of(assignment))
                     break
                 except AccountLimitExceeded as exc:
                     applog.log(
@@ -2377,6 +2483,14 @@ class BrowserRecipe(Provider):
                     assignment.release()
                     assignment = await self.assign(target_account_id, exclude=tried)
                     tried.add(account_key_of(assignment))
+                except TrialLimitExceeded:
+                    raise
+                except Exception as error:
+                    # Lỗi thường (timeout/selector sập...): đếm failstreak,
+                    # đủ 3 lần liên tiếp tự khóa 24h. Không retry ngay trong
+                    # request này — request sau sẽ bỏ qua account đã khóa.
+                    self._note_account_failure(assignment, _flow, error)
+                    raise
         finally:
             assignment.release()
 
@@ -2481,6 +2595,10 @@ class BrowserRecipe(Provider):
                         _matched_early = limits.match_limit(text, _limit_compiled)
                         if _matched_early:
                             raise self._record_limit_hit(_matched_early, assignment, flow)
+                    if _limit_compiled:
+                        _matched_dialog = await self._check_dialog_limit(page, flow)
+                        if _matched_dialog:
+                            raise self._record_limit_hit(_matched_dialog, assignment, flow)
                     if text != last:
                         if (not use_copy_result and not structured_markdown and text.startswith(last)
                                 and text.strip() != prompt.strip()):
@@ -2523,6 +2641,10 @@ class BrowserRecipe(Provider):
                             _matched_done = limits.match_limit(last, _limit_compiled)
                             if _matched_done:
                                 raise self._record_limit_hit(_matched_done, assignment, flow)
+                            _matched_dialog_done = await self._check_dialog_limit(page, flow)
+                            if _matched_dialog_done:
+                                raise self._record_limit_hit(
+                                    _matched_dialog_done, assignment, flow)
                             if (_via_fallback and _limit_cfg["on_missing_copy"]
                                     and last.strip() and last.strip() != prompt.strip()):
                                 raise self._record_limit_hit(

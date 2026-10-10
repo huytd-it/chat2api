@@ -129,10 +129,24 @@ CREATE TABLE IF NOT EXISTS account_cooldown (
   account_key TEXT    NOT NULL,
   until_ms    INTEGER NOT NULL,
   reason      TEXT    NOT NULL DEFAULT '',
+  conversation_url TEXT NOT NULL DEFAULT '',
   updated_at  INTEGER NOT NULL,
   PRIMARY KEY (recipe_slug, account_key)
 );
 CREATE INDEX IF NOT EXISTS account_cooldown_by_recipe ON account_cooldown(recipe_slug, until_ms);
+
+-- Đếm lỗi liên tiếp theo từng account+recipe: 3 lỗi liên tiếp → khóa tạm 24h.
+-- Thành công reset về 0; khóa xong cũng reset để mở khóa được thử lại từ đầu.
+-- conversation_url giữ link hội thoại thất bại để mở lại xem site đang hiện gì.
+CREATE TABLE IF NOT EXISTS account_failstreak (
+  recipe_slug TEXT NOT NULL,
+  account_key TEXT NOT NULL,
+  fail_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  conversation_url TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (recipe_slug, account_key)
+);
 
 -- --------------------------------------------------------- recipe / model
 

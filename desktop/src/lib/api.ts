@@ -1380,6 +1380,7 @@ export interface AccountCooldown {
   until_ms: number;
   retry_after: number;
   reason: string;
+  conversation_url?: string;
   updated_at: number;
 }
 

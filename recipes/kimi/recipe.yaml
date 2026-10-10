@@ -8,6 +8,17 @@ response:
   last_message_selector: div.chat-content-item-assistant
   format: markdown
   capture_html: true
+  # Modal hết hạn / quá tải Kimi KHÔNG nằm trong reply mà là dialog riêng:
+  # <div class="modal-container" data-testid="confirm-dialog"> "Too many people
+  # are chatting with Kimi; a subscription will grant you priority access."
+  # Quota miễn phí hết: <span>Your free quota is used up. Refreshes at 10-27.</span>
+  # Dính pattern thì khóa tạm account này 24h rồi chuyển account khác cùng
+  # recipe (mỗi account 1 lần). Hết account → 429, không trả msg cảnh báo cho client.
+  limit_patterns:
+    - "Too many people are chatting with Kimi"
+    - "subscription will grant you priority access"
+    - "Your free quota is used up"
+  limit_cooldown_hours: 24
   done_signal:
     type: copy_button
     selector: .segment-assistant-actions-content .icon-button:first-child
