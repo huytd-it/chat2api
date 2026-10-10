@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
 from . import (account_limits, accounts, apikeys, applog, attachments, auth, errors, flows,  # noqa: F401  (import auth để đăng ký dependency)
-               profiles, sessions, settings, store)
+               profiles, sessions, settings, store, tailscale)
 from .browserpool import BrowserModeError, normalize_mode
 from .config import Config
 from .errors import OpenAIError
@@ -2686,6 +2686,47 @@ def register_admin(app: FastAPI, admin) -> None:
                 # Đã ghi xuống DB nhưng .env vẫn thắng: nói thẳng, đừng để người
                 # dùng tưởng đã đổi được.
                 "shadowed": settings.shadowed(clean)}
+
+    # ----------------------------------------------------------- tailscale
+
+    def _listen_port(request: Request) -> int:
+        # Cổng socket thật sự đang nghe — không tin header Host, vì request có
+        # thể đi vào qua chính forwarder của Tailscale.
+        server = request.scope.get("server") or (None, 0)
+        return int(server[1] or 0)
+
+    async def _tailscale_payload(request: Request, status: dict) -> dict:
+        keys = apikeys.cached()
+        if keys is None:
+            keys = await asyncio.to_thread(apikeys.active)
+        # false ⇒ server đang mở không cần key: mở ra tailnet là trao cả
+        # /admin cho mọi máy trong tailnet. UI dùng cờ này để cảnh báo.
+        return {**status, "auth_enforced": bool(keys or request.app.state.cfg.api_keys)}
+
+    @admin.get("/tailscale")
+    async def tailscale_status(request: Request):
+        status = await asyncio.to_thread(tailscale.status, _listen_port(request))
+        return await _tailscale_payload(request, status)
+
+    @admin.post("/tailscale")
+    async def tailscale_open(request: Request):
+        port = _listen_port(request)
+        try:
+            status = await asyncio.to_thread(tailscale.open_tcp, port)
+        except tailscale.TailscaleError as error:
+            raise OpenAIError(502, "tailscale_error", str(error))
+        applog.log(f"tailscale: mở TCP {port} ra tailnet ({', '.join(status['urls'])})", "warn")
+        return await _tailscale_payload(request, status)
+
+    @admin.delete("/tailscale")
+    async def tailscale_close(request: Request):
+        port = _listen_port(request)
+        try:
+            status = await asyncio.to_thread(tailscale.close_tcp, port)
+        except tailscale.TailscaleError as error:
+            raise OpenAIError(502, "tailscale_error", str(error))
+        applog.log(f"tailscale: đóng TCP {port}")
+        return await _tailscale_payload(request, status)
 
     # ------------------------------------------------------------- api key
 

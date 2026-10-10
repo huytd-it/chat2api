@@ -144,6 +144,12 @@ Các địa chỉ hữu ích:
 > [!NOTE]
 > CLI mặc định bind `0.0.0.0`. Ví dụ trên dùng `127.0.0.1` để chỉ mở API trên máy cục bộ.
 
+### Mở cho máy khác qua Tailscale
+
+Server bind `127.0.0.1` (kể cả sidecar của desktop app) vẫn gọi được từ máy khác trong tailnet: vào **Settings → Triển khai → Mở qua Tailscale** và bấm **Mở TCP**. App chạy `tailscale serve --bg --tcp <port> tcp://127.0.0.1:<port>`, rồi hiện Base URL dạng `http://<ip-tailscale>:<port>`.
+
+Qua API: `GET /admin/tailscale` (trạng thái), `POST` (mở), `DELETE` (đóng). Cấu hình gắn với số cổng, nên hãy ghim `CHAT2API_PORT`; và nên tạo API key trước khi mở, vì `/admin` cũng đi qua cổng này.
+
 ## Desktop app (Windows)
 
 Desktop app tự khởi động Python backend dạng sidecar, chọn cổng loopback rảnh và hiển thị log ngay trong giao diện.

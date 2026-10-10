@@ -10,12 +10,15 @@
     fetchModels,
     fetchProfiles,
     fetchSettings,
+    fetchTailscale,
     saveSettings,
+    setTailscaleTcp,
     type ApiKeyInfo,
     type ApiKeyList,
     type ModelInfo,
     type ProfileList,
     type SettingField,
+    type TailscaleStatus,
   } from "$lib/api";
   import { refreshModels, refreshRecipes } from "$lib/sync";
   import { Button } from "$lib/components/ui/button";
@@ -37,6 +40,7 @@
     Link,
     Repeat,
     Rocket,
+    ShareNetwork,
     ShieldCheck,
     Trash,
     UserCircle,
@@ -185,6 +189,58 @@
       showToast("Không chép được");
     }
   }
+
+  // ------------------------------------------------------------ Tailscale
+  // Sidecar chỉ nghe ở 127.0.0.1; `tailscale serve --tcp` chuyển tiếp cổng đó
+  // ra tailnet để máy khác gọi được mà không phải bind lại hay mở LAN.
+  let tailscale = $state<TailscaleStatus | null>(null);
+  let tailscaleLoading = $state(true);
+  let tailscaleBusy = $state(false);
+  let tailscaleError = $state("");
+
+  async function loadTailscale() {
+    tailscaleLoading = true;
+    tailscaleError = "";
+    try {
+      tailscale = await fetchTailscale($apiKey);
+    } catch (e) {
+      tailscale = null;
+      tailscaleError = "Không đọc được trạng thái Tailscale: " + (e as Error).message;
+    } finally {
+      tailscaleLoading = false;
+    }
+  }
+
+  async function toggleTailscale(open: boolean) {
+    tailscaleBusy = true;
+    tailscaleError = "";
+    try {
+      tailscale = await setTailscaleTcp($apiKey, open);
+      showToast(open ? `Đã mở TCP ${tailscale.port} ra tailnet` : `Đã đóng TCP ${tailscale.port}`);
+    } catch (e) {
+      tailscaleError = (e as Error).message;
+      showToast(tailscaleError);
+    } finally {
+      tailscaleBusy = false;
+    }
+  }
+
+  async function copyTailscaleUrl(url: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+      showToast("Đã chép Base URL Tailscale");
+    } catch {
+      showToast("Không chép được");
+    }
+  }
+
+  // Đổi Base URL của các đoạn code mẫu phía trên sang địa chỉ tailnet.
+  function useTailscaleUrl(url: string) {
+    deployBaseUrl = url;
+    showToast("Các đoạn code mẫu đã dùng Base URL Tailscale");
+  }
+
+  onMount(loadTailscale);
 
   const reloadGroups = $derived([...new Set(fields.filter((f) => f.apply !== "restart").map((f) => f.group))]);
   const restartGroups = $derived([...new Set(fields.filter((f) => f.apply === "restart").map((f) => f.group))]);
@@ -510,6 +566,7 @@
 
       <!-- Deploy config for clients -->
       <Tabs.Content value="deploy" class="mt-3">
+        <div class="flex flex-col gap-4">
         <Card.Root aria-labelledby="deploy-title">
           <Card.Header class="border-b">
             <div class="flex items-start gap-3">
@@ -623,6 +680,100 @@
             </div>
           </Card.Content>
         </Card.Root>
+
+        <Card.Root aria-labelledby="tailscale-title">
+          <Card.Header class="flex-row items-center justify-between gap-4 border-b">
+            <div class="flex items-start gap-3">
+              <div class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <ShareNetwork size={19} aria-hidden="true" />
+              </div>
+              <div>
+                <Card.Title id="tailscale-title" class="flex items-center gap-2">
+                  Mở qua Tailscale
+                  {#if tailscale?.open}<Badge variant="secondary">Đang mở</Badge>{/if}
+                </Card.Title>
+                <Card.Description>
+                  Chuyển tiếp TCP cổng
+                  {#if tailscale}<span class="font-data">{tailscale.port}</span>{/if}
+                  của server ra tailnet để máy khác gọi được — không mở ra LAN hay internet.
+                </Card.Description>
+              </div>
+            </div>
+            <Button variant="ghost" size="sm" disabled={tailscaleLoading || tailscaleBusy} onclick={loadTailscale}>
+              <Repeat class={tailscaleLoading ? "animate-spin" : ""} />
+              Làm mới
+            </Button>
+          </Card.Header>
+          <Card.Content class="grid gap-4 p-4 sm:p-6">
+            {#if tailscaleError}
+              <div class="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive" role="alert">
+                <WarningCircle class="mt-0.5 shrink-0" />
+                <span>{tailscaleError}</span>
+              </div>
+            {/if}
+            {#if tailscaleLoading && !tailscale}
+              <Skeleton class="h-8 w-full sm:w-72" />
+            {:else if tailscale}
+              {#if !tailscale.installed}
+                <p class="text-sm text-muted-foreground">
+                  Máy này chưa cài Tailscale (không tìm thấy lệnh <span class="font-data">tailscale</span>).
+                </p>
+              {:else if !tailscale.running}
+                <p class="text-sm text-muted-foreground">
+                  Tailscale chưa kết nối{tailscale.state ? ` (trạng thái: ${tailscale.state})` : ""}.
+                  {tailscale.error}
+                </p>
+              {:else}
+                {#if !tailscale.auth_enforced}
+                  <div class="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning" role="status">
+                    <Warning class="mt-0.5 shrink-0" />
+                    <span>
+                      Server chưa đặt API key nào — mở ra tailnet thì mọi máy trong tailnet gọi được cả
+                      <span class="font-data">/v1</span> lẫn <span class="font-data">/admin</span>.
+                      Tạo key ở tab API keys trước.
+                    </span>
+                  </div>
+                {/if}
+                {#if tailscale.error}
+                  <p class="text-sm text-destructive">{tailscale.error}</p>
+                {/if}
+                {#if tailscale.open}
+                  <div class="grid gap-2">
+                    {#each tailscale.urls as url (url)}
+                      <div class="flex gap-1.5">
+                        <Input readonly class="font-data" value={url} aria-label="Base URL Tailscale" />
+                        <Button variant="outline" size="icon-sm" aria-label="Chép Base URL Tailscale" onclick={() => copyTailscaleUrl(url)}>
+                          <Copy />
+                        </Button>
+                        <Button variant="outline" size="sm" disabled={deployBaseUrl === url} onclick={() => useTailscaleUrl(url)}>
+                          Dùng cho code mẫu
+                        </Button>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+                <div class="flex flex-wrap items-center gap-3">
+                  {#if tailscale.open}
+                    <Button variant="outline" disabled={tailscaleBusy} onclick={() => toggleTailscale(false)}>
+                      {#if tailscaleBusy}<CircleNotch class="animate-spin" />{/if}
+                      Đóng TCP
+                    </Button>
+                  {:else}
+                    <Button disabled={tailscaleBusy} onclick={() => toggleTailscale(true)}>
+                      {#if tailscaleBusy}<CircleNotch class="animate-spin" />{/if}
+                      Mở TCP {tailscale.port}
+                    </Button>
+                  {/if}
+                  <p class="text-xs text-muted-foreground">
+                    Cấu hình gắn với số cổng và tồn tại qua lần khởi động lại — ghim
+                    <span class="font-data">CHAT2API_PORT</span> trong .env để cổng không đổi.
+                  </p>
+                </div>
+              {/if}
+            {/if}
+          </Card.Content>
+        </Card.Root>
+        </div>
       </Tabs.Content>
 
       <!-- Runtime / general settings -->

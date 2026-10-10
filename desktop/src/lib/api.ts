@@ -1132,6 +1132,39 @@ export async function saveSettings(
   return asJson(r);
 }
 
+export type TailscaleStatus = {
+  installed: boolean;
+  running: boolean;
+  state: string;
+  port: number;
+  /** Forwarder TCP của cổng này đang bật. */
+  open: boolean;
+  target: string;
+  ips: string[];
+  dns_name: string;
+  /** Base URL mà máy khác trong tailnet dùng được khi `open`. */
+  urls: string[];
+  error: string;
+  /** false ⇒ server không đòi key: mở ra tailnet là mở luôn /admin. */
+  auth_enforced: boolean;
+};
+
+export async function fetchTailscale(key: string): Promise<TailscaleStatus> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/tailscale", { headers: headers(key) });
+  return asJson(r);
+}
+
+/** Bật/tắt `tailscale serve --tcp` cho cổng server đang nghe. */
+export async function setTailscaleTcp(key: string, open: boolean): Promise<TailscaleStatus> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/tailscale", {
+    method: open ? "POST" : "DELETE",
+    headers: headers(key),
+  });
+  return asJson(r);
+}
+
 export async function fetchApiKeys(key: string): Promise<ApiKeyList> {
   const base = await apiBase();
   const r = await fetch(base + "/admin/api-keys", { headers: headers(key) });
