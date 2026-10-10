@@ -587,6 +587,22 @@ curl -X POST http://127.0.0.1:8100/admin/profiles/main/clone \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{"name":"main-test","scrapling_mode":"stealthy"}'
 
+# Mang sang MÁY KHÁC: xuất gói JSON (cấu hình + account + cookie/localStorage/
+# IndexedDB đọc qua browser). Copy thư mục Chromium không dùng được ở máy khác
+# vì cookie bị mã hoá theo máy. File chứa phiên đăng nhập — giữ kín như mật khẩu.
+curl -X POST http://127.0.0.1:8100/admin/profiles/main/export \
+  -H "Authorization: Bearer $ADMIN" -o main.chat2api-profile.json
+
+# Ở máy đích: nhập từ file (name tuỳ chọn, bỏ trống giữ tên gốc)...
+jq '{bundle: ., name: "main-pc1"}' main.chat2api-profile.json | \
+  curl -X POST http://127.0.0.1:8100/admin/profiles/import \
+  -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" -d @-
+
+# ...hoặc để máy đích tự kéo thẳng từ chat2api của máy nguồn
+curl -X POST http://127.0.0.1:8100/admin/profiles/import \
+  -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"remote_url":"192.168.1.5:8100","remote_api_key":"<key máy nguồn>","remote_profile":"main"}'
+
 # Xoá (?purge=true xoá luôn thư mục Chromium; 409 nếu recipe còn dựa vào)
 curl -X DELETE "http://127.0.0.1:8100/admin/profiles/main-test?purge=false" \
   -H "Authorization: Bearer $ADMIN"

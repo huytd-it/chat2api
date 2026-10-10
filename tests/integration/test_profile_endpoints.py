@@ -5,6 +5,8 @@ Không mở Chromium thật ở đây — phần mở browser đã có test riê
 đường quét cookie của một profile đang mở (context giả).
 """
 
+import json
+
 import pytest
 import yaml
 from httpx import ASGITransport, AsyncClient
@@ -359,3 +361,181 @@ async def test_rename_is_refused_instead_of_ignored(client):
     # Gửi lại đúng tên cũ thì không sao — UI có thể echo nguyên hàng về.
     same = await c.patch(f"/admin/profiles/{created['id']}", json={"name": "main", "max_tabs": 3})
     assert same.status_code == 200 and same.json()["max_tabs"] == 3
+
+
+# ------------------------------------------- mang profile sang máy khác
+
+STATE = {
+    "cookies": [{"name": "session-id", "value": "abc", "domain": ".chat.qwen.ai", "path": "/"}],
+    "origins": [{"origin": "https://chat.qwen.ai",
+                 "localStorage": [{"name": "token", "value": "t"}]}],
+}
+
+
+class ExportContext:
+    """Context giả trả về storage_state, như browser thật đã giải mã cookie."""
+
+    async def storage_state(self, **kwargs):
+        return STATE
+
+
+async def _exported(c, app, name="main"):
+    source = (await _create(c, name, scrapling_mode="stealthy", max_tabs=6)).json()
+    await c.post(f"/admin/profiles/{source['id']}/accounts",
+                 json={"domain": "chat.qwen.ai", "label": "codex1"})
+    app.state.pool.open_context = lambda _name: ExportContext()
+    response = await c.post(f"/admin/profiles/{source['id']}/export")
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def test_export_bundles_settings_accounts_and_decrypted_logins(client):
+    c, app, db, cfg = client
+    bundle = await _exported(c, app)
+
+    assert bundle["format"] == "chat2api-profile" and bundle["version"] == 1
+    assert bundle["profile"]["name"] == "main"
+    assert bundle["profile"]["scrapling_mode"] == "stealthy" and bundle["profile"]["max_tabs"] == 6
+    assert [(a["host"], a["label"]) for a in bundle["accounts"]] == [("chat.qwen.ai", "codex1")]
+    assert bundle["storage_state"] == STATE
+    # Đường dẫn thư mục và cờ mặc định là chuyện của máy nguồn.
+    assert "user_data_dir" not in bundle["profile"] and "is_default" not in bundle["profile"]
+
+
+async def test_export_opens_a_closed_profile_headless_then_closes_it(client, monkeypatch):
+    c, app, db, cfg = client
+    source = (await _create(c, "main", headless=False)).json()
+    opened, dropped = [], []
+
+    async def fake_context_for_profile(profile):
+        opened.append((profile.name, profile.headless))
+        return ExportContext()
+
+    async def fake_drop(name):
+        dropped.append(name)
+        return True
+
+    monkeypatch.setattr(app.state.pool, "context_for_profile", fake_context_for_profile)
+    monkeypatch.setattr(app.state.pool, "drop_profile", fake_drop)
+
+    response = await c.post(f"/admin/profiles/{source['id']}/export")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["storage_state"] == STATE
+    # Không bật cửa sổ lên chỉ để đọc cookie, và không để lại Chromium treo.
+    assert opened == [("main", True)] and dropped == ["main"]
+
+
+async def test_export_of_a_fetcher_profile_falls_back_to_unseeded_state(client):
+    """fetcher không mở được browser: gói vẫn mang theo state còn chờ seed."""
+    c, app, db, cfg = client
+    bundle = await _exported(c, app)
+    imported = (await c.post("/admin/profiles/import",
+                             json={"bundle": bundle, "name": "http-only"})).json()
+    await c.patch(f"/admin/profiles/{imported['id']}", json={"scrapling_mode": "fetcher"})
+    app.state.pool.open_context = lambda _name: None
+
+    response = await c.post(f"/admin/profiles/{imported['id']}/export")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["storage_state"] == STATE
+
+
+async def test_import_recreates_the_profile_and_queues_the_logins(client):
+    c, app, db, cfg = client
+    bundle = await _exported(c, app)
+
+    response = await c.post("/admin/profiles/import", json={"bundle": bundle, "name": "from-pc1"})
+
+    assert response.status_code == 200, response.text
+    created = response.json()
+    assert created["name"] == "from-pc1" and created["scrapling_mode"] == "stealthy"
+    assert created["max_tabs"] == 6 and created["is_default"] == 0
+    assert created["imported"] == {"accounts": 1, "cookies": 1, "origins": 1}
+    # Thư mục nằm dưới profiles_dir của MÁY NÀY, không phải đường dẫn máy nguồn.
+    assert created["user_data_dir"] == str(cfg.profiles_dir / "from-pc1")
+    seed = cfg.profiles_dir / "from-pc1" / "chat2api-import-state.json"
+    assert json.loads(seed.read_text(encoding="utf-8")) == STATE
+
+    listing = {p["name"]: p for p in (await c.get("/admin/profiles")).json()["profiles"]}
+    assert [(a["host"], a["label"]) for a in listing["from-pc1"]["accounts"]] == \
+        [("chat.qwen.ai", "codex1")]
+
+
+async def test_import_keeps_the_original_name_and_becomes_default_on_an_empty_machine(client):
+    c, app, db, cfg = client
+    bundle = await _exported(c, app)
+    source_id = (await c.get("/admin/profiles")).json()["profiles"][0]["id"]
+    assert (await c.delete(f"/admin/profiles/{source_id}?purge=true")).status_code == 200
+
+    created = (await c.post("/admin/profiles/import", json={"bundle": bundle})).json()
+
+    assert created["name"] == "main" and created["is_default"] == 1
+
+
+async def test_import_rejects_a_taken_name_and_foreign_files(client):
+    c, app, db, cfg = client
+    bundle = await _exported(c, app)
+
+    taken = await c.post("/admin/profiles/import", json={"bundle": bundle})
+    assert taken.status_code == 400 and taken.json()["error"]["code"] == "invalid_profile"
+
+    foreign = await c.post("/admin/profiles/import", json={"bundle": {"cookies": []}, "name": "x"})
+    assert foreign.status_code == 400
+    newer = await c.post("/admin/profiles/import",
+                         json={"bundle": {**bundle, "version": 99}, "name": "x"})
+    assert newer.status_code == 400
+    assert not (cfg.profiles_dir / "x").exists()
+
+    empty = await c.post("/admin/profiles/import", json={})
+    assert empty.status_code == 400 and empty.json()["error"]["code"] == "invalid_import"
+
+
+async def test_import_skips_malformed_accounts(client):
+    c, app, db, cfg = client
+    bundle = await _exported(c, app)
+    bundle["accounts"].append({"host": "../evil", "label": "x"})
+
+    created = (await c.post("/admin/profiles/import",
+                            json={"bundle": bundle, "name": "copy"})).json()
+
+    assert created["imported"]["accounts"] == 1
+
+
+async def test_import_pulls_straight_from_another_machine(client, monkeypatch):
+    c, app, db, cfg = client
+    bundle = await _exported(c, app)
+    calls = []
+
+    async def fake_remote(method, base_url, api_key, path):
+        calls.append((method, base_url, api_key, path))
+        if path == "/admin/profiles":
+            return {"profiles": [{"name": "main", "scrapling_mode": "stealthy", "id": 7,
+                                  "user_data_dir": "C:/secret",
+                                  "accounts": [{"host": "chat.qwen.ai", "label": "codex1"}]}]}
+        return bundle
+
+    monkeypatch.setattr("chat2api.main._remote_json", fake_remote)
+
+    listing = await c.post("/admin/profiles/remote-list",
+                           json={"remote_url": "192.168.1.5:8100", "remote_api_key": "k"})
+    assert listing.json()["profiles"] == [{
+        "name": "main", "scrapling_mode": "stealthy",
+        "accounts": [{"host": "chat.qwen.ai", "label": "codex1"}]}]
+
+    response = await c.post("/admin/profiles/import", json={
+        "remote_url": "192.168.1.5:8100", "remote_api_key": "k",
+        "remote_profile": "main", "name": "pc1-main"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["name"] == "pc1-main"
+    assert calls[-1] == ("POST", "192.168.1.5:8100", "k", "/admin/profiles/main/export")
+    assert (cfg.profiles_dir / "pc1-main" / "chat2api-import-state.json").is_file()
+
+
+async def test_unreachable_remote_is_reported_as_a_gateway_error(client):
+    c, *_ = client
+    response = await c.post("/admin/profiles/remote-list",
+                            json={"remote_url": "http://127.0.0.1:9", "remote_api_key": ""})
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "remote_unreachable"

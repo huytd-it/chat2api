@@ -346,6 +346,7 @@ class BrowserPool:
         """
         from . import profiles as profiles_mod
 
+        await self._seed_imported(profile, ctx)
         pending = await asyncio.to_thread(profiles_mod.pending_seeds, profile.id)
         for account_id, path in pending:
             try:
@@ -376,6 +377,47 @@ class BrowserPool:
             except Exception as error:
                 logger.warning("seed profile '%s' từ %s thất bại: %s",
                                profile.name, path, error)
+
+    async def _seed_imported(self, profile, ctx) -> None:
+        """Đổ state của gói nhập từ máy khác vào profile, đúng một lần.
+
+        `set_storage_state` khôi phục cả IndexedDB và không cần mạng; nó xoá
+        state cũ trước khi ghi, vô hại vì profile vừa nhập còn trống. Context
+        không có hàm đó thì lui về cookie + localStorage. Thất bại thì giữ file
+        lại để lần mở sau thử tiếp.
+        """
+        from . import profiles as profiles_mod
+
+        path = profiles_mod.import_seed_path(profile.user_data_dir)
+        if not await asyncio.to_thread(path.is_file):
+            return
+        try:
+            state = json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
+            try:
+                await ctx.set_storage_state(state)
+            except Exception as error:
+                logger.info("seed profile '%s': set_storage_state không dùng được (%s), "
+                            "nạp cookie + localStorage", profile.name, error)
+                cookies = state.get("cookies") or []
+                if cookies:
+                    await ctx.add_cookies(cookies)
+                for origin in state.get("origins") or []:
+                    items = origin.get("localStorage") or []
+                    if not items:
+                        continue
+                    page = await ctx.new_page()
+                    try:
+                        await page.goto(origin["origin"], wait_until="domcontentloaded",
+                                        timeout=20000)
+                        await page.evaluate(
+                            "(items) => { for (const it of items)"
+                            " localStorage.setItem(it.name, it.value); }", items)
+                    finally:
+                        await page.close()
+            await asyncio.to_thread(path.unlink)
+            logger.info("seed profile '%s' từ gói nhập", profile.name)
+        except Exception as error:
+            logger.warning("seed profile '%s' từ gói nhập thất bại: %s", profile.name, error)
 
     async def page_for(self, profile, slug: str):
         """Tab dài hạn cho một cặp (profile, recipe).

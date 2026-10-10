@@ -138,6 +138,37 @@ async def run_recipe_trial(cfg: Config, pool, recipe: dict, headed: bool,
     return await run_trial(cfg, pool, recipe, headed, flow, prompt, model_id)
 
 
+async def _remote_json(method: str, base_url: str, api_key: str, path: str) -> dict:
+    """Gọi admin API của một chat2api ở máy khác (đường kéo profile qua mạng)."""
+    import httpx
+
+    base = base_url.strip().rstrip("/")
+    if not base:
+        raise OpenAIError(400, "invalid_remote", "Thiếu địa chỉ máy nguồn")
+    if not base.startswith(("http://", "https://")):
+        base = "http://" + base
+    headers = {"Authorization": f"Bearer {api_key.strip()}"} if api_key.strip() else {}
+    try:
+        # Xuất profile phải mở browser ở máy nguồn nên chờ lâu hơn một request thường.
+        async with httpx.AsyncClient(timeout=180) as client:
+            response = await client.request(method, base + path, headers=headers)
+    except httpx.HTTPError as error:
+        raise OpenAIError(502, "remote_unreachable",
+                          f"Không kết nối được máy nguồn {base}: {error or type(error).__name__}")
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if response.status_code != 200 or not isinstance(data, dict):
+        detail = ""
+        if isinstance(data, dict) and isinstance(data.get("error"), dict):
+            detail = str(data["error"].get("message") or "")
+        raise OpenAIError(502, "remote_error",
+                          f"Máy nguồn {base} trả lỗi {response.status_code}"
+                          + (f": {detail}" if detail else ""))
+    return data
+
+
 def create_app(cfg: Config) -> FastAPI:
     from . import router as router_mod  # trigger LOADERS registration
     from .browserpool import BrowserPool
@@ -883,6 +914,7 @@ def register_admin(app: FastAPI, admin) -> None:
                            ComboCreateRequest, ComboUpdateRequest, IntegrateRequest,
                            OpenAIProviderCreateRequest, OpenAIProviderUpdateRequest,
                            ProfileAccountRequest, ProfileCloneRequest, ProfileCreateRequest,
+                           ProfileImportRequest, ProfileRemoteListRequest,
                            ProfileOpenRequest, ProfileUpdateRequest, RecipeAnalyzeRequest,
                            RecipeManualSpec, RecordRequest, RecordSegmentRequest,
                            RecipeModelDiscoveryRequest, RecipeReanalyzeRequest,
@@ -1314,6 +1346,96 @@ def register_admin(app: FastAPI, admin) -> None:
             _need_store()
             raise OpenAIError(404, "not_found", f"Profile '{ident}' không tồn tại")
         applog.log(f"profile: nhân bản '{row['name']}' -> '{created['name']}'")
+        return created
+
+    async def _capture_state(request: Request, row: dict) -> dict:
+        """storage_state của một profile, đọc từ chính browser của nó.
+
+        Profile đang mở thì đọc luôn; chưa mở thì mở ẩn, đọc xong đóng lại. Phải
+        qua browser vì cookie trong `user_data_dir` bị mã hoá theo máy.
+        """
+        from dataclasses import replace
+
+        cfg = request.app.state.cfg
+        pool_ = request.app.state.pool
+        name = row["name"]
+        ctx = pool_.open_context(name)
+        opened_here = False
+        if ctx is None:
+            profile = await asyncio.to_thread(profiles.ensure_profile, name, cfg.profiles_dir)
+            try:
+                ctx = await pool_.context_for_profile(replace(profile, headless=True))
+            except BrowserModeError:
+                # `fetcher` không có browser: thứ nó có chỉ là state chờ seed.
+                return await asyncio.to_thread(profiles.unseeded_state, row["id"])
+            except profiles.ProfileLocked as error:
+                raise OpenAIError(409, "profile_locked", str(error))
+            except Exception as error:
+                raise OpenAIError(500, "export_failed",
+                                  f"Không mở được profile '{name}' để đọc đăng nhập: {error}")
+            opened_here = True
+        try:
+            try:
+                return await ctx.storage_state(indexed_db=True)
+            except TypeError:
+                return await ctx.storage_state()
+        except Exception as error:
+            raise OpenAIError(500, "export_failed",
+                              f"Không đọc được đăng nhập của profile '{name}': {error}")
+        finally:
+            # Chỉ đóng thứ chính mình mở, và chỉ khi chưa có request nào chen vào dùng.
+            if opened_here and not pool_.profile_busy(name):
+                await pool_.drop_profile(name)
+
+    @admin.post("/profiles/{ident}/export")
+    async def profile_export(ident: str, request: Request):
+        """Gói profile mang sang máy khác: cấu hình + account + đăng nhập.
+
+        Kết quả chứa cookie phiên ở dạng đọc được — ai cầm file là vào được các
+        tài khoản đó, nên chỉ trả qua admin API và không ghi ra đĩa ở server.
+        """
+        row = await _profile_or_404(ident)
+        bundle = await asyncio.to_thread(profiles.export_bundle, row["id"])
+        bundle["storage_state"] = await _capture_state(request, row)
+        applog.log(f"profile: xuất '{row['name']}' ({len(bundle['accounts'])} account, "
+                   f"{len(bundle['storage_state'].get('cookies') or [])} cookie)", "warn")
+        return bundle
+
+    @admin.post("/profiles/remote-list")
+    async def profile_remote_list(body: ProfileRemoteListRequest):
+        """Profile đang có ở một chat2api khác — để chọn cái cần kéo về."""
+        data = await _remote_json("GET", body.remote_url, body.remote_api_key, "/admin/profiles")
+        return {"profiles": [
+            {"name": item.get("name"), "scrapling_mode": item.get("scrapling_mode"),
+             "accounts": [{"host": a.get("host"), "label": a.get("label")}
+                          for a in item.get("accounts") or [] if isinstance(a, dict)]}
+            for item in data.get("profiles") or [] if isinstance(item, dict)]}
+
+    @admin.post("/profiles/import")
+    async def profile_import(body: ProfileImportRequest, request: Request):
+        """Nhập profile từ file đã xuất, hoặc kéo thẳng từ chat2api ở máy khác."""
+        _need_store()
+        bundle = body.bundle
+        origin = "file"
+        if bundle is None:
+            remote_profile = body.remote_profile.strip()
+            if not remote_profile:
+                raise OpenAIError(400, "invalid_import",
+                                  "Cần file profile đã xuất, hoặc địa chỉ máy nguồn kèm tên profile.")
+            from urllib.parse import quote
+
+            bundle = await _remote_json(
+                "POST", body.remote_url, body.remote_api_key,
+                f"/admin/profiles/{quote(remote_profile, safe='')}/export")
+            origin = body.remote_url.strip()
+        try:
+            created = await asyncio.to_thread(
+                profiles.import_bundle, bundle, request.app.state.cfg.profiles_dir, body.name)
+        except ValueError as error:
+            raise OpenAIError(400, "invalid_profile", str(error))
+        info = created["imported"]
+        applog.log(f"profile: nhập '{created['name']}' từ {origin} "
+                   f"({info['accounts']} account, {info['cookies']} cookie)")
         return created
 
     @admin.patch("/profiles/{ident}")

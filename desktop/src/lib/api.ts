@@ -1291,6 +1291,69 @@ export async function cloneProfile(
   return asJson(r);
 }
 
+/** Gói profile mang sang máy khác: cấu hình + account + đăng nhập (cookie đã
+ * giải mã, localStorage, IndexedDB). Copy thư mục Chromium thì không dùng được
+ * ở máy khác vì cookie bị mã hoá theo máy. File này mở được mọi tài khoản bên
+ * trong — coi nó như mật khẩu. */
+export interface ProfileBundle {
+  format: string;
+  version: number;
+  profile: { name: string } & Record<string, unknown>;
+  accounts: { host: string; label: string }[];
+  storage_state: { cookies?: unknown[]; origins?: unknown[] } | null;
+}
+
+export interface RemoteProfile {
+  name: string;
+  scrapling_mode: string;
+  accounts: { host: string; label: string }[];
+}
+
+export type ImportedProfile = ProfileInfo & {
+  imported: { accounts: number; cookies: number; origins: number };
+};
+
+/** Server mở profile ẩn (nếu chưa mở) để đọc đăng nhập, nên có thể mất vài giây. */
+export async function exportProfile(key: string, ident: string | number): Promise<ProfileBundle> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/profiles/" + encodeURIComponent(String(ident)) + "/export", {
+    method: "POST",
+    headers: headers(key),
+  });
+  return asJson(r);
+}
+
+/** Nhập từ file đã xuất (`bundle`) hoặc để server kéo thẳng từ chat2api ở máy
+ * khác (`remote`). `name` bỏ trống thì giữ tên gốc; trùng tên server trả 400. */
+export async function importProfile(
+  key: string,
+  source: { bundle: ProfileBundle } | { remote: { url: string; apiKey: string; profile: string } },
+  name = "",
+): Promise<ImportedProfile> {
+  const base = await apiBase();
+  const body: Record<string, unknown> = name ? { name } : {};
+  if ("bundle" in source) body.bundle = source.bundle;
+  else Object.assign(body, { remote_url: source.remote.url, remote_api_key: source.remote.apiKey, remote_profile: source.remote.profile });
+  const r = await fetch(base + "/admin/profiles/import", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify(body),
+  });
+  return asJson(r);
+}
+
+/** Danh sách profile ở một chat2api khác. Gọi qua server của máy này chứ không
+ * fetch thẳng: CSP của app chỉ cho nối tới localhost. */
+export async function fetchRemoteProfiles(key: string, url: string, remoteKey: string): Promise<RemoteProfile[]> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/profiles/remote-list", {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify({ remote_url: url, remote_api_key: remoteKey }),
+  });
+  return (await asJson(r)).profiles;
+}
+
 /** Xoá profile. Server từ chối (409) khi còn recipe dựa vào nó. `purge` xoá
  * luôn thư mục Chromium — mọi đăng nhập trong profile mất theo. */
 export async function deleteProfile(

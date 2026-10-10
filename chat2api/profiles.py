@@ -485,6 +485,159 @@ def clone(source_id: int, name: str, profiles_dir: Path,
     return get_by_id(new_id)
 
 
+# ------------------------------------------- mang profile sang máy khác
+#
+# Copy nguyên `user_data_dir` sang máy khác KHÔNG mang theo đăng nhập: Chromium
+# mã hoá cookie bằng khoá gắn với tài khoản hệ điều hành (DPAPI trên Windows,
+# Keychain trên macOS), sang máy khác là không giải mã được. Vì vậy gói xuất
+# dùng `storage_state` do chính browser đọc ra (cookie đã giải mã + localStorage
+# + IndexedDB) — chạy được trên mọi máy, mọi hệ điều hành, và nhẹ hơn nhiều.
+
+BUNDLE_FORMAT = "chat2api-profile"
+BUNDLE_VERSION = 1
+# State của gói nhập nằm chờ ngay trong user_data_dir; lần mở đầu tiên pool đổ
+# nó vào browser rồi xoá (xem `BrowserPool._seed_profile`).
+SEED_FILENAME = "chat2api-import-state.json"
+_ACCOUNT_FIELDS = ("label", "display_name", "plan", "status", "quota",
+                   "cookie_expires_at", "disabled")
+
+
+def import_seed_path(user_data_dir: str | Path) -> Path:
+    return Path(user_data_dir) / SEED_FILENAME
+
+
+def export_bundle(profile_id: int) -> dict | None:
+    """Gói mô tả profile + account, chưa có `storage_state` (người gọi tự điền).
+
+    Không mang theo `is_default`, khoá pid hay bộ đếm `used_*`: đó là trạng thái
+    của máy nguồn, máy đích bắt đầu lại từ đầu.
+    """
+    row = get_by_id(profile_id)
+    if row is None:
+        return None
+    rows = store.default().query(
+        f"SELECT d.host, {', '.join('a.' + f for f in _ACCOUNT_FIELDS)} FROM account a "
+        " JOIN domain d ON d.id = a.domain_id "
+        "WHERE a.profile_id = ? ORDER BY d.host, a.label", (int(profile_id),))
+    return {
+        "format": BUNDLE_FORMAT,
+        "version": BUNDLE_VERSION,
+        "exported_at": store.now_ms(),
+        "profile": {"name": row["name"], **{key: row[key] for key in EDITABLE}},
+        "accounts": [dict(item) for item in rows],
+        "storage_state": None,
+    }
+
+
+def unseeded_state(profile_id: int) -> dict:
+    """State còn nằm trên đĩa, chưa đổ vào browser, gộp lại thành một.
+
+    Đường lui của export khi profile không mở được browser (chế độ `fetcher`):
+    thứ duy nhất nó có là các file storage_state chờ seed.
+    """
+    import json
+
+    row = get_by_id(profile_id)
+    paths = [path for _, path in pending_seeds(profile_id)]
+    if row is not None and row["user_data_dir"]:
+        paths.append(import_seed_path(row["user_data_dir"]))
+    cookies: list = []
+    origins: list = []
+    for path in paths:
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        cookies.extend(state.get("cookies") or [])
+        origins.extend(state.get("origins") or [])
+    return {"cookies": cookies, "origins": origins}
+
+
+def import_bundle(bundle: dict, profiles_dir: Path, name: str | None = None) -> dict:
+    """Dựng lại profile từ gói của `export_bundle`. Ném ValueError khi gói hỏng.
+
+    `name` đổi tên profile ở máy đích (mặc định giữ tên gốc). Đăng nhập chưa vào
+    browser ngay: state được ghi cạnh profile và đổ vào ở lần mở đầu tiên.
+    """
+    import json
+    import shutil
+
+    from . import accounts as accounts_mod
+
+    if not isinstance(bundle, dict) or bundle.get("format") != BUNDLE_FORMAT:
+        raise ValueError("đây không phải gói profile của chat2api")
+    try:
+        version = int(bundle.get("version") or 0)
+    except (TypeError, ValueError):
+        version = 0
+    if not 1 <= version <= BUNDLE_VERSION:
+        raise ValueError(f"gói profile phiên bản {bundle.get('version')!r} — "
+                         "cập nhật chat2api ở máy này rồi nhập lại")
+    source = bundle.get("profile") if isinstance(bundle.get("profile"), dict) else {}
+    name = (name or source.get("name") or "").strip().lower()
+    if not valid_name(name):
+        raise ValueError("tên profile chỉ gồm chữ thường, số và dấu -")
+    db = store.default()
+    if db is None:
+        raise RuntimeError("kho dữ liệu chưa mở")
+    conn = db.connection()
+    if conn.execute("SELECT 1 FROM profile WHERE name = ?", (name,)).fetchone():
+        raise ValueError(f"profile '{name}' đã tồn tại — đặt tên khác cho bản nhập")
+    target_dir = Path(profiles_dir) / name
+    if target_dir.exists() and any(target_dir.iterdir()):
+        raise ValueError(f"thư mục '{target_dir}' đã có dữ liệu — chọn tên khác")
+    clean = _clean(source)
+
+    state = bundle.get("storage_state") if isinstance(bundle.get("storage_state"), dict) else {}
+    cookies = state.get("cookies") or []
+    has_state = bool(cookies or state.get("origins"))
+    target_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        if has_state:
+            import_seed_path(target_dir).write_text(
+                json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        columns = ["name", "user_data_dir", "created_at", *clean]
+        placeholders = ", ".join("?" * len(columns))
+        now = store.now_ms()
+        imported = 0
+        with conn:
+            cursor = conn.execute(
+                f"INSERT INTO profile({', '.join(columns)}) VALUES ({placeholders})",
+                (name, str(target_dir), now, *clean.values()))
+            new_id = int(cursor.lastrowid)
+            conn.execute("UPDATE profile SET is_default = 1 WHERE id = ? AND NOT EXISTS"
+                         " (SELECT 1 FROM profile WHERE is_default = 1)", (new_id,))
+            for item in bundle.get("accounts") or []:
+                if not isinstance(item, dict):
+                    continue
+                host = str(item.get("host") or "").strip().lower()
+                label = str(item.get("label") or "").strip()
+                # Gói là file người dùng đưa vào: hàng hỏng thì bỏ, không để
+                # một account lạ chặn cả lượt nhập.
+                if not (accounts_mod.valid_domain(host) and accounts_mod.valid_name(label)):
+                    continue
+                conn.execute("INSERT OR IGNORE INTO domain(host, created_at) VALUES (?, ?)",
+                             (host, now))
+                domain_id = conn.execute("SELECT id FROM domain WHERE host = ?",
+                                         (host,)).fetchone()["id"]
+                conn.execute(
+                    "INSERT OR IGNORE INTO account(profile_id, domain_id, label, display_name, "
+                    "  plan, status, quota, cookie_expires_at, disabled, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (new_id, domain_id, label, str(item.get("display_name") or ""),
+                     str(item.get("plan") or ""), str(item.get("status") or "unknown"),
+                     int(item.get("quota") or 0), item.get("cookie_expires_at"),
+                     1 if item.get("disabled") else 0, now))
+                imported += 1
+    except Exception:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise
+    row = get_by_id(new_id)
+    row["imported"] = {"accounts": imported, "cookies": len(cookies),
+                       "origins": len(state.get("origins") or [])}
+    return row
+
+
 def update(profile_id: int, values: dict) -> dict | None:
     row = get_by_id(profile_id)
     if row is None:

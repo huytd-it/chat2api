@@ -348,6 +348,22 @@ class ProfileCloneRequest(ProfileCreateRequest):
     kế từ profile nguồn (thường chỉ đổi mỗi `scrapling_mode`)."""
 
 
+class ProfileImportRequest(BaseModel):
+    """Nhập profile từ máy khác: hoặc `bundle` (nội dung file đã xuất), hoặc
+    `remote_url` + `remote_profile` để server tự kéo thẳng từ chat2api bên kia."""
+    bundle: dict | None = None
+    remote_url: str = ""
+    remote_api_key: str = ""
+    remote_profile: str = ""
+    # Tên profile ở máy này; bỏ trống giữ tên gốc.
+    name: str | None = None
+
+
+class ProfileRemoteListRequest(BaseModel):
+    remote_url: str
+    remote_api_key: str = ""
+
+
 class ProfileOpenRequest(BaseModel):
     url: str = ""
     # Khóa tab tùy chọn cho màn test hàng loạt. Bỏ trống giữ nguyên tab mở tay

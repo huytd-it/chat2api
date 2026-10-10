@@ -565,6 +565,49 @@ async def test_broken_state_file_does_not_block_opening(pool, db, tmp_path):
     assert ctx is not None
 
 
+IMPORTED_STATE = {
+    "cookies": [{"name": "sid", "value": "abc", "domain": ".qwen.ai", "path": "/"}],
+    "origins": [{"origin": "https://chat.qwen.ai",
+                 "localStorage": [{"name": "token", "value": "xyz"}]}],
+}
+
+
+async def test_imported_bundle_state_is_seeded_once_then_removed(pool, db, tmp_path):
+    """Gói nhập từ máy khác: lần mở đầu đổ state vào browser rồi xoá file chờ."""
+    profile = make_profile(db, tmp_path)
+    seed = profiles.import_seed_path(profile.user_data_dir)
+    seed.write_text(json.dumps(IMPORTED_STATE), encoding="utf-8")
+
+    # Context giả không có set_storage_state -> đường lui cookie + localStorage.
+    ctx = await pool.context_for_profile(profile)
+    assert [c["name"] for c in ctx.cookies] == ["sid"]
+    assert ctx.pages[-1].goto_calls == ["https://chat.qwen.ai"]
+    assert not seed.exists()
+
+    await pool.drop_profile("main")
+    ctx2 = await pool.context_for_profile(profiles.get_profile("main"))
+    assert ctx2.cookies == []
+
+
+async def test_imported_bundle_prefers_set_storage_state(pool, db, tmp_path, monkeypatch):
+    """Browser thật có set_storage_state: dùng nó để IndexedDB cũng đi theo."""
+    profile = make_profile(db, tmp_path)
+    seed = profiles.import_seed_path(profile.user_data_dir)
+    seed.write_text(json.dumps(IMPORTED_STATE), encoding="utf-8")
+    received = []
+
+    async def set_storage_state(self, state):
+        received.append(state)
+
+    monkeypatch.setattr(FakePersistentContext, "set_storage_state", set_storage_state,
+                        raising=False)
+
+    ctx = await pool.context_for_profile(profile)
+
+    assert received == [IMPORTED_STATE] and ctx.cookies == []
+    assert not seed.exists()
+
+
 # ----------------------------------------- storage_state vẫn là mặc định
 
 
