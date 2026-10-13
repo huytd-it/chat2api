@@ -153,7 +153,7 @@ CREATE TABLE IF NOT EXISTS account_failstreak (
 CREATE TABLE IF NOT EXISTS recipe (
   id              INTEGER PRIMARY KEY,
   slug            TEXT    NOT NULL UNIQUE,       -- [a-z0-9-]
-  kind            TEXT    NOT NULL DEFAULT 'browser', -- browser|openai_passthrough|gemini_native
+  kind            TEXT    NOT NULL DEFAULT 'browser', -- browser|gemini_native (+openai_passthrough legacy, đã chuyển sang bảng openai_provider)
   url             TEXT    NOT NULL DEFAULT '',
   domain_id       INTEGER REFERENCES domain(id)  ON DELETE SET NULL,
   -- Ghim recipe vào một profile cụ thể; NULL = chọn theo account đang xoay vòng.
@@ -231,6 +231,29 @@ CREATE TABLE IF NOT EXISTS combo_member (
   PRIMARY KEY (combo_id, model_id)
 );
 CREATE INDEX IF NOT EXISTS combo_member_by_combo ON combo_member(combo_id);
+
+-- OpenAI providers (pass-through): nguồn sự thật là DB, không phải file
+-- recipes/openai/*.yaml. File cũ chỉ để migrate một lần lúc khởi động.
+CREATE TABLE IF NOT EXISTS openai_provider (
+  id           INTEGER PRIMARY KEY,
+  slug         TEXT    NOT NULL UNIQUE,
+  base_url     TEXT    NOT NULL DEFAULT '',
+  api_key      TEXT    NOT NULL DEFAULT '',
+  api_key_env  TEXT    NOT NULL DEFAULT '',
+  stream       INTEGER NOT NULL DEFAULT 1,
+  enabled      INTEGER NOT NULL DEFAULT 1,
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS openai_provider_model (
+  provider_id INTEGER NOT NULL REFERENCES openai_provider(id) ON DELETE CASCADE,
+  model_id    TEXT    NOT NULL,
+  capability  TEXT    NOT NULL DEFAULT 'chat',
+  priority    INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (provider_id, model_id)
+);
+CREATE INDEX IF NOT EXISTS openai_provider_model_by_provider ON openai_provider_model(provider_id);
 
 -- ------------------------------------------------------ session / message
 

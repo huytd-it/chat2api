@@ -1,6 +1,0 @@
-slug: webtruyenthong
-base_url: http://localhost:20128/v1
-models:
-- id: free-stack
-stream: false
-api_key: http://localhost:20128/v1

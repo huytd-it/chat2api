@@ -34,7 +34,7 @@ class ScannedRecipe:
     domain: str = ""
     yaml_text: str = ""
     config: dict = field(default_factory=dict)
-    models: list[str] = field(default_factory=list)
+    models: list = field(default_factory=list)
     keep_context: bool = True
     rotation: str = "round_robin"
     rotation_quota: int = 50
@@ -101,16 +101,25 @@ def _scan_passthrough(directory: Path) -> list[ScannedRecipe]:
     out: list[ScannedRecipe] = []
     for path in sorted(directory.glob("*.yaml")):
         cfg = _load(path)
-        if not cfg or not cfg.get("slug"):
+        if not cfg:
             continue
+        slug = str(cfg.get("slug") or path.stem).strip().lower()
+        if not slug:
+            continue
+        models: list = []
+        for m in cfg.get("models") or []:
+            if isinstance(m, dict) and m.get("id"):
+                models.append({"id": str(m["id"]), "capability": str(m.get("capability") or "chat")})
+            elif isinstance(m, str) and m.strip():
+                models.append(m.strip())
         out.append(ScannedRecipe(
-            slug=str(cfg["slug"]),
+            slug=slug,
             kind="openai_passthrough",
             url=str(cfg.get("base_url") or ""),
             domain=accounts.domain_of(cfg.get("base_url") or ""),
             yaml_text=path.read_text(encoding="utf-8"),
             config=cfg,
-            models=[str(m) for m in cfg.get("models") or []],
+            models=models,
         ))
     return out
 
@@ -166,6 +175,9 @@ def import_all(db: Store, recipes_dir: Path) -> dict[str, int]:
     # File đã đọc xong hết ở trên nên transaction này không ôm I/O đĩa.
     with conn:
         counts = _write_recipes(conn, recipes)
+        counts.update(_write_openai_providers(conn, recipes))
+        # OpenAI đã chuyển sang bảng riêng — dọn mirror cũ trong bảng recipe.
+        conn.execute("DELETE FROM recipe WHERE kind = 'openai_passthrough'")
         counts.update(_write_accounts(conn, found))
     return counts
 
@@ -181,7 +193,8 @@ def _domain_id(conn, host: str) -> int | None:
 def _write_recipes(conn, recipes: list[ScannedRecipe]) -> dict[str, int]:
     now = now_ms()
     versions = 0
-    for item in recipes:
+    kept = [item for item in recipes if item.kind != "openai_passthrough"]
+    for item in kept:
         domain_id = _domain_id(conn, item.domain)
         conn.execute(
             "INSERT INTO recipe(slug, kind, url, domain_id, yaml, config, keep_context,"
@@ -202,8 +215,54 @@ def _write_recipes(conn, recipes: list[ScannedRecipe]) -> dict[str, int]:
                                  (item.slug,)).fetchone()["id"]
         versions += _write_version(conn, recipe_id, item.yaml_text, now)
         _write_models(conn, recipe_id, item.slug, item.models)
-    return {"recipes": len(recipes), "versions": versions,
-            "models": sum(len(r.models) for r in recipes)}
+    return {"recipes": len(kept), "versions": versions,
+            "models": sum(len(r.models) for r in kept)}
+
+
+def _write_openai_providers(conn, recipes: list[ScannedRecipe]) -> dict[str, int]:
+    """OpenAI providers vào bảng riêng, không vào bảng recipe.
+
+    Chỉ insert slug chưa có — DB thắng file. File YAML chỉnh tay sau khi đã
+    migrate sẽ không đè DB, tránh mất key vì một lần sửa file cũ.
+    """
+    now = now_ms()
+    migrated = 0
+    for item in recipes:
+        if item.kind != "openai_passthrough":
+            continue
+        cfg = item.config or {}
+        base_url = str(cfg.get("base_url") or item.url or "").strip().rstrip("/")
+        if not base_url:
+            continue
+        if conn.execute("SELECT 1 FROM openai_provider WHERE slug = ?",
+                        (item.slug,)).fetchone():
+            continue
+        conn.execute(
+            "INSERT INTO openai_provider(slug, base_url, api_key, api_key_env,"
+            " stream, enabled, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+            (item.slug, base_url, str(cfg.get("api_key") or ""),
+             str(cfg.get("api_key_env") or ""),
+             0 if cfg.get("stream") is False else 1, now, now))
+        pid = conn.execute("SELECT id FROM openai_provider WHERE slug = ?",
+                           (item.slug,)).fetchone()["id"]
+        for i, local_id in enumerate(item.models):
+            if isinstance(local_id, dict):
+                mid = str(local_id.get("id") or "").strip()
+                cap = str(local_id.get("capability") or "chat").strip().lower()
+            else:
+                mid = str(local_id).strip()
+                cap = "chat"
+            if not mid or cap not in ("chat", "image", "both"):
+                if not mid:
+                    continue
+                cap = "chat"
+            conn.execute(
+                "INSERT OR IGNORE INTO openai_provider_model"
+                "(provider_id, model_id, capability, priority) VALUES (?, ?, ?, ?)",
+                (pid, mid, cap, i))
+        migrated += 1
+    return {"openai_providers": migrated}
 
 
 def _write_version(conn, recipe_id: int, yaml_text: str, now: int) -> int:

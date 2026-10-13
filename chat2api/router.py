@@ -68,6 +68,12 @@ class Router:
                     for p in items:
                         providers[p.slug] = p
                     break
+        # OpenAI providers: DB là nguồn sự thật (ghi đè file legacy cùng slug).
+        for p in _db_openai_providers():
+            if p.slug in providers:
+                print(f"[chat2api] openai '{p.slug}': dùng bản DB, bỏ bản file",
+                      file=sys.stderr)
+            providers[p.slug] = p
         # Legacy compat ONLY: branch/eval flows that cannot be flattened.
         # Migrate đã chạy ở lifespan (không đè recipe, không xoá source).
         # Ở đây chỉ nạp những flow có branch/eval còn tồn tại và chưa có recipe
@@ -154,6 +160,10 @@ LOADERS.append(_gemini_loader)
 def _passthrough_loader(directory: Path, pool):
     if directory.name != "openai":
         return None
+    # DB là nguồn sự thật khi kho đang mở — file chỉ còn để fallback lúc
+    # create_app reload trước khi lifespan mở kho, và để migrate một lần.
+    if store.default() is not None:
+        return None
     import yaml
 
     from .providers.openai_passthrough import OpenAIPassthrough
@@ -167,6 +177,24 @@ def _passthrough_loader(directory: Path, pool):
 
 
 LOADERS.append(_passthrough_loader)
+
+
+def _db_openai_providers() -> list:
+    """Provider OpenAI từ DB. Trả [] khi kho chưa mở (test đơn vị, import-time)."""
+    db = store.default()
+    if db is None:
+        return []
+    try:
+        from .openai_providers import list_configs
+        from .providers.openai_passthrough import OpenAIPassthrough
+    except Exception as e:
+        print(f"[chat2api] openai db loader error: {e}", file=sys.stderr)
+        return []
+    try:
+        return [OpenAIPassthrough(cfg) for cfg in list_configs()]
+    except Exception as e:
+        print(f"[chat2api] openai db loader error: {e}", file=sys.stderr)
+        return []
 
 
 def _recipe_loader(directory: Path, pool):

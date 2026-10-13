@@ -240,6 +240,9 @@ def create_app(cfg: Config) -> FastAPI:
                 counts = await asyncio.to_thread(importer.import_all, db, cfg.recipes_dir)
                 applog.log("store: import {recipes} recipe / {models} model / {accounts} account"
                            " ({versions} bản YAML mới)".format(**counts))
+                if counts.get("openai_providers"):
+                    applog.log(f"store: migrate {counts['openai_providers']} OpenAI provider"
+                               " từ recipes/openai vào DB")
             except Exception as error:
                 applog.log(f"store: import thất bại: {error}", "error")
             if cfg.browser_profile_mode == "profile":
@@ -2279,124 +2282,31 @@ def register_admin(app: FastAPI, admin) -> None:
         applog.log(f"combo: xóa '{slug}'", "warn")
         return {"ok": True}
 
-    # ------------------------------------------------------------- OpenAI providers (pass-through)
-
-    def _openai_dir(cfg):
-        return cfg.recipes_dir / "openai"
-
-    def _openai_file(cfg, slug: str):
-        return _openai_dir(cfg) / f"{slug}.yaml"
-
-    def _load_openai_config(path: Path) -> dict | None:
-        import yaml as _yaml
-        if not path.exists():
-            return None
-        try:
-            data = _yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-            if not isinstance(data, dict):
-                return None
-            return data
-        except Exception:
-            return None
-
-    def _validate_openai_payload(data: dict, is_update: bool = False) -> tuple[dict, list[str]]:
-        errs: list[str] = []
-        clean: dict = {}
-        if not is_update or "slug" in data:
-            slug = str(data.get("slug") or "").strip().lower()
-            if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug) or slug in {"gemini", "openai", "combo"}:
-                errs.append("Slug chỉ gồm chữ thường, số và dấu -, không trùng tên hệ thống")
-            else:
-                clean["slug"] = slug
-        if "base_url" in data or not is_update:
-            base_url = str(data.get("base_url") or "").strip()
-            if not base_url:
-                errs.append("base_url không được rỗng")
-            else:
-                from urllib.parse import urlparse as _urlparse
-                parsed = _urlparse(base_url)
-                if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                    errs.append("base_url phải là http/https URL hợp lệ")
-                else:
-                    clean["base_url"] = base_url.rstrip("/")
-        if "api_key" in data and data.get("api_key") is not None:
-            # allow empty to keep existing
-            clean["api_key"] = str(data.get("api_key") or "").strip()
-        if "api_key_env" in data and data.get("api_key_env") is not None:
-            clean["api_key_env"] = str(data.get("api_key_env") or "").strip()
-        if "models" in data or not is_update:
-            models = data.get("models")
-            if not isinstance(models, list) or not models:
-                errs.append("models phải là danh sách không rỗng")
-            else:
-                clean_models = []
-                seen = set()
-                for idx, m in enumerate(models):
-                    if isinstance(m, str):
-                        mid = m.strip()
-                        cap = "chat"
-                    elif isinstance(m, dict):
-                        mid = str(m.get("id") or "").strip()
-                        cap = str(m.get("capability") or "chat").strip().lower()
-                        if cap not in {"chat", "image", "both"}:
-                            cap = "chat"
-                    else:
-                        errs.append(f"models[{idx}] không hợp lệ")
-                        continue
-                    if not mid:
-                        errs.append(f"models[{idx}].id không được rỗng")
-                        continue
-                    if not re.fullmatch(r"[A-Za-z0-9._-]+", mid):
-                        errs.append(f"models[{idx}].id chỉ gồm chữ, số, ., _, -")
-                        continue
-                    if mid in seen:
-                        errs.append(f"models[{idx}].id trùng: {mid}")
-                        continue
-                    seen.add(mid)
-                    clean_models.append({"id": mid, "capability": cap} if cap != "chat" else {"id": mid})
-                if not errs:
-                    clean["models"] = clean_models
-        if "stream" in data:
-            clean["stream"] = bool(data.get("stream"))
-        return clean, errs
+    # ------------------------------------------------------------- OpenAI providers (pass-through, lưu trong DB)
 
     @admin.get("/openai")
     async def openai_list(request: Request):
-        import yaml as _yaml
-        cfg = request.app.state.cfg
-        odir = _openai_dir(cfg)
-        if not odir.exists():
-            return []
+        from . import openai_providers as oap
+        items = await asyncio.to_thread(oap.list_providers)
         out = []
-        for yml in sorted(odir.glob("*.yaml")):
-            cfg_data = _load_openai_config(yml)
-            if not cfg_data:
-                continue
-            slug = cfg_data.get("slug") or yml.stem
-            # mask api_key
-            has_key = bool(cfg_data.get("api_key") or cfg_data.get("api_key_env"))
-            models = cfg_data.get("models") or []
-            # normalize models for frontend
-            norm_models = []
-            for m in models:
-                if isinstance(m, str):
-                    norm_models.append({"id": m, "capability": "chat"})
-                elif isinstance(m, dict):
-                    norm_models.append({"id": m.get("id"), "capability": m.get("capability", "chat")})
+        for item in items:
+            slug = item["slug"]
             provider = request.app.state.router.providers.get(slug)
             ready = False
             if provider is not None:
                 try:
                     ready = any(mi.ready for mi in provider.models())
                 except Exception:
-                    ready = bool(has_key)
+                    ready = bool(item.get("has_key"))
+            else:
+                ready = bool(item.get("has_key"))
             out.append({
                 "slug": slug,
-                "base_url": cfg_data.get("base_url", ""),
-                "has_key": has_key,
-                "api_key_env": cfg_data.get("api_key_env", ""),
-                "models": norm_models,
-                "stream": bool(cfg_data.get("stream", True)),
+                "base_url": item.get("base_url", ""),
+                "has_key": bool(item.get("has_key")),
+                "api_key_env": item.get("api_key_env", ""),
+                "models": item.get("models") or [],
+                "stream": bool(item.get("stream", True)),
                 "ready": ready,
                 "type": "openai",
             })
@@ -2404,105 +2314,68 @@ def register_admin(app: FastAPI, admin) -> None:
 
     @admin.get("/openai/{slug}")
     async def openai_detail(slug: str, request: Request):
-        cfg = request.app.state.cfg
-        path = _openai_file(cfg, slug)
-        data = _load_openai_config(path)
-        if data is None:
+        from . import openai_providers as oap
+        item = await asyncio.to_thread(oap.get_provider, slug)
+        if item is None:
             raise OpenAIError(404, "not_found", f"OpenAI provider '{slug}' không tồn tại")
-        # include yaml text for advanced edit
         import yaml as _yaml
-        yaml_text = path.read_text(encoding="utf-8") if path.exists() else ""
-        # mask api_key in data
-        has_key = bool(data.get("api_key"))
-        masked = dict(data)
-        if has_key:
-            masked["api_key"] = "***"
-            masked["has_key"] = True
-        else:
-            masked["has_key"] = bool(data.get("api_key_env"))
-        masked["yaml"] = yaml_text
+        masked = dict(item)
+        masked["api_key"] = "***" if item.get("has_key") else ""
+        masked["yaml"] = _yaml.safe_dump({
+            "slug": item["slug"],
+            "base_url": item.get("base_url", ""),
+            "api_key": masked["api_key"] if item.get("has_key") else "",
+            "api_key_env": item.get("api_key_env", ""),
+            "models": item.get("models") or [],
+            "stream": bool(item.get("stream", True)),
+        }, allow_unicode=True, sort_keys=False)
         return masked
 
     @admin.post("/openai")
     async def openai_create(body: OpenAIProviderCreateRequest, request: Request):
-        cfg = request.app.state.cfg
+        from . import openai_providers as oap
         payload = body.model_dump(exclude_none=True)
-        clean, errs = _validate_openai_payload(payload, is_update=False)
-        if errs:
-            raise OpenAIError(400, "invalid_openai", "; ".join(errs))
-        slug = clean["slug"]
-        path = _openai_file(cfg, slug)
-        if path.exists() or slug in request.app.state.router.providers:
+        slug = str(payload.get("slug") or "").strip().lower()
+        if slug in request.app.state.router.providers:
             raise OpenAIError(409, "slug_taken", f"Slug '{slug}' đã tồn tại")
-        # Build yaml data
-        yaml_data = {
-            "slug": slug,
-            "base_url": clean["base_url"],
-            "models": clean["models"],
-            "stream": clean.get("stream", True),
-        }
-        if clean.get("api_key"):
-            yaml_data["api_key"] = clean["api_key"]
-        if clean.get("api_key_env"):
-            yaml_data["api_key_env"] = clean["api_key_env"]
-        if not yaml_data.get("api_key") and not yaml_data.get("api_key_env"):
-            # allow empty but warn: provider will be not ready
-            pass
+        try:
+            created = await asyncio.to_thread(oap.create_provider, payload)
+        except ValueError as e:
+            msg = str(e)
+            if "đã tồn tại" in msg:
+                raise OpenAIError(409, "slug_taken", msg)
+            raise OpenAIError(400, "invalid_openai", msg)
+        except RuntimeError as e:
+            raise OpenAIError(500, "store_closed", str(e))
         async with request.app.state.recipe_publish_lock:
-            _openai_dir(cfg).mkdir(parents=True, exist_ok=True)
-            import yaml as _yaml
-            path.write_text(_yaml.safe_dump(yaml_data, allow_unicode=True, sort_keys=False), encoding="utf-8")
             request.app.state.router.reload()
-        applog.log(f"openai: tạo provider '{slug}' -> {clean['base_url']}")
-        return {"ok": True, "slug": slug}
+        applog.log(f"openai: tạo provider '{created['slug']}' -> {created['base_url']}")
+        return {"ok": True, "slug": created["slug"]}
 
     @admin.put("/openai/{slug}")
     async def openai_update(slug: str, body: OpenAIProviderUpdateRequest, request: Request):
-        import yaml as _yaml
-        cfg = request.app.state.cfg
-        path = _openai_file(cfg, slug)
-        existing = _load_openai_config(path)
-        if existing is None:
-            raise OpenAIError(404, "not_found", f"OpenAI provider '{slug}' không tồn tại")
+        from . import openai_providers as oap
         payload = body.model_dump(exclude_none=True)
-        # If api_key is "***" or empty, keep existing
-        if "api_key" in payload:
-            val = payload["api_key"]
-            if val == "***" or val == "":
-                payload.pop("api_key", None)
-        clean, errs = _validate_openai_payload(payload, is_update=True)
-        if errs:
-            raise OpenAIError(400, "invalid_openai", "; ".join(errs))
-        # merge
-        merged = dict(existing)
-        for k in ("base_url", "models", "stream", "api_key_env"):
-            if k in clean:
-                merged[k] = clean[k]
-        if "api_key" in clean and clean["api_key"]:
-            merged["api_key"] = clean["api_key"]
-        # re-validate full
-        _, full_errs = _validate_openai_payload(merged, is_update=False)
-        if full_errs:
-            raise OpenAIError(400, "invalid_openai", "; ".join(full_errs))
+        try:
+            updated = await asyncio.to_thread(oap.update_provider, slug, payload)
+        except ValueError as e:
+            raise OpenAIError(400, "invalid_openai", str(e))
+        except RuntimeError as e:
+            raise OpenAIError(500, "store_closed", str(e))
+        if updated is None:
+            raise OpenAIError(404, "not_found", f"OpenAI provider '{slug}' không tồn tại")
         async with request.app.state.recipe_publish_lock:
-            path.write_text(_yaml.safe_dump(merged, allow_unicode=True, sort_keys=False), encoding="utf-8")
             request.app.state.router.reload()
         applog.log(f"openai: cập nhật '{slug}'")
-        return {"ok": True, "slug": slug}
+        return {"ok": True, "slug": updated["slug"]}
 
     @admin.delete("/openai/{slug}")
     async def openai_delete(slug: str, request: Request):
-        cfg = request.app.state.cfg
-        path = _openai_file(cfg, slug)
-        if not path.exists():
+        from . import openai_providers as oap
+        removed = await asyncio.to_thread(oap.delete_provider, slug)
+        if not removed:
             raise OpenAIError(404, "not_found", f"OpenAI provider '{slug}' không tồn tại")
         async with request.app.state.recipe_publish_lock:
-            path.unlink(missing_ok=True)
-            # clean empty dir
-            try:
-                _openai_dir(cfg).rmdir()
-            except Exception:
-                pass
             request.app.state.router.reload()
         applog.log(f"openai: xóa '{slug}'", "warn")
         return {"ok": True}

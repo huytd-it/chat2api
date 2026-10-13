@@ -525,8 +525,10 @@ curl http://127.0.0.1:8100/v1/chat/completions \
 ## 14. OpenAI passthrough providers
 
 Trỏ chat2api tới một backend OpenAI-compatible bất kỳ; model của nó
-xuất hiện trong `/v1/models` như model nội bộ. Lưu file
-`recipes_dir/openai/<slug>.yaml`.
+xuất hiện trong `/v1/models` như model nội bộ. Lưu trong DB
+(`openai_provider` + `openai_provider_model`), quản lý qua API dưới đây —
+không còn file `recipes_dir/openai/<slug>.yaml` (file cũ được migrate một lần
+lúc khởi động rồi bỏ qua).
 
 ```bash
 # Liệt kê [{slug, base_url, has_key, api_key_env, models:[{id, capability}], stream, ready, type}]
