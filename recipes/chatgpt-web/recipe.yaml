@@ -1,21 +1,22 @@
 slug: chatgpt-web
 url: https://chatgpt.com/
 prompt:
-  input_selector: '#prompt-textarea'
+  input_selector: '[aria-label="Ask ChatGPT"]'
   input_mode: fill
-  submit: Enter
+  submit: click:button[aria-label="Send"]
 response:
-  last_message_selector: 'section[data-turn="assistant"] div.markdown.prose'
+  last_message_selector: div[data-turn-key] [data-markdown-text-style="assistant-message"]
   done_signal:
-    type: copy_button
-    selector: '[data-testid="copy-turn-action-button"]'
-    scope: after
-    use_copy_result: true
+    type: selector_disappear
+    selector: button[aria-label="Stop"]
+    quiet_ms: 1000
+    timeout_ms: 120000
 models:
 - id: default
 login:
   strategy: round_robin
   quota: 50
 new_chat:
-  selector: 'li.list-none [data-testid="create-new-chat-button"]'
+  selector: '#app-shell-sidebar > div:nth-of-type(2) > div > div > div > nav > div
+    > div > div > button'
 keep_context: true

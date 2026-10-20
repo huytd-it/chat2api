@@ -1,6 +1,8 @@
 import argparse
 import asyncio
 import sys
+import os
+import threading
 from pathlib import Path
 
 import yaml
@@ -121,7 +123,39 @@ def main(argv=None) -> int:
 
         from .main import create_app
 
-        uvicorn.run(create_app(cfg), host=args.host, port=args.port)
+        app = create_app(cfg)
+        server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port))
+        if os.environ.get("CHAT2API_DESKTOP_CONTROL") == "1":
+            # Stdin is private to the desktop sidecar; never expose these commands
+            # on the HTTP API (which can also run without an admin key).
+            def control_loop():
+                for line in sys.stdin:
+                    command = line.strip()
+                    if command == "shutdown":
+                        server.should_exit = True
+                        break
+                    if command == "close_background" and server.started:
+                        loop.call_soon_threadsafe(
+                            lambda: asyncio.create_task(close_background()))
+
+            async def close_background():
+                try:
+                    count = await app.state.pool.close_background(app.state.router)
+                    print(f"[chat2api] đã đóng {count} Chromium chạy nền", flush=True)
+                except Exception as error:
+                    print(f"[chat2api] không đóng được Chromium chạy nền: {error}", file=sys.stderr, flush=True)
+
+            async def run_desktop():
+                nonlocal loop
+                loop = asyncio.get_running_loop()
+                # The reader is a daemon so exiting does not wait on stdin.
+                threading.Thread(target=control_loop, daemon=True).start()
+                await server.serve()
+
+            loop = None
+            asyncio.run(run_desktop())
+        else:
+            server.run()
     elif args.cmd == "login":
         asyncio.run(_login(cfg, args.slug, args.account, args.strategy, args.quota))
     elif args.cmd == "integrate":

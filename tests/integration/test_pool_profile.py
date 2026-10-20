@@ -7,6 +7,7 @@ mỗi lần chạy.
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -126,6 +127,39 @@ def launched(pool):
 
 def make_profile(db, tmp_path, name="main", max_tabs=4):
     return profiles.ensure_profile(name, tmp_path / "profiles", max_tabs=max_tabs)
+
+
+async def test_close_background_only_closes_idle_headless_contexts(pool):
+    from chat2api.providers.browser_recipe import BrowserRecipe
+
+    pool.max_contexts = 3
+    idle = await pool.context_for("idle")
+    busy = await pool.context_for("busy")
+    visible = await pool.context_for("visible", headed=True)
+    recipe = BrowserRecipe.__new__(BrowserRecipe)
+    recipe._inflight = {"busy": 1}
+    router = SimpleNamespace(providers={"busy": recipe})
+
+    assert await pool.close_background(router) == 1
+    assert idle.closed
+    assert not busy.closed
+    assert not visible.closed
+    assert pool.size == 2
+    await pool.aclose()
+
+
+async def test_close_background_skips_busy_profile(pool, monkeypatch):
+    idle = FakePersistentContext()
+    busy = FakePersistentContext()
+    visible = FakePersistentContext()
+    pool._profiles.update(idle=idle, busy=busy, visible=visible)
+    pool._profile_headless.update(idle=True, busy=True, visible=False)
+    pool._busy_profiles["busy"] = 1
+    assert await pool.close_background(SimpleNamespace(providers={})) == 1
+    assert idle.closed
+    assert not busy.closed
+    assert not visible.closed
+    await pool.aclose()
 
 
 # --------------------------------------------------------- mở & tái dùng

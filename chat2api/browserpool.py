@@ -133,6 +133,7 @@ class BrowserPool:
         self.max_contexts = max(1, int(max_contexts))
         self.max_profiles = max(1, int(max_profiles))
         self._contexts: OrderedDict[str, object] = OrderedDict()
+        self._context_headless: dict[str, bool] = {}
         self._lock = asyncio.Lock()
         # Scrapling sở hữu cả Playwright driver bên dưới context. Giữ session
         # theo context để đóng driver cùng lúc, tránh rò tiến trình Chromium.
@@ -179,6 +180,7 @@ class BrowserPool:
             return None
         if not self._profile_alive(ctx):
             del self._contexts[slug]
+            self._context_headless.pop(slug, None)
             logger.info("BrowserPool: browser của '%s' đã bị đóng tay, sẽ mở lại", slug)
             return None
         self._contexts.move_to_end(slug)
@@ -194,7 +196,8 @@ class BrowserPool:
             if ctx is not None:
                 return ctx
             while len(self._contexts) >= self.max_contexts:
-                _, old_ctx = self._contexts.popitem(last=False)
+                old_slug, old_ctx = self._contexts.popitem(last=False)
+                self._context_headless.pop(old_slug, None)
                 await self._close_context(old_ctx)
                 logger.warning(
                     "BrowserPool context evicted for slug (max_contexts=%s)", self.max_contexts
@@ -203,6 +206,7 @@ class BrowserPool:
             if storage_state and storage_state.exists():
                 await seed_storage_state(ctx, storage_state)
             self._contexts[slug] = ctx
+            self._context_headless[slug] = not headed
             return ctx
 
     # ------------------------------------------------------- đường profile
@@ -558,16 +562,37 @@ class BrowserPool:
     async def drop(self, slug: str) -> None:
         async with self._lock:
             context = self._contexts.pop(slug, None)
+            self._context_headless.pop(slug, None)
         if context:
             async def close() -> None:
                 await self._close_context(context)
 
             await _finish_cleanup(close())
 
+    async def close_background(self, router) -> int:
+        """Đóng Chromium headless đang rảnh do pool sở hữu, không cắt request đang chạy."""
+        from .providers.browser_recipe import BrowserRecipe
+
+        busy_keys = set()
+        for provider in router.providers.values():
+            if isinstance(provider, BrowserRecipe):
+                busy_keys.update(key for key, count in provider._inflight.items() if count)
+        closed = 0
+        for slug in list(self._contexts):
+            if self._context_headless.get(slug) and slug not in busy_keys:
+                await self.drop(slug)
+                closed += 1
+        for name in list(self._profiles):
+            if self._profile_headless.get(name) and not self.profile_busy(name):
+                if await self.drop_profile(name):
+                    closed += 1
+        return closed
+
     async def aclose(self):
         for ctx in self._contexts.values():
             await self._close_context(ctx)
         self._contexts.clear()
+        self._context_headless.clear()
         for name, ctx in list(self._profiles.items()):
             await self._close_profile(name, ctx)
         self._profiles.clear()

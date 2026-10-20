@@ -195,29 +195,26 @@ export interface Overview {
 
 const FALLBACK_BASE_URL = "http://127.0.0.1:8100";
 
-let cachedBase: string | null = null;
-
 /** Resolves the chat2api server URL. Order: `?api=` URL param (per load),
  * `localStorage.c2a_api_base` (persisted dev override — useful when the
  * default 8100 is blocked by Windows reserved ranges), then the Tauri host's
  * sidecar port, then the default dev port when running outside Tauri. */
 export async function apiBase(): Promise<string> {
-  if (cachedBase) return cachedBase;
   const fromQuery = typeof location !== "undefined"
     ? new URLSearchParams(location.search).get("api")
     : null;
   const override = fromQuery
     ?? (typeof localStorage !== "undefined" ? localStorage.getItem("c2a_api_base") : null);
   if (override) {
-    cachedBase = override.replace(/\/+$/, "");
-    return cachedBase;
+    return override.replace(/\/+$/, "");
   }
   try {
-    cachedBase = await invoke<string>("api_base_url");
+    // Restart from the tray may pick a new port when the old one was taken.
+    // Always ask the host instead of retaining the sidecar's previous port.
+    return await invoke<string>("api_base_url");
   } catch {
-    cachedBase = FALLBACK_BASE_URL;
+    return FALLBACK_BASE_URL;
   }
-  return cachedBase;
 }
 
 function headers(key: string, headed?: boolean, sessionId = "", accountId?: number): HeadersInit {

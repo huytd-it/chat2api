@@ -1,8 +1,10 @@
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
@@ -14,6 +16,8 @@ const FALLBACK_PORT: u16 = 8100;
 struct ServerState {
     child: Mutex<Option<Child>>,
     port: Mutex<u16>,
+    lifecycle: Mutex<()>,
+    exiting: AtomicBool,
 }
 
 #[tauri::command]
@@ -166,8 +170,8 @@ fn resolve_port() -> u16 {
 /// This assumes a system Python with chat2api installed (`pip install -e .`),
 /// matching the project's current dev setup — see PRODUCT.md's Capabilities
 /// section for the still-undecided fully-bundled-runtime path.
-fn spawn_server(app: &AppHandle) {
-    let port = resolve_port();
+fn spawn_server(app: &AppHandle, preferred_port: Option<u16>) {
+    let port = preferred_port.filter(|port| port_is_bindable(*port)).unwrap_or_else(resolve_port);
     {
         let state: State<ServerState> = app.state();
         *state.port.lock().unwrap() = port;
@@ -195,6 +199,8 @@ fn spawn_server(app: &AppHandle) {
         &port.to_string(),
     ])
     .current_dir(&workdir)
+    .env("CHAT2API_DESKTOP_CONTROL", "1")
+    .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
 
@@ -240,9 +246,52 @@ fn stop_server(app: &AppHandle) {
     let state: State<ServerState> = app.state();
     let child = state.child.lock().unwrap().take();
     if let Some(mut child) = child {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(b"shutdown\n");
+            let _ = stdin.flush();
+        }
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) { return; }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // Last resort: kill the sidecar AND its Chromium descendants, not unrelated Chrome.
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            let _ = Command::new("taskkill")
+                .args(["/PID", &child.id().to_string(), "/T", "/F"])
+                .creation_flags(0x0800_0000)
+                .output();
+        }
         let _ = child.kill();
         let _ = child.wait();
     }
+}
+
+fn restart_server(app: AppHandle) {
+    let state = app.state::<ServerState>();
+    let _guard = state.lifecycle.lock().unwrap();
+    if state.exiting.load(Ordering::SeqCst) { return; }
+    let port = *state.port.lock().unwrap();
+    emit_log(&app, "Đang khởi động lại server…".into());
+    stop_server(&app);
+    spawn_server(&app, Some(port));
+    let _ = app.emit("server-restarted", ());
+}
+
+fn close_background(app: &AppHandle) {
+    let state: State<ServerState> = app.state();
+    let mut guard = state.child.lock().unwrap();
+    if let Some(child) = guard.as_mut() {
+        if let Some(stdin) = child.stdin.as_mut() {
+            if stdin.write_all(b"close_background\n").is_ok() {
+                let _ = stdin.flush();
+                return;
+            }
+        }
+    }
+    emit_log(app, "Không thể đóng Chromium: server chưa chạy".into());
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -252,22 +301,33 @@ pub fn run() {
         .manage(ServerState {
             child: Mutex::new(None),
             port: Mutex::new(FALLBACK_PORT),
+            lifecycle: Mutex::new(()),
+            exiting: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![api_base_url])
         .setup(|app| {
-            spawn_server(&app.handle().clone());
+            spawn_server(&app.handle().clone(), None);
 
             let quit_i = MenuItem::with_id(app, "quit", "Thoát", true, None::<&str>)?;
             let open_i = MenuItem::with_id(app, "open", "Mở chat2api", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open_i, &quit_i])?;
+            let restart_i = MenuItem::with_id(app, "restart", "Khởi động lại server", true, None::<&str>)?;
+            let close_i = MenuItem::with_id(app, "close_background", "Đóng Chromium chạy ngầm", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&open_i, &restart_i, &close_i, &quit_i])?;
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => {
-                        stop_server(app);
-                        app.exit(0);
+                        app.state::<ServerState>().exiting.store(true, Ordering::SeqCst);
+                        let app = app.clone();
+                        std::thread::spawn(move || {
+                            let state = app.state::<ServerState>();
+                            let _guard = state.lifecycle.lock().unwrap();
+                            stop_server(&app);
+                            drop(_guard);
+                            app.exit(0);
+                        });
                     }
                     "open" => {
                         if let Some(window) = app.get_webview_window("main") {
@@ -275,6 +335,11 @@ pub fn run() {
                             let _ = window.set_focus();
                         }
                     }
+                    "restart" => {
+                        let app = app.clone();
+                        std::thread::spawn(move || restart_server(app));
+                    }
+                    "close_background" => close_background(app),
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -304,6 +369,9 @@ pub fn run() {
         .expect("error while running tauri application")
         .run(|app_handle, event| {
             if let RunEvent::ExitRequested { .. } = event {
+                let state = app_handle.state::<ServerState>();
+                state.exiting.store(true, Ordering::SeqCst);
+                let _guard = state.lifecycle.lock().unwrap();
                 stop_server(app_handle);
             }
         });
