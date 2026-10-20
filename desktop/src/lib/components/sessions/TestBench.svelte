@@ -20,12 +20,14 @@
     planLine,
     batchJobs,
     opening,
+    refreshingModels = [],
     onClose,
     onToggle,
     onToggleMany,
     onReload,
     onOpenWindows,
     onPickModel,
+    onRefreshModel,
     onOpenSession,
   }: {
     targets: TestTarget[];
@@ -39,12 +41,14 @@
     planLine: string;
     batchJobs: BatchJob[];
     opening: boolean;
+    refreshingModels?: number[];
     onClose: () => void;
     onToggle: (accountId: number) => void;
     onToggleMany: (accountIds: number[]) => void;
     onReload: () => void;
     onOpenWindows: () => void;
     onPickModel: (accountId: number, model: string) => void;
+    onRefreshModel: (accountId: number) => void;
     onOpenSession: (sessionId: string) => void;
   } = $props();
 
@@ -296,28 +300,41 @@
                     {/if}
                   </label>
 
-                  {#if target.models.length > 1}
-                    <Select.Root
-                      type="single"
-                      value={modelFor(target, targetModels)}
-                      onValueChange={(value) => onPickModel(target.account_id, value)}
+                  <div class="flex items-center gap-1">
+                    {#if target.models.length > 1}
+                      <Select.Root
+                        type="single"
+                        value={modelFor(target, targetModels)}
+                        onValueChange={(value) => onPickModel(target.account_id, value)}
+                      >
+                        <Select.Trigger size="sm" class="w-full font-data text-[11px]" aria-label={`Model cho ${target.host}`}>
+                          {modelFor(target, targetModels)}
+                        </Select.Trigger>
+                        <Select.Content>
+                          {#each target.models as id (id)}
+                            <Select.Item value={id} label={id}>{id}</Select.Item>
+                          {/each}
+                        </Select.Content>
+                      </Select.Root>
+                    {:else if target.models.length === 1}
+                      <code class="min-w-0 flex-1 truncate font-data text-[10px] text-muted-foreground">
+                        {target.models[0]}
+                      </code>
+                    {:else}
+                      <span class="min-w-0 flex-1 text-[10px] text-warning">chưa có recipe cho domain này</span>
+                    {/if}
+                    <Button
+                      size="icon-xs"
+                      variant="ghost"
+                      class="flex-none"
+                      title="Quét lại model thật của account này trên website"
+                      aria-label={`Cập nhật model cho ${target.host} ${target.label}`}
+                      disabled={refreshingModels.includes(target.account_id)}
+                      onclick={() => onRefreshModel(target.account_id)}
                     >
-                      <Select.Trigger size="sm" class="w-full font-data text-[11px]" aria-label={`Model cho ${target.host}`}>
-                        {modelFor(target, targetModels)}
-                      </Select.Trigger>
-                      <Select.Content>
-                        {#each target.models as id (id)}
-                          <Select.Item value={id} label={id}>{id}</Select.Item>
-                        {/each}
-                      </Select.Content>
-                    </Select.Root>
-                  {:else if target.models.length === 1}
-                    <code class="truncate font-data text-[10px] text-muted-foreground">
-                      {target.models[0]}
-                    </code>
-                  {:else}
-                    <span class="text-[10px] text-warning">chưa có recipe cho domain này</span>
-                  {/if}
+                      <ArrowClockwise class={refreshingModels.includes(target.account_id) ? "animate-spin" : ""} />
+                    </Button>
+                  </div>
                 </div>
               </div>
             {/each}

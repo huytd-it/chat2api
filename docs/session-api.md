@@ -4,6 +4,12 @@ Tài liệu cho ứng dụng ngoài gọi `POST /v1/chat/completions` và nối 
 lượt chat vào cùng một session. Áp dụng cho mọi client HTTP (curl, Python,
 Node, OpenAI SDK, n8n, LobeChat tự cấu hình...).
 
+> **Phiên website bền vững (opt-in):** nếu gửi thêm `session_id` +
+> `request_id`, chat2api giữ hội thoại thật trên Qwen/ChatGPT, có project,
+> Thinking, retry idempotent và luân phiên context. Hợp đồng đầy đủ cho
+> novel2epub ở [docs/novel2epub-integration.md](novel2epub-integration.md).
+> Request không có hai field này vẫn chạy theo đường cũ mô tả bên dưới.
+
 ## 1. Base URL + xác thực
 
 - Base URL mặc định: `http://127.0.0.1:8100`

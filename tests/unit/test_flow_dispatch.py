@@ -4,6 +4,9 @@
 ở đây quyết định request đi vào flow nào.
 """
 
+import pytest
+
+from chat2api.errors import OpenAIError
 from chat2api.providers.browser_recipe import BrowserRecipe
 
 TEXT_RESPONSE = {"last_message_selector": ".msg", "done_signal": {"type": "stable_text"}}
@@ -36,6 +39,46 @@ class TestModelSpec:
 
     def test_unknown_model_gives_an_empty_spec(self, tmp_path):
         assert _provider(_recipe(), tmp_path).model_spec("nope") == {}
+
+    def test_catalog_model_keeps_the_action_seen_on_the_site(self, tmp_path, monkeypatch):
+        # Model quét theo account không nằm trong recipe. Nếu chỉ trả {} thì
+        # chọn model mới sẽ không bấm gì và âm thầm rơi về model mặc định.
+        from chat2api.automation import catalog
+        monkeypatch.setattr(catalog, "known_models", lambda slug: [
+            {"id": "new-model", "action": "click:#model-new", "capability": "chat"},
+        ])
+        p = _provider(_recipe(), tmp_path)
+        assert p.model_spec("new-model")["action"] == "click:#model-new"
+        assert p.model_spec("s/new-model")["action"] == "click:#model-new"
+        assert p.flow_for_model("new-model") == "text"
+
+
+class _NeverBox:
+    async def wait_for(self, **kwargs):
+        raise RuntimeError("composer never appeared")
+
+
+class _NoChallengeLocator:
+    async def count(self):
+        return 0
+
+
+class _ChallengePage:
+    async def title(self):
+        return "Just a moment..."
+
+    def locator(self, selector):
+        return _NoChallengeLocator()
+
+
+class TestCloudflareGuard:
+    @pytest.mark.asyncio
+    async def test_challenge_is_reported_instead_of_a_composer_timeout(self, tmp_path):
+        p = _provider(_recipe(), tmp_path)
+        with pytest.raises(OpenAIError) as caught:
+            await p._wait_chat_ready(_ChallengePage(), _NeverBox())
+        assert caught.value.code == "cloudflare_challenge"
+        assert caught.value.status == 409
 
 
 class TestFlowForModel:

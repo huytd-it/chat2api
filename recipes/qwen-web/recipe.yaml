@@ -1,7 +1,9 @@
 slug: qwen-web
 url: https://chat.qwen.ai/
 prompt:
-  input_selector: textarea[placeholder='Ask Qwen'] # snapshot cuối xác nhận textarea label Ask Qwen; giữ nguyên
+  # Composer hiện tại là textarea.message-input-textarea (placeholder đã đổi
+  # thành "How can I help you today?", không còn "Ask Qwen").
+  input_selector: textarea.message-input-textarea
   input_mode: fill
   submit: Enter
 response:
@@ -15,21 +17,29 @@ response:
     - "reached today's.+limit"
     - "Upgrade your membership or switch to another model"
   limit_cooldown_hours: 24
-  # Qwen bật use_copy_result: limit thường đi kèm mất nút Copy nên mất nút
-  # cũng tính là limit (chốt bằng fallback mà không khớp pattern vẫn khóa).
-  limit_on_missing_copy: true
+  # Nút Stop chỉ tồn tại khi site đang trả lời (kể cả lúc model "thinking"),
+  # biến mất đúng lúc xong. Nút Copy của Qwen chỉ render khi hover nên không
+  # dùng làm mốc "xong" được.
   done_signal:
-    type: copy_button
-    quiet_ms: 10000        # giữ nguyên (recipe hiện 10000, không hạ xuống 600 nếu chưa fix copy selector)
-    fallback_quiet_ms: 15000
+    type: selector_disappear
+    selector: 'button[aria-label="Stop"]'
+    quiet_ms: 1000
     timeout_ms: 300000
-    scope: after
-    use_copy_result: true  # kiểm chứng log sau sửa: q=use_copy_result phải 0 cảnh báo
 flows:
   select_model:
     selector: '[aria-label="Select Model"]'
     action: 'click:[aria-label="Select Model"]'
     # alternative neo bền hơn: '#qwen-chat-header-left [aria-label="Select Model"]' hoặc 'div.wms-trigger'
+  image:
+    type: image
+    action: 'click:[aria-label="Select Mode"];click:[role="menuitem"]:has-text("Create Image")'
+    response:
+      # Ảnh kết quả là img.qwen-image; gallery gợi ý dùng class khác nên không lẫn.
+      media_selector: img.qwen-image
+      done_signal:
+        type: selector_appear
+        selector: img.qwen-image
+        timeout_ms: 300000
 new_chat:
   selector: div[role='button'][aria-label='New Chat']
 timing:
@@ -42,6 +52,9 @@ models:
   - id: qwen3.8-max
     action: 'click:div[role="listbox"][aria-label="Models"] div[role="option"]:has-text("Qwen3.8-Max")'
     capability: chat
+  # Chế độ Create Image tự chọn Qwen-Image; không mở dropdown chat ở đó.
+  - id: image
+    capability: image
   # giữ alias cũ nếu client đang dùng qwen-web/qwen-web
   - id: qwen-web
     capability: chat

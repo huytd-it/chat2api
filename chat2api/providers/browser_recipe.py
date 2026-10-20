@@ -73,6 +73,19 @@ def _page_url(page) -> str | None:
     return url if url and url not in ("about:blank", "") else None
 
 
+def _same_conversation_url(stored: str, actual: str | None) -> bool:
+    """Same conversation identity even when the site adds cosmetic query params.
+
+    Qwen/ChatGPT pin the conversation id in the path, so a ``?tab=`` or model
+    parameter appended after load must not turn a valid resume into a failure.
+    """
+    if not actual:
+        return False
+    a, b = urlsplit(stored), urlsplit(actual)
+    return (a.scheme, a.netloc, a.path.rstrip("/")) == (b.scheme, b.netloc, b.path.rstrip("/"))
+
+
+
 def _profile_named(name: str, profiles_dir: Path):
     """Profile theo tên, cấp thư mục user_data_dir nếu nó chưa từng được mở.
 
@@ -736,6 +749,10 @@ class BrowserRecipe(Provider):
         trong cooldown để mở lại xem site đang hiện gì.
         """
         try:
+            # Cloudflare chặn cả profile, không phải account hết quota hay
+            # recipe sai. Đếm nó vào failstreak sẽ khóa account 24h oan.
+            if isinstance(error, OpenAIError) and error.code == "cloudflare_challenge":
+                return
             key = account_key_of(assignment)
             url = ""
             try:
@@ -1138,8 +1155,11 @@ class BrowserRecipe(Provider):
         return {"limit": limit, "used": self._rotator.anon_uses}
 
     def models(self) -> list[ModelInfo]:
+        from ..automation.catalog import known_models
         out: list[ModelInfo] = []
-        for m in self._recipe["models"]:
+        catalog = {m["id"]: m for m in known_models(self.slug)}
+        catalog.update({m["id"]: m for m in self._recipe["models"]})
+        for m in catalog.values():
             caps = flows.capabilities_of(m)
             # ModelInfo.capability là một chuỗi: giữ "both" cho cặp chat+image
             # (nghĩa cũ, client đang đọc), còn lại nối bằng dấu phẩy.
@@ -1168,10 +1188,19 @@ class BrowserRecipe(Provider):
         return flows.ordered_flows(self.flows)
 
     def model_spec(self, model_id: str) -> dict:
-        """Khối `models[]` của một model. `model_id` nhận cả `slug/id` lẫn `id`."""
+        """Khối `models[]` của một model. `model_id` nhận cả `slug/id` lẫn `id`.
+
+        Model do quét theo account (catalog) không nằm trong recipe; chúng mang
+        sẵn action đã thấy trên DOM nên phải tra tiếp ở cache, nếu không chọn
+        một model mới phát hiện sẽ không bấm gì và rơi về model mặc định.
+        """
         wanted = model_id.split("/", 1)[1] if "/" in model_id else model_id
         for m in self._recipe.get("models") or []:
             if isinstance(m, dict) and m.get("id") == wanted:
+                return m
+        from ..automation.catalog import known_models
+        for m in known_models(self.slug):
+            if m.get("id") == wanted:
                 return m
         return {}
 
@@ -1822,12 +1851,17 @@ class BrowserRecipe(Provider):
                 await self._enter_flow(page, flow)
                 model_id = kwargs.get("model_id") or ""
                 catalog = [m for m in self._recipe.get("models") or [] if isinstance(m, dict)]
-                model = next((item for item in catalog if item.get("id") == model_id), None)
+                model = next((item for item in catalog if item.get("id") == model_id
+                              and flow in flows.flows_of(item)), None)
                 if model is None:
                     # Không chỉ đích danh thì lấy model làm được đúng việc này —
                     # models[0] có thể là model chat và bấm nhầm sang chế độ chat.
                     model = next((m for m in catalog if flow in flows.flows_of(m)), None)
-                await self._select_model(page, model)
+                # Chỉ chọn model khi model đó có đường bấm riêng. Mở dropdown
+                # chat trong chế độ ảnh của Qwen sẽ đá trang về chat; chế độ ảnh
+                # tự chọn model ảnh của nó.
+                if model is not None and model.get("action"):
+                    await self._select_model(page, model)
                 if prompt_cfg.get("input_mode", "fill") == "type":
                     await box.click()
                     await box.type(prompt)
@@ -1989,7 +2023,19 @@ class BrowserRecipe(Provider):
                     if (/^h[1-6]$/.test(tag)) return `${"#".repeat(Number(tag[1]))} ${clean(inline(node))}\n\n`;
                     if (tag==="p" || node.classList.contains("qwen-markdown-paragraph")) return `${clean(inline(node))}\n\n`;
                     if (tag==="hr") return "---\n\n";
-                    if (tag==="pre") return `\`\`\`\n${node.innerText||""}\n\`\`\`\n\n`;
+                    if (tag==="pre") {
+                      // Code block của Qwen render bằng Monaco: innerText của
+                      // <pre> gồm cả tên ngôn ngữ và cột số dòng, còn code thật
+                      // nằm trong .view-lines. Lấy đúng phần code để fence sạch.
+                      const lines = node.querySelector(".view-lines");
+                      if (lines) {
+                        const header = node.querySelector(".qwen-markdown-code-header > div");
+                        const lang = header ? (header.textContent || "").trim() : "";
+                        const body = (lines.innerText || "").replace(/\u00a0/g, " ");
+                        if (body.trim()) return `\`\`\`${lang}\n${body.replace(/\s+$/, "")}\n\`\`\`\n\n`;
+                      }
+                      return `\`\`\`\n${node.innerText||""}\n\`\`\`\n\n`;
+                    }
                     if (tag==="ul"||tag==="ol"){ const items=Array.from(node.children).filter(c=>c.tagName.toLowerCase()==="li");
                       return items.map((item,index)=>{ const marker=tag==="ol"?`${index+1}.`:"-";
                         const text=clean(Array.from(item.childNodes).map(c=>c.nodeType===Node.ELEMENT_NODE&&["ul","ol"].includes(c.tagName.toLowerCase())?"":inline(c)).join(""));
@@ -2048,7 +2094,21 @@ class BrowserRecipe(Provider):
                      return `${clean(inline(node))}\n\n`;
                    }
                    if (tag === "hr") return "---\n\n";
-                   if (tag === "pre") return `\`\`\`\n${node.innerText || ""}\n\`\`\`\n\n`;
+                   if (tag === "pre") {
+                     // Monaco code block: <pre>.innerText also contains the
+                     // language label and line-number gutter; the real code is
+                     // in .view-lines. Keep the fence and body clean.
+                     const lines = node.querySelector(".view-lines");
+                     if (lines) {
+                       const header = node.querySelector(".qwen-markdown-code-header > div");
+                       const lang = header ? (header.textContent || "").trim() : "";
+                       const body = (lines.innerText || "").replace(/\u00a0/g, " ");
+                       if (body.trim()) {
+                         return `\`\`\`${lang}\n${body.replace(/\s+$/, "")}\n\`\`\`\n\n`;
+                       }
+                     }
+                     return `\`\`\`\n${node.innerText || ""}\n\`\`\`\n\n`;
+                   }
                    if (tag === "ul" || tag === "ol") {
                      const items = Array.from(node.children).filter(child =>
                        child.tagName.toLowerCase() === "li");
@@ -2364,15 +2424,42 @@ class BrowserRecipe(Provider):
         await asyncio.sleep(0.1)
         return str(await page.evaluate("navigator.clipboard.readText()") or "")
 
-    async def _wait_chat_ready(self, page, box) -> None:
+    async def _cloudflare_blocked(self, page) -> bool:
+        """Trang đang là challenge của Cloudflare, không phải app đã tải xong."""
+        try:
+            title = (await page.title()).strip().lower()
+        except Exception:
+            title = ""
+        if any(text in title for text in ("just a moment", "attention required", "checking your browser")):
+            return True
+        try:
+            return bool(await page.locator(
+                "#challenge-form, #cf-challenge-running, iframe[src*='challenges.cloudflare.com']"
+            ).count())
+        except Exception:
+            return False
+
+    async def _wait_chat_ready(self, page, box, new_chat: bool = True) -> None:
         """Chờ trang chat sẵn sàng nhận prompt, rồi mở phiên chat mới nếu cần.
 
         Input thường được render trước khi JS gắn handler: gõ sớm thì mất chữ
         hoặc Enter không gửi, nên sau khi input hiện ra vẫn chờ thêm
         `timing.ready_delay_ms`.
+
+        `new_chat=False` khi trang đang mở sẵn một hội thoại (resume bền vững)
+        hoặc một project — bấm New Chat lúc đó sẽ rời đúng ngữ cảnh vừa mở.
         """
-        await box.wait_for(state="visible", timeout=self._ready_timeout_ms)
-        if self._new_chat_selector:
+        try:
+            await box.wait_for(state="visible", timeout=self._ready_timeout_ms)
+        except Exception:
+            if await self._cloudflare_blocked(page):
+                raise OpenAIError(
+                    409, "cloudflare_challenge",
+                    f"Recipe '{self.slug}': Cloudflare đang chặn profile của account. "
+                    "Mở profile ở chế độ có giao diện để xác minh rồi thử lại; "
+                    "lỗi này không bị tính vào failstreak/khóa 24h.")
+            raise
+        if new_chat and self._new_chat_selector:
             await _resolve_locator(page, self._new_chat_selector).first.click(timeout=self._ready_timeout_ms)
             await box.wait_for(state="visible", timeout=self._ready_timeout_ms)
         await _sleep_ms(self._ready_delay_ms)
@@ -2497,6 +2584,15 @@ class BrowserRecipe(Provider):
     async def _run(self, prompt: str, model_id: str, assignment: "Assignment",
                    headed: bool | None, flow: str = "text",
                    files: "list[attach.Attachment] | None" = None) -> AsyncIterator[str]:
+        from ..automation.service import current_turn
+        from ..automation import journal
+        from ..automation.adapters import adapter_for
+        turn = current_turn.get()
+        submitted = False
+        adapter = adapter_for(self.url)
+        resume_url = turn.conversation_url if turn else None
+        if resume_url:
+            adapter.validate_conversation(resume_url)
         # Cấu hình đọc theo flow đang chạy, không đọc `self.*` phẳng: một
         # instance provider phục vụ nhiều flow, ghi vào self là flow sau đè lên
         # flow trước. Với recipe đời cũ `flow_prompt("text")` / `flow_done_signal
@@ -2546,17 +2642,58 @@ class BrowserRecipe(Provider):
             # chặn...) khiến log chỉ thấy lỗi biến cục bộ.
             captured_html: str | None = None
             try:
-                await page.goto(self._new_chat_url or self.url, wait_until="domcontentloaded",
+                await page.goto(resume_url or (turn.project_url if turn else None) or self._new_chat_url or self.url, wait_until="domcontentloaded",
                                 timeout=min(timeout_ms, 60000))
                 box = _resolve_locator(page, prompt_cfg["input_selector"]).first
-                await self._wait_chat_ready(page, box)
+                await self._wait_chat_ready(
+                    page, box, new_chat=not (resume_url or (turn is not None and turn.project_url)))
+                if resume_url:
+                    # SPA sites (Qwen) paint the composer on "/" first, then
+                    # replace history with the conversation route after loading
+                    # it. Checking page.url once right after goto races that
+                    # redirect and falsely reports a lost conversation.
+                    settle = time.monotonic() + 20
+                    while not _same_conversation_url(resume_url, _page_url(page)):
+                        if time.monotonic() > settle:
+                            applog.log(f"recipe: '{self.slug}' resume mở sai URL: lưu={resume_url} "
+                                       f"thực tế={_page_url(page)} title={await page.title()!r}", level="warn")
+                            if os.environ.get("CHAT2API_DEBUG_RESUME"):
+                                try:
+                                    await page.screenshot(path="data/debug-resume.png")
+                                except Exception:
+                                    pass
+                            from ..errors import OpenAIError
+                            raise OpenAIError(409, "conversation_unavailable",
+                                              "Website không mở được hội thoại đã lưu")
+                        await asyncio.sleep(0.25)
                 await _sleep_ms(self._input_delay_ms)
                 model = next((item for item in self._recipe["models"]
                               if item["id"] == model_id), None)
+                if turn is not None:
+                    from ..automation.catalog import cached
+                    observed = await asyncio.to_thread(cached, self.slug, assignment.account_id)
+                    if observed and observed["state"] == "supported":
+                        observed_model = next((m for m in observed["models"] if m["id"] == model_id), None)
+                        if observed_model:
+                            model = observed_model
+                        elif model and model.get("action"):
+                            from ..errors import OpenAIError
+                            raise OpenAIError(422, "model_unavailable", "Model không còn trong danh sách của account")
                 # Chuyển về chế độ chat trước, rồi mới chọn model: dropdown model
                 # của nhiều site chỉ liệt kê model hợp lệ cho chế độ đang bật.
                 await self._enter_flow(page, flow)
                 await self._select_model(page, model)
+                if turn is not None:
+                    if assignment.account_id is None:
+                        from ..errors import OpenAIError
+                        raise OpenAIError(422, "durable_account_required", "Session bền vững cần account/profile đã lưu")
+                    turn.account_id = assignment.account_id
+                    await asyncio.to_thread(journal.bind, turn.session_id, turn.account_id, resume_url)
+                    if turn.thinking is not None:
+                        await adapter.thinking(page, turn.thinking)
+                reply_selector = resp_cfg.get("last_message_selector")
+                prior_count = (await _resolve_locator(page, reply_selector).count()
+                               if resume_url and reply_selector else 0)
                 # File trước, chữ sau: nhiều site khóa nút gửi tới khi upload xong.
                 await self._attach_files(page, prompt_cfg, files or [])
                 if prompt_cfg.get("input_mode", "fill") == "type":
@@ -2565,6 +2702,11 @@ class BrowserRecipe(Provider):
                 else:
                     await box.fill(prompt)
                 submit = prompt_cfg.get("submit", "Enter")
+                if turn is not None:
+                    # Journal before the side effect: a crash in this interval is
+                    # deliberately uncertain, never automatically re-submitted.
+                    await asyncio.to_thread(journal.submitted, turn.request_id)
+                    submitted = True
                 if submit.startswith("click:"):
                     await _resolve_locator(page, submit.split(":", 1)[1]).first.click(timeout=10000)
                 else:
@@ -2581,6 +2723,13 @@ class BrowserRecipe(Provider):
                     if time.monotonic() > deadline:
                         raise TimeoutError(f"recipe '{self.slug}' timeout sau {timeout_ms}ms")
                     text, reply_html = await self._reply(page, flow)
+                    if prior_count and await _resolve_locator(page, reply_selector).count() <= prior_count:
+                        if _limit_compiled:
+                            matched = await self._check_dialog_limit(page, flow)
+                            if matched:
+                                raise self._record_limit_hit(matched, assignment, flow)
+                        await _sleep_ms(100)
+                        continue
                     if text is None:
                         # Trang đang điều hướng nên chưa đọc được gì. Giữ nguyên
                         # `last` / `stable_since`: coi đây là "text đổi thành
@@ -2634,7 +2783,7 @@ class BrowserRecipe(Provider):
                     else:
                         count = await _resolve_locator(page, ds["selector"]).count()
                         appear = dtype == "selector_appear"
-                        done = (((count > 0) == appear) and stable_since is not None
+                        done = (has_reply and ((count > 0) == appear) and stable_since is not None
                                 and quiet_for >= min(quiet_ms, 1000))
                     if done:
                         if _limit_compiled:
@@ -2689,6 +2838,10 @@ class BrowserRecipe(Provider):
                         return
                     await asyncio.sleep(0.5)
             finally:
+                if turn is not None and submitted:
+                    turn.conversation_url = _page_url(page)
+                    await asyncio.to_thread(journal.bind, turn.session_id, assignment.account_id,
+                                            turn.conversation_url)
                 if assignment.conversation_url is None:
                     # Cả đường lỗi/timeout cũng phải để lại link: đó chính là chỗ
                     # người dùng cần mở ra xem site thật đang hiện cái gì.

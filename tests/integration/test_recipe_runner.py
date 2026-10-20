@@ -50,6 +50,7 @@ async def test_reply_preserves_markdown_block_structure(fixture_recipe, tmp_path
             <div class="qwen-markdown-hr"><hr></div>
             <div class="qwen-markdown-paragraph"><strong>GLOSSARY</strong></div>
             <ul><li>秦老板: Chủ tiệm họ Tần</li><li>警服: đồng phục cảnh sát</li></ul>
+            <pre class="qwen-markdown-code"><div class="qwen-markdown-code-header-wrapper"><div class="qwen-markdown-code-header"><div>python</div><div class="qwen-markdown-code-header-actions"></div></div></div><div class="qwen-markdown-code-body"><div class="margin"><div class="margin-view-overlays">1</div></div><div class="view-lines"><div class="view-line">msg&nbsp;=&nbsp;"hi"</div><div class="view-line">print(msg)</div></div></div></pre>
           </div>
         """)
 
@@ -57,7 +58,8 @@ async def test_reply_preserves_markdown_block_structure(fixture_recipe, tmp_path
 
         assert text == (
             "Đoạn một.\n\nĐoạn hai.\n\n---\n\n**GLOSSARY**\n\n"
-            "- 秦老板: Chủ tiệm họ Tần\n- 警服: đồng phục cảnh sát"
+            "- 秦老板: Chủ tiệm họ Tần\n- 警服: đồng phục cảnh sát\n\n"
+            '```python\nmsg = "hi"\nprint(msg)\n```'
         )
         assert html is None
     finally:

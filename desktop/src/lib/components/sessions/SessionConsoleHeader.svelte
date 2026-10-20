@@ -14,6 +14,7 @@
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
+  import ProviderIcon from "./ProviderIcon.svelte";
 
   type ExportFormat = "md" | "html" | "json" | "jsonl";
 
@@ -107,6 +108,7 @@
       <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 font-data text-[10px] text-muted-foreground">
         <span class="flex items-center gap-1.5">
           <span class="size-1.5 rounded-full bg-success" aria-hidden="true"></span>
+          <ProviderIcon model={session.model_public_id} size={12} />
           {session.model_public_id}
         </span>
         <span>{session.kind === "api" ? "API" : "DESKTOP"}</span>

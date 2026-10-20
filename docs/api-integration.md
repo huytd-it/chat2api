@@ -10,7 +10,9 @@ có scope `admin`. Mọi ví dụ dùng `curl`; body JSON tương đương cho m
 ngôn ngữ.
 
 Phần giữ session có bản rút gọn với code Python/Node đầy đủ tại
-[docs/session-api.md](session-api.md).
+[docs/session-api.md](session-api.md). Hợp đồng phiên website bền vững
+(project, Thinking, retry idempotent, rollover) và hướng dẫn novel2epub ở
+[docs/novel2epub-integration.md](novel2epub-integration.md).
 
 ---
 

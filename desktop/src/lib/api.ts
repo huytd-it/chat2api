@@ -421,6 +421,10 @@ export interface ChatTarget {
   profileName: string;
   /** 'profile/host/account' — một dòng hiển thị sẵn. */
   label: string;
+  /** Chỉ có ở phiên bền: lượt thành công đã đếm và context vừa được mở lại. */
+  generation?: number | null;
+  successfulRequests?: number | null;
+  contextReset?: boolean;
 }
 
 function readTarget(r: Response): ChatTarget {
@@ -436,6 +440,9 @@ function readTarget(r: Response): ChatTarget {
     profileId: num("X-Chat2api-Profile-Id"),
     profileName: r.headers.get("X-Chat2api-Profile-Name") ?? "",
     label: r.headers.get("X-Chat2api-Target") ?? "",
+    generation: num("X-Chat2api-Generation"),
+    successfulRequests: num("X-Chat2api-Successful-Requests"),
+    contextReset: r.headers.get("X-Chat2api-Context-Reset") === "true",
   };
 }
 
@@ -447,6 +454,18 @@ function readTarget(r: Response): ChatTarget {
  * server ignores it for non-browser providers like Gemini/OpenAI passthrough).
  * Throws when the server reports an error before or MID-stream (SSE error
  * payload) so callers can render the real message instead of a dead pipe. */
+export interface DurableChatOptions {
+  /** ID do client sinh; phải ổn định qua retry của cùng một lượt. */
+  sessionId: string;
+  /** ID tác vụ; gửi lại đúng ID + body sẽ nhận kết quả cũ, không gõ lại prompt. */
+  requestId: string;
+  projectId?: string;
+  /** true = bật Thinking, false = tắt/Fast. Bỏ trống = mặc định của website. */
+  thinking?: boolean;
+  maxSessionRequests?: number;
+  rolloverPolicy?: "stop" | "new_context";
+}
+
 export async function streamChat(
   key: string,
   model: string,
@@ -458,17 +477,23 @@ export async function streamChat(
   onSessionId?: (sessionId: string) => void,
   accountId?: number,
   onTarget?: (target: ChatTarget) => void,
+  durable?: DurableChatOptions,
 ): Promise<void> {
   const base = await apiBase();
+  const payload: Record<string, unknown> = { model, stream: true, messages };
+  if (durable) {
+    payload.session_id = durable.sessionId;
+    payload.request_id = durable.requestId;
+    if (durable.projectId) payload.project_id = durable.projectId;
+    if (durable.thinking !== undefined) payload.thinking = durable.thinking;
+    if (durable.maxSessionRequests) payload.max_session_requests = durable.maxSessionRequests;
+    if (durable.rolloverPolicy) payload.rollover_policy = durable.rolloverPolicy;
+  }
   const r = await fetch(base + "/v1/chat/completions", {
     method: "POST",
-    headers: headers(key, headed, sessionId, accountId),
+    headers: headers(key, headed, durable?.sessionId || sessionId, accountId),
     signal,
-    body: JSON.stringify({
-      model,
-      stream: true,
-      messages,
-    }),
+    body: JSON.stringify(payload),
   });
   if (!r.ok || !r.body) {
     const data = await r.json().catch(() => ({}));
@@ -499,6 +524,114 @@ export async function streamChat(
       if (delta) onDelta(delta);
     }
   }
+}
+
+/** Model thật của một account, đọc từ capability cache của server. */
+export async function refreshAccountModels(
+  key: string,
+  accountId: number,
+  model: string,
+  headed = false,
+): Promise<{ account_id: number; state: string; checked_at: number | null; data: { id: string; label?: string }[] }> {
+  const base = await apiBase();
+  const r = await fetch(
+    base + `/v1/accounts/${accountId}/models?model=${encodeURIComponent(model)}&refresh_now=true`,
+    { headers: headers(key, headed) },
+  );
+  return asJson(r);
+}
+
+export interface AccountCapability {
+  state: "supported" | "unsupported" | "unknown";
+  checked_at: number | null;
+  details?: unknown;
+}
+
+/** Trạng thái đã kiểm chứng theo account: models / thinking / projects / images. */
+export async function fetchAccountCapabilities(
+  key: string,
+  accountId: number,
+  recipeSlug: string,
+): Promise<Record<"models" | "thinking" | "projects" | "images", AccountCapability>> {
+  const base = await apiBase();
+  const r = await fetch(
+    base + `/v1/accounts/${accountId}/capabilities?recipe_slug=${encodeURIComponent(recipeSlug)}`,
+    { headers: headers(key) },
+  );
+  return asJson(r);
+}
+
+/** Project thật trên website, đã nhập về DB local của chat2api. */
+export interface ProjectSummary {
+  id: string;
+  recipe_slug: string;
+  active_account_id: number;
+  title: string;
+  state: string;
+  updated_at: number;
+  remote_url: string | null;
+  instructions: string;
+  source_complete: number;
+  copy_state: string;
+  files: { name: string; mime: string }[];
+}
+
+export interface ProjectFileInput {
+  name: string;
+  mime: string;
+  /** base64 thuần, không kèm tiền tố data:. */
+  data: string;
+}
+
+/** Liệt kê project trên account. Server mở browser nên có thể mất vài giây. */
+export async function fetchProjects(
+  key: string,
+  model: string,
+  accountId: number,
+  headed = false,
+): Promise<ProjectSummary[]> {
+  const base = await apiBase();
+  const r = await fetch(
+    base + `/v1/projects?model=${encodeURIComponent(model)}&account_id=${accountId}`,
+    { headers: headers(key, headed) },
+  );
+  const data = await asJson(r);
+  return data.data ?? [];
+}
+
+export async function createProject(
+  key: string,
+  body: {
+    id: string;
+    model: string;
+    account_id: number;
+    title: string;
+    instructions: string;
+    files: ProjectFileInput[];
+  },
+  headed = false,
+): Promise<ProjectSummary> {
+  const base = await apiBase();
+  const r = await fetch(base + "/v1/projects", {
+    method: "POST",
+    headers: headers(key, headed),
+    body: JSON.stringify(body),
+  });
+  return asJson(r);
+}
+
+export async function deleteProject(
+  key: string,
+  projectId: string,
+  model: string,
+  headed = false,
+): Promise<void> {
+  const base = await apiBase();
+  const r = await fetch(
+    base + `/v1/projects/${encodeURIComponent(projectId)}?model=${encodeURIComponent(model)}`,
+    { method: "DELETE", headers: headers(key, headed) },
+  );
+  await asJson(r);
 }
 
 /** Một ô trong ma trận profile × domain × account của bàn test.

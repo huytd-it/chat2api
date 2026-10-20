@@ -16,6 +16,8 @@
     streamChat,
     updateSession,
     chatContent,
+    fetchAccountCapabilities,
+    refreshAccountModels,
     type ChatAttachment,
     type ChatMessage,
     type ChatTarget,
@@ -29,6 +31,7 @@
   import SessionMessageCard from "./SessionMessageCard.svelte";
   import SessionBank from "./sessions/SessionBank.svelte";
   import SessionComposer from "./sessions/SessionComposer.svelte";
+  import ProjectDialog from "./sessions/ProjectDialog.svelte";
   import SessionConsoleHeader from "./sessions/SessionConsoleHeader.svelte";
   import TestBench from "./sessions/TestBench.svelte";
   import { modelFor, type BatchJob, type RotationMode } from "./sessions/shared";
@@ -87,6 +90,16 @@
    * có delta đầu tiên, tức là "đang gửi tới đâu" hiện được trong lúc còn chờ. */
   let liveTarget = $state<ChatTarget | null>(null);
   let openingConversation = $state(false);
+  /** Account cho lượt chat 1-1. null = để server tự chọn (và project bị khóa). */
+  let chatAccountId = $state<number | null>(null);
+  let thinkingMode = $state<"auto" | "on" | "off">("auto");
+  let thinkingCapability = $state<"supported" | "unsupported" | "unknown">("unknown");
+  let projectId = $state("");
+  let projectTitle = $state("");
+  let projectDialogOpen = $state(false);
+  let refreshingModels = $state<number[]>([]);
+  let capabilityTicket = 0;
+  let contextKey = $state("");
 
   let batchJobs = $state<BatchJob[]>([]);
   let listTimer: ReturnType<typeof setTimeout> | null = null;
@@ -121,6 +134,27 @@
           rotationMode === "round_robin" ? "chia vòng tròn" : "lấp đầy từng target"
         }`,
   );
+
+  const modelSlug = $derived(($selectedModel || "").split("/", 1)[0]);
+  const thinkingCapable = $derived(modelSlug === "qwen-web" || modelSlug === "chatgpt-web");
+  /** ChatGPT khóa Think trong chat project trên account Free đã kiểm chứng. */
+  const thinkingAvailable = $derived(
+    !selected.length &&
+      thinkingCapable &&
+      thinkingCapability !== "unsupported" &&
+      !(modelSlug === "chatgpt-web" && projectId),
+  );
+  const chatAccountOptions = $derived(
+    targets.filter((item) => item.ready && item.models.includes($selectedModel)),
+  );
+  const projectAccountId = $derived(
+    chatAccountId ?? active?.account_id ?? (selectedTargets.length === 1 ? selectedTargets[0] : null),
+  );
+  const projectAccountLabel = $derived.by(() => {
+    const target = targets.find((item) => item.account_id === projectAccountId);
+    return target ? `${target.profile_name} · ${target.host} · ${target.label}` : "";
+  });
+  const durableChat = $derived(!selected.length && Boolean(thinkingCapable || projectId));
 
   /** Bàn test và trình xem message dùng chung một rail bên phải. */
   function openBench() {
@@ -192,6 +226,9 @@
       if (active.model_public_id && $models.some((m) => m.id === active?.model_public_id)) {
         $selectedModel = active.model_public_id;
       }
+      // Không ghim account của session vào header: service đã giữ account
+      // trong state, còn header ghim sẽ chặn failover khi account hết quota.
+      chatAccountId = null;
       setTimeout(() => {
         if (traceEl) traceEl.scrollTop = traceEl.scrollHeight;
       });
@@ -207,7 +244,68 @@
     inspected = null;
     prompt = "";
     bankOpen = false;
+    projectId = "";
+    projectTitle = "";
+    chatAccountId = null;
     setTimeout(() => composer?.focusPrompt());
+  }
+
+  // Đổi model/account thì project cũ không còn chắc chắn thuộc account đang
+  // chạy; bỏ chọn thay vì gửi vào một project của account khác.
+  let lastAccountKey = $state("");
+  $effect(() => {
+    const key = `${$selectedModel}|${chatAccountId ?? ""}`;
+    if (lastAccountKey && lastAccountKey !== key) {
+      projectId = "";
+      projectTitle = "";
+    }
+    lastAccountKey = key;
+  });
+
+  // Capability được kiểm theo account, không suy từ tên gói. Chưa có dữ liệu
+  // (unknown) thì vẫn hiện Thinking cho provider đã biết, nhưng không khẳng
+  // định là account này chắc chắn hỗ trợ.
+  $effect(() => {
+    const account = chatAccountId ?? active?.account_id ?? null;
+    const slug = modelSlug;
+    const ticket = ++capabilityTicket;
+    if (!account || !slug) {
+      thinkingCapability = "unknown";
+      return;
+    }
+    void (async () => {
+      try {
+        const caps = await fetchAccountCapabilities($apiKey, account, slug);
+        if (ticket === capabilityTicket) {
+          thinkingCapability = caps.thinking?.state ?? "unknown";
+        }
+      } catch {
+        if (ticket === capabilityTicket) thinkingCapability = "unknown";
+      }
+    })();
+  });
+
+  async function refreshModel(accountId: number) {
+    const target = targets.find((item) => item.account_id === accountId);
+    const model = targetModels[accountId] || target?.models[0] || $selectedModel;
+    if (!target || !model || refreshingModels.includes(accountId)) return;
+    refreshingModels = [...refreshingModels, accountId];
+    try {
+      const result = await refreshAccountModels($apiKey, accountId, model, $headedBrowser);
+      showToast(
+        `${target.profile_name} · ${target.host}: ${result.data.length} model ` +
+          `(${result.state === "supported" ? "đã xác nhận" : result.state}).`,
+      );
+      await loadTargets();
+    } catch (error) {
+      showToast("Không cập nhật được model: " + (error as Error).message);
+    } finally {
+      refreshingModels = refreshingModels.filter((id) => id !== accountId);
+    }
+  }
+
+  function newDurableId(): string {
+    return crypto.randomUUID().replaceAll("-", "");
   }
 
   async function loadTargets() {
@@ -423,11 +521,24 @@
     ticker = setInterval(() => (elapsed += 1), 1000);
     // Tách phiên: luôn sinh id mới và chỉ gửi đúng lượt này, không kèm
     // history của session đang mở. Giữ context: nối vào session đang mở.
-    const existingId = keepContext
-      ? (active?.id ?? crypto.randomUUID().replaceAll("-", ""))
-      : crypto.randomUUID().replaceAll("-", "");
+    const existingId = keepContext ? (active?.id ?? newDurableId()) : newDurableId();
     const turn: ChatMessage = { role: "user", content: chatContent(text, files) };
-    const outgoing = keepContext ? [...history(), turn] : [turn];
+    // Phiên website bền nhận đúng MỘT tin user mới; history nằm ở hội thoại
+    // website. Provider khác vẫn đi đường cũ (history đầy đủ như trước).
+    const outgoing = durableChat ? [turn] : keepContext ? [...history(), turn] : [turn];
+    // Chỉ ghim khi người dùng chọn tay. State của session đã tự giữ account;
+    // gửi header account của session sẽ chặn failover khi hết quota.
+    const requestedAccount = chatAccountId;
+    const durable = durableChat
+      ? {
+          sessionId: existingId,
+          requestId: newDurableId(),
+          projectId: projectId || undefined,
+          thinking: thinkingMode === "auto" ? undefined : thinkingMode === "on",
+          maxSessionRequests: 10,
+          rolloverPolicy: "new_context" as const,
+        }
+      : undefined;
 
     // Optimistic trace: phần lưu bền được nạp lại từ server ngay khi stream đóng.
     const temporary: SessionMessage = {
@@ -485,11 +596,28 @@
         $headedBrowser,
         existingId,
         () => {},
-        undefined,
+        requestedAccount ?? undefined,
         (target) => (liveTarget = target),
+        durable,
       );
+      // TS coi liveTarget vẫn là null sau `liveTarget = null` vì callback chạy
+      // trong lúc stream; đọc qua bản có type rõ ràng để không thu hẹp sai.
+      const finalTarget = liveTarget as ChatTarget | null;
+      const switched =
+        finalTarget?.accountId != null &&
+        requestedAccount != null &&
+        finalTarget.accountId !== requestedAccount;
+      const reset = Boolean(finalTarget?.contextReset);
       await openSession(existingId);
       await loadList();
+      if (switched) {
+        showToast(
+          "Account cũ hết quota — đã chuyển account" +
+            (projectId ? " và tạo bản sao project (chỉ file/chỉ dẫn)." : " và mở context mới."),
+        );
+      } else if (reset) {
+        showToast("Đủ 10 lượt — đã mở context mới, giữ nguyên project/file chung.");
+      }
     } catch (error) {
       if ((error as Error).name !== "AbortError") {
         showToast("Request lỗi: " + (error as Error).message);
@@ -784,14 +912,31 @@
       {planLine}
       {promptCount}
       {rotationMode}
+      bind:thinkingMode
+      {thinkingAvailable}
+      projectLabel={projectTitle || projectId}
+      durable={durableChat}
+      accountOptions={chatAccountOptions}
+      bind:accountId={chatAccountId}
       onSend={send}
       onStop={() => abortCtrl?.abort()}
       onToggleBench={() => (benchOpen ? (benchOpen = false) : openBench())}
       onOpenBench={openBench}
       {onHeadedChange}
       onRemoveTarget={toggleTarget}
+      onOpenProject={() => (projectDialogOpen = true)}
     />
   </section>
+
+  <ProjectDialog
+    bind:open={projectDialogOpen}
+    model={$selectedModel}
+    accountId={projectAccountId}
+    bind:selectedId={projectId}
+    bind:selectedTitle={projectTitle}
+    accountLabel={projectAccountLabel}
+    onChanged={loadList}
+  />
 
   {#if benchOpen}
     <div
@@ -809,12 +954,14 @@
         {planLine}
         {batchJobs}
         opening={openingTargets}
+        {refreshingModels}
         onClose={() => (benchOpen = false)}
         onToggle={toggleTarget}
         onToggleMany={toggleMany}
         onReload={loadTargets}
         onOpenWindows={() => prewarmTargets()}
         onPickModel={pickModel}
+        onRefreshModel={refreshModel}
         onOpenSession={openSession}
       />
     </div>

@@ -1,7 +1,9 @@
 slug: chatgpt-web
 url: https://chatgpt.com/
 prompt:
-  input_selector: '[aria-label="Ask ChatGPT"]'
+  # Composer là ProseMirror; aria-label đổi theo project ("New chat in ...")
+  # nên neo vào contenteditable thay vì câu chữ cố định.
+  input_selector: div[contenteditable="true"][role="textbox"]
   input_mode: fill
   submit: click:button[aria-label="Send"]
 response:
@@ -11,8 +13,21 @@ response:
     selector: button[aria-label="Stop"]
     quiet_ms: 1000
     timeout_ms: 120000
+flows:
+  image:
+    type: image
+    # Trang tạo ảnh có composer riêng; vào bằng nút Images trong sidebar.
+    action: 'click:nav[aria-label="Chat history"] button:has-text("Images")'
+    response:
+      media_selector: img[alt^="Generated image"]
+      done_signal:
+        type: selector_appear
+        selector: img[alt^="Generated image"]
+        timeout_ms: 300000
 models:
 - id: default
+- id: image
+  capability: image
 login:
   strategy: round_robin
   quota: 50

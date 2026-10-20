@@ -1,9 +1,13 @@
 import asyncio
+import base64
+import binascii
 import json
+import re
 import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
+from urllib.parse import unquote_to_bytes
 
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,6 +39,64 @@ def _sse_error(e: OpenAIError) -> str:
     # hiển thị đúng thông điệp (timeout, hết lượt dùng thử, upstream fail...).
     return "data: " + json.dumps(
         {"error": {"message": e.message, "type": e.typ, "code": e.code}}) + "\n\n"
+
+
+def _image_mime(data: bytes, declared: str = "") -> str:
+    declared = (declared or "").split(";")[0].strip().lower()
+    if declared.startswith("image/"):
+        return declared
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return declared or "image/png"
+
+
+def _image_extension(mime: str) -> str:
+    return {"image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}.get(mime, ".png")
+
+
+async def _image_bytes(item: dict) -> tuple[bytes, str]:
+    """Bytes + mime của một item ảnh, dù site trả b64, data URL hay http URL.
+
+    ChatGPT trả blob URL chỉ sống trong browser; endpoint luôn xin b64 từ
+    provider nên nhánh đó đã có sẵn base64. URL http còn lại (Qwen CDN) được tải
+    về để lưu bền, tránh chữ ký hết hạn.
+    """
+    raw = item.get("b64_json")
+    if raw:
+        try:
+            data = base64.b64decode(re.sub(r"\s+", "", str(raw)))
+            return data, _image_mime(data, item.get("mime", ""))
+        except (binascii.Error, ValueError):
+            return b"", ""
+    url = str(item.get("url") or "")
+    if url.startswith("data:"):
+        match = re.match(r"^data:([^;,]+)(;base64)?,(.*)$", url, re.DOTALL)
+        if match:
+            try:
+                data = (base64.b64decode(match.group(3)) if match.group(2)
+                        else unquote_to_bytes(match.group(3)))
+                return data, _image_mime(data, match.group(1))
+            except (binascii.Error, ValueError):
+                return b"", ""
+        return b"", ""
+    if url.startswith(("http://", "https://")):
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.content
+                if data:
+                    return data, _image_mime(data, response.headers.get("content-type", ""))
+        except Exception:
+            return b"", ""
+    return b"", ""
 
 
 def _target_headers(session_id: str, assignment) -> dict[str, str]:
@@ -453,13 +515,13 @@ def create_app(cfg: Config) -> FastAPI:
                         try:
                             # Combo failover giữ provider là combo, delegate bên trong sẽ thử từng member
                             if isinstance(original_combo_provider_img, ComboPImg) and combo_strategy_img == "failover":
-                                kwargs = {"headed": headed, "response_format": body.response_format,
+                                kwargs = {"headed": headed, "response_format": "b64_json",
                                           "model_id": original_combo_local_img, "sticky_key": requested_session or ""}
                                 if assignment is not None:
                                     kwargs["assignment"] = assignment
                                 data = await original_combo_provider_img.generate_images(body.prompt, n=body.n, size=body.size, **kwargs)
                                 return data
-                            kwargs = {"headed": headed, "response_format": body.response_format,
+                            kwargs = {"headed": headed, "response_format": "b64_json",
                                       "model_id": local}
                             if assignment is not None:
                                 kwargs["assignment"] = assignment
@@ -470,7 +532,7 @@ def create_app(cfg: Config) -> FastAPI:
                                 # generic provider: prompt, n, size, model_id, response_format
                                 data = await provider.generate_images(body.prompt, n=body.n, size=body.size,
                                                                       model_id=local,
-                                                                      response_format=body.response_format)
+                                                                      response_format="b64_json")
                             if not isinstance(provider, ComboPImg):
                                 rt.mark_success(provider.slug)
                             return data
@@ -513,16 +575,35 @@ def create_app(cfg: Config) -> FastAPI:
         try:
             sessions.first_delta(recording)
             data = await _do_generate()
-            # normalize data items
-            normed = []
+            # Normalize + giữ bytes để lưu bền. Response luôn xin b64 từ
+            # provider (blob URL của ChatGPT chỉ sống trong browser), rồi tự
+            # dựng lại đúng định dạng client yêu cầu.
+            normed: list[dict] = []
+            stored: list = []
+            stored_at: dict[int, int] = {}
             for item in data:
                 if not isinstance(item, dict):
                     continue
+                payload, mime = await _image_bytes(item)
+                slot = None
+                if payload:
+                    mime = mime or "image/png"
+                    name = f"image-{len(stored) + 1}{_image_extension(mime)}"
+                    stored.append(attachments.Attachment(name=name, mime=mime, data=payload))
+                    slot = len(stored) - 1
                 entry: dict = {}
                 if body.response_format == "url":
-                    entry["url"] = item.get("url") or item.get("b64_json") or ""
+                    if item.get("url") and not str(item["url"]).startswith("blob:"):
+                        entry["url"] = item["url"]
+                    elif payload:
+                        entry["url"] = (f"data:{mime};base64,"
+                                        + base64.b64encode(payload).decode("ascii"))
+                    else:
+                        continue
                 else:
-                    if item.get("b64_json"):
+                    if payload:
+                        entry["b64_json"] = base64.b64encode(payload).decode("ascii")
+                    elif item.get("b64_json"):
                         entry["b64_json"] = item["b64_json"]
                     elif item.get("url"):
                         entry["url"] = item["url"]
@@ -530,13 +611,26 @@ def create_app(cfg: Config) -> FastAPI:
                         continue
                 if item.get("revised_prompt"):
                     entry["revised_prompt"] = item["revised_prompt"]
+                if slot is not None:
+                    stored_at[len(normed)] = slot
                 normed.append(entry)
             # finish ok
             url = assignment.conversation_url if assignment else None
             html = assignment.html if assignment else None
-            await asyncio.to_thread(
+            saved = await asyncio.to_thread(
                 sessions.finish, recording, f"[images] {body.prompt}",
-                html=html, conversation_url=url)
+                html=html, conversation_url=url, attachments=stored)
+            saved = saved or []
+            base = str(request.base_url).rstrip("/")
+            for index, slot in stored_at.items():
+                if slot >= len(saved):
+                    continue
+                image_id = saved[slot]
+                normed[index]["image_id"] = image_id
+                # URL do chat2api phục vụ không hết hạn như link CDN đã ký.
+                if body.response_format == "url":
+                    normed[index]["url"] = (
+                        f"{base}/v1/images/{recording.session_id}/{image_id}")
             if assignment is not None:
                 assignment.release()
             response.headers.update(target_headers)
@@ -559,8 +653,22 @@ def create_app(cfg: Config) -> FastAPI:
                 assignment.release()
             raise
 
+    @v1.get("/images/{session_id}/{attachment_id}")
+    async def image_file(session_id: str, attachment_id: int):
+        """Tải ảnh đã lưu của một session bằng API key (URL ổn định, không hết hạn)."""
+        found = await asyncio.to_thread(sessions.attachment_file, session_id, attachment_id)
+        if found is None:
+            raise OpenAIError(404, "not_found", "Ảnh không tồn tại")
+        path, mime, name = found
+        return FileResponse(path, media_type=mime or "application/octet-stream",
+                            filename=name, content_disposition_type="inline")
+
     @v1.post("/chat/completions")
     async def chat(body: ChatRequest, request: Request, response: Response):
+        from .automation.service import current_turn, handle as durable_chat
+        turn = current_turn.get()
+        if turn is None and (body.session_id or body.request_id or body.project_id or body.thinking is not None):
+            return await durable_chat(body, request, response, chat)
         cfg_ = request.app.state.cfg
         rt = request.app.state.router
         try:
@@ -629,6 +737,9 @@ def create_app(cfg: Config) -> FastAPI:
             except (TypeError, ValueError):
                 raise OpenAIError(400, "invalid_target",
                                   f"X-Chat2api-Account-Id không phải số: {raw_target!r}")
+
+        if turn is not None and turn.account_id is not None:
+            target_account_id = turn.account_id
 
         # Chọn account/profile TRƯỚC khi mở response: SSE không sửa được header
         # sau byte đầu, mà "request này đi tới đâu" phải trả về ngay. Đây cũng là
@@ -703,7 +814,7 @@ def create_app(cfg: Config) -> FastAPI:
             from .agents import llm
 
             # Agent fallback chỉ gõ chữ; có file thì thà báo lỗi còn hơn trả lời thiếu file.
-            return (isinstance(provider, BR) and target_account_id is None and cfg_.enable_fallback
+            return (turn is None and isinstance(provider, BR) and target_account_id is None and cfg_.enable_fallback
                     and not has_files and llm.configured(cfg_))
 
         async def agent_stream():
@@ -787,18 +898,21 @@ def create_app(cfg: Config) -> FastAPI:
                             return
                         raise OpenAIError(502, "upstream_error", str(e), "api_error")
                 except AccountLimitExceeded as limit_exc:
-                    if (target_account_id is not None or assignment is None
+                    if ((target_account_id is not None and (turn is None or raw_target)) or assignment is None
                             or not isinstance(provider, BR)):
                         raise account_limit_error(provider.slug, limit_exc, response)
                     tried.add(limit_exc.account_key or _akey(assignment))
                     assignment.release()
                     try:
                         assignment = await provider.assign(
-                            target_account_id, sticky_key=requested_session or "",
+                            None if turn is not None else target_account_id, sticky_key=requested_session or "",
                             exclude=tried)
                     except AccountLimitExceeded as exhausted:
                         raise account_limit_error(provider.slug, exhausted, response)
                     tried.add(_akey(assignment))
+                    if turn is not None:
+                        from .automation.service import switch_account
+                        await switch_account(provider, assignment)
                     assignment.headed = provider.resolve_headed(headed, assignment.profile)
                     for _k, _v in _target_headers(recording.session_id, assignment).items():
                         target_headers[_k] = _v
@@ -899,6 +1013,10 @@ def create_app(cfg: Config) -> FastAPI:
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
 
     admin = APIRouter(prefix="/admin", dependencies=[Depends(auth.require_key)])
+    from .automation.projects import register as register_projects
+    register_projects(app)
+    from .automation.catalog import register as register_catalog
+    register_catalog(app)
     register_admin(app, admin)
 
     app.include_router(v1, prefix="/v1")

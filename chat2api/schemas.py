@@ -13,6 +13,13 @@ class ChatRequest(BaseModel):
     model: str
     messages: list[Message]
     stream: bool = False
+    # Opt-in durable browser conversation. Legacy clients keep their old path.
+    session_id: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    request_id: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    thinking: bool | None = None
+    project_id: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    max_session_requests: int = Field(default=10, ge=1, le=1000)
+    rollover_policy: str = Field(default="stop", pattern=r"^(stop|new_context)$")
 
     def as_list(self) -> list[dict]:
         """Message đã chuẩn hoá: `content` luôn là chữ, file tách sang `attachments`.

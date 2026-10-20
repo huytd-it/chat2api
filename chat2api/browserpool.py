@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,9 @@ async def open_session(mode: str, *, headless: bool, user_data_dir=None,
         "max_pages": max(1, int(max_pages)),
         "extra_flags": list(PROFILE_ARGS),
     }
+    executable = os.environ.get("CHAT2API_BROWSER_EXECUTABLE", "").strip()
+    if executable:
+        kwargs["executable_path"] = executable
     if mode == "stealthy":
         kwargs.update(hide_canvas=True, block_webrtc=True)
     if user_data_dir:

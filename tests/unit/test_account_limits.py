@@ -355,4 +355,6 @@ def test_qwen_seed_recipe_matches_sample():
     cfg = limits.limit_config(data.get("response") or {})
     assert cfg["patterns"], "qwen-web phai seed san limit_patterns"
     assert limits.match_limit(QWEN_SAMPLE, cfg["compiled"])
-    assert cfg["on_missing_copy"] is True
+    # Qwen giờ chốt bằng nút Stop biến mất (nút Copy chỉ render khi hover),
+    # nên seed recipe không còn phụ thuộc "mất nút Copy = limit".
+    assert (data.get("response") or {}).get("done_signal", {}).get("type") == "selector_disappear"

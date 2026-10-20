@@ -63,13 +63,15 @@ def _attachments_root(db) -> Path:
 
 
 def _save_attachments(conn: sqlite3.Connection, db, session_id: str, message_id: int,
-                      items: list, now: int) -> None:
+                      items: list, now: int) -> list[int]:
     """Chép file của một message xuống đĩa để trang Sessions xem lại được.
 
     Hỏng ở đây (đĩa đầy, quyền ghi) không được làm hỏng request chat: file đã
     nằm trong bộ nhớ và vẫn được gửi tới site, chỉ là bản ghi thiếu preview.
+    Trả id các attachment đã lưu để endpoint ảnh dựng URL tải ổn định.
     """
     folder = _attachments_root(db) / session_id
+    saved: list[int] = []
     for item in items:
         try:
             folder.mkdir(parents=True, exist_ok=True)
@@ -78,12 +80,14 @@ def _save_attachments(conn: sqlite3.Connection, db, session_id: str, message_id:
             stored.write_bytes(item.data)
         except OSError:
             continue
-        conn.execute(
+        cursor = conn.execute(
             "INSERT INTO attachment(message_id, kind, path, mime, bytes, name, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (message_id, item.kind, f"attachments/{session_id}/{stored.name}", item.mime,
              len(item.data), item.name, now),
         )
+        saved.append(int(cursor.lastrowid))
+    return saved
 
 
 def _drop_attachment_files(db, session_ids: list[str] | None) -> None:
@@ -252,17 +256,20 @@ def finish(
     http_status: int | None = None,
     finish_reason: str = "stop",
     conversation_url: str | None = None,
-) -> None:
+    attachments: list | None = None,
+) -> list[int] | None:
     """Đóng recording trong một transaction, kể cả reply lỗi/partial/cancel.
 
     `conversation_url` là link hội thoại thật trên site nguồn mà request này vừa
     tạo ra — thứ duy nhất cho phép mở lại đúng chỗ để xem trực tiếp.
+    `attachments` là kết quả media (ảnh) lưu cùng message assistant; trả id các
+    file đã ghi để endpoint ảnh dựng URL tải.
     """
     if not recording.enabled:
-        return
+        return None
     db = store.default()
     if db is None:
-        return
+        return None
     now = store.now_ms()
     duration = max(0, now - recording.started_at)
     conn = db.connection()
@@ -275,6 +282,8 @@ def finish(
              error_message, recording.ttfb_ms, duration, len(content), now),
         )
         message_id = int(cursor.lastrowid)
+        saved = _save_attachments(conn, db, recording.session_id, message_id,
+                                  attachments or [], now)
         _write_artifacts(conn, message_id, content, now)
         conn.execute(
             "UPDATE request_log SET message_id = ?, status = ?, http_status = ?, error_code = ?, "
@@ -288,6 +297,7 @@ def finish(
             conn.execute("UPDATE session SET site_conversation_url = ? WHERE id = ?",
                          (conversation_url, recording.session_id))
         _refresh_session(conn, recording.session_id, now)
+    return saved
 
 
 def _refresh_session(conn: sqlite3.Connection, session_id: str, now: int) -> None:

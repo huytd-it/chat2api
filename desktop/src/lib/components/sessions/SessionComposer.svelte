@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowRight, Link, LinkBreak, Paperclip, Plus, Stop, Target, TestTube, X } from "phosphor-svelte";
+  import { ArrowRight, FolderSimple, Link, LinkBreak, Paperclip, Plus, Stop, Target, TestTube, X } from "phosphor-svelte";
   import {
     ATTACHMENT_MAX_BYTES,
     ATTACHMENT_MAX_COUNT,
@@ -17,7 +17,10 @@
   import * as Select from "$lib/components/ui/select";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
   import AttachmentTile from "./AttachmentTile.svelte";
+  import ProviderIcon from "./ProviderIcon.svelte";
   import { TEST_PROMPTS, type RotationMode } from "./shared";
+
+  type ThinkingMode = "auto" | "on" | "off";
 
   let {
     prompt = $bindable(),
@@ -34,12 +37,19 @@
     planLine,
     promptCount,
     rotationMode,
+    thinkingMode = $bindable("auto"),
+    thinkingAvailable = false,
+    projectLabel = "",
+    durable = false,
+    accountOptions = [],
+    accountId = $bindable(null),
     onSend,
     onStop,
     onToggleBench,
     onOpenBench,
     onHeadedChange,
     onRemoveTarget,
+    onOpenProject,
   }: {
     prompt: string;
     extraPrompts: string[];
@@ -57,12 +67,19 @@
     planLine: string;
     promptCount: number;
     rotationMode: RotationMode;
+    thinkingMode?: ThinkingMode;
+    thinkingAvailable?: boolean;
+    projectLabel?: string;
+    durable?: boolean;
+    accountOptions?: TestTarget[];
+    accountId?: number | null;
     onSend: () => void;
     onStop: () => void;
     onToggleBench: () => void;
     onOpenBench: () => void;
     onHeadedChange: () => void;
     onRemoveTarget: (accountId: number) => void;
+    onOpenProject: () => void;
   } = $props();
 
   let promptEl = $state<HTMLTextAreaElement | null>(null);
@@ -71,6 +88,7 @@
   let composing = $state(false);
   let fileEl = $state<HTMLInputElement | null>(null);
   let dragging = $state(false);
+  const AUTO_ACCOUNT = "__auto__";
 
   /** Nhận file từ nút kẹp giấy, kéo-thả và dán — cùng một trần số lượng/dung lượng. */
   async function addFiles(files: Iterable<File>) {
@@ -272,14 +290,79 @@
     {:else}
       <Select.Root type="single" bind:value={$selectedModel}>
         <Select.Trigger class="w-full max-w-56 font-data text-xs" aria-label="Model">
-          {$selectedModel || "Chưa có model"}
+          <span class="flex min-w-0 items-center gap-1.5">
+            {#if $selectedModel}<ProviderIcon model={$selectedModel} />{/if}
+            <span class="truncate">{$selectedModel || "Chưa có model"}</span>
+          </span>
         </Select.Trigger>
         <Select.Content>
           {#each $models as model (model.id)}
-            <Select.Item value={model.id} label={model.id}>{model.id}</Select.Item>
+            <Select.Item value={model.id} label={model.id}>
+              <span class="flex items-center gap-2">
+                <ProviderIcon model={model.id} />
+                <span class="font-data text-xs">{model.id}</span>
+              </span>
+            </Select.Item>
           {/each}
         </Select.Content>
       </Select.Root>
+
+      <Select.Root
+        type="single"
+        value={accountId ? String(accountId) : AUTO_ACCOUNT}
+        onValueChange={(value) => (accountId = value === AUTO_ACCOUNT ? null : Number(value))}
+      >
+        <Select.Trigger class="max-w-52 font-data text-[11px]" aria-label="Account cho lượt chat">
+          <span class="truncate">
+            {#if accountId}
+              {accountOptions.find((item) => item.account_id === accountId)?.profile_name ?? "account"}
+              · {accountOptions.find((item) => item.account_id === accountId)?.label ?? accountId}
+            {:else}
+              Account: tự chọn
+            {/if}
+          </span>
+        </Select.Trigger>
+        <Select.Content>
+          <Select.Item value={AUTO_ACCOUNT} label="Tự chọn account">Tự chọn account</Select.Item>
+          {#each accountOptions as item (item.account_id)}
+            <Select.Item value={String(item.account_id)} label={`${item.profile_name} · ${item.host} · ${item.label}`}>
+              <span class="font-data text-[11px]">{item.profile_name} · {item.host} · {item.label}</span>
+            </Select.Item>
+          {/each}
+        </Select.Content>
+      </Select.Root>
+
+      <Button
+        size="sm"
+        variant={projectLabel ? "secondary" : "outline"}
+        class="max-w-52 text-[11px]"
+        title={accountId
+          ? "Chọn project thật trên website, hoặc tạo mới kèm chỉ dẫn/file chung"
+          : "Chọn một account cụ thể trước khi dùng project"}
+        onclick={onOpenProject}
+      >
+        <FolderSimple />
+        <span class="truncate">{projectLabel || "Project"}</span>
+      </Button>
+
+      {#if thinkingAvailable}
+        <Select.Root
+          type="single"
+          value={thinkingMode}
+          onValueChange={(value) => (thinkingMode = value as ThinkingMode)}
+        >
+          <Select.Trigger class="font-data text-[11px]" aria-label="Thinking">
+            <span class="truncate">
+              {thinkingMode === "on" ? "Thinking" : thinkingMode === "off" ? "Fast" : "Thinking: Auto"}
+            </span>
+          </Select.Trigger>
+          <Select.Content>
+            <Select.Item value="auto" label="Auto">Auto (mặc định website)</Select.Item>
+            <Select.Item value="on" label="Thinking">Bật Thinking</Select.Item>
+            <Select.Item value="off" label="Fast">Tắt Thinking / Fast</Select.Item>
+          </Select.Content>
+        </Select.Root>
+      {/if}
     {/if}
 
     <Button
@@ -418,6 +501,8 @@
   <p class="mt-2 text-[10px] text-muted-foreground">
     {#if selected.length}
       {planLine}{attachments.length ? ` · kèm ${attachments.length} file ở mọi request` : ""} · Enter để gửi
+    {:else if durable}
+      Phiên website bền: chỉ gửi tin mới, context nằm trên website và khôi phục sau restart · Enter gửi
     {:else if hasActive}
       {keepContext ? "Đang nối vào session đang mở" : "Lượt tới sẽ tạo session mới"} · Enter gửi · Shift+Enter xuống dòng
     {:else}
