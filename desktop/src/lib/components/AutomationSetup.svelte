@@ -16,7 +16,7 @@
   import { RecipeForm } from "../recipeForm.svelte";
   import { refreshAfterRecipeChange } from "../sync";
   import { profiles } from "../sync";
-  import RecipeFields from "./RecipeFields.svelte";
+  import RecipeFields from "./AutomationFields.svelte";
   import RecordSessionPanel from "./RecordSessionPanel.svelte";
   import TrialReport from "./TrialReport.svelte";
   import { Button } from "$lib/components/ui/button";
@@ -28,10 +28,12 @@
   import { CaretDown, Check, CircleNotch, Copy, Plus, Record as RecordIcon, Sliders, Sparkle, Stack, WarningCircle, Wrench } from "phosphor-svelte";
 
   interface Props {
+    initialUrl?: string;
     onSuccess?: (slug: string) => void;
     onManageProfiles?: () => void;
   }
-  let { onSuccess, onManageProfiles }: Props = $props();
+  let { onSuccess, onManageProfiles, initialUrl = "" }: Props = $props();
+  onMount(() => { if (initialUrl) form.url = initialUrl; });
 
   const form = new RecipeForm();
   let slug = $state("");
@@ -171,7 +173,7 @@
     <div class="flex items-start gap-3">
       <div class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Wrench size={19} aria-hidden="true" /></div>
       <div class="min-w-0 flex-1">
-        <Card.Title id="recipe-create-title" class="text-base">Tạo recipe — điền tay hoặc AI tự điền</Card.Title>
+        <Card.Title id="recipe-create-title" class="text-base">Thêm cấu hình automation — thủ công hoặc phân tích website</Card.Title>
         <Card.Description class="mt-1 max-w-3xl">Điền URL và toàn bộ selector thủ công <span class="font-medium text-foreground">hoặc</span> nhập URL rồi bấm <span class="font-medium text-foreground">Phân tích bằng AI</span> để hệ thống tự dò DOM và điền sẵn vào form — bạn chỉ cần kiểm tra lại và bấm Tạo.</Card.Description>
       </div>
     </div>
@@ -263,7 +265,7 @@
     <!-- Slug -->
     <div class="grid gap-3 rounded-xl border bg-muted/20 p-4 sm:grid-cols-[minmax(0,1fr)_minmax(16rem,.7fr)] sm:items-end">
       <div>
-        <h2 class="text-sm font-semibold">Định danh recipe</h2>
+        <h2 class="text-sm font-semibold">Định danh cấu hình / model API</h2>
         <p class="mt-1 text-xs leading-relaxed text-muted-foreground">Slug thành <span class="font-data">recipes/&lt;slug&gt;/recipe.yaml</span> và không đổi sau khi tạo.</p>
       </div>
       <label for="rcp-slug" class="grid gap-1.5 text-sm font-medium">Slug <span class="text-destructive">*</span><Input id="rcp-slug" class="font-data" placeholder="my-chat-site" bind:value={slug} /></label>
@@ -313,7 +315,7 @@
     <div class="flex flex-wrap gap-2">
       <Button type="button" variant="ghost" size="sm" disabled={testing || creating || analyzing} onclick={() => { resetForm(); form.error=""; testResult=null; analyzeError=""; analyzeLog=[]; }}><Sliders /> Đặt lại</Button>
       <Button type="button" variant="outline" size="sm" disabled={testing || creating || analyzing} onclick={onTest}>{#if testing}<CircleNotch class="animate-spin" /> Đang kiểm tra{:else}<Check /> Kiểm tra kết nối{/if}</Button>
-      <Button type="button" size="sm" disabled={creating || testing || analyzing} onclick={onCreate}>{#if creating}<CircleNotch class="animate-spin" /> Đang tạo{:else}<Plus /> Tạo recipe{/if}</Button>
+      <Button type="button" size="sm" disabled={creating || testing || analyzing} onclick={onCreate}>{#if creating}<CircleNotch class="animate-spin" /> Đang tạo{:else}<Plus /> Lưu cấu hình{/if}</Button>
     </div>
   </Card.Footer>
 </Card.Root>

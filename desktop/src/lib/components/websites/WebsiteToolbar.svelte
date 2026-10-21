@@ -25,6 +25,8 @@
       <div><h2 class="text-xl font-semibold tracking-tight">{site.title}</h2><p class="mt-0.5 text-xs text-muted-foreground">{new URL(site.url).hostname} <span class="mx-1.5 text-border">/</span> Workspace</p></div>
     </div>
     <div class="flex items-center gap-1.5">
+      <a href={`/websites/${site.id}/agent`} class="rounded-md px-2 py-2 text-xs font-medium text-primary hover:bg-muted">Agent CLI</a>
+      <a href={`/websites/${site.id}/settings`} class="rounded-md px-2 py-2 text-xs font-medium text-primary hover:bg-muted" aria-label={`Cấu hình ${site.title}`}>Cấu hình</a>
       <Button variant="outline" size="sm" disabled={!accountId || opening || sending || !modelOptions.length} onclick={onOpenProfile}>
         <ArrowSquareOut /> {opening ? "Đang mở…" : "Mở profile"}
       </Button>

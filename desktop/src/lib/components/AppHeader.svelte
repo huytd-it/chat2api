@@ -7,12 +7,12 @@
   import { websites } from "$lib/websites";
 
   const titles: Record<string, string> = {
-    "/": "Websites",
+    "/": "Web chats",
     "/overview": "Hệ thống",
     "/websites": "Workspace",
     "/sessions": "Sessions",
-    "/recipes": "Recipes",
-    "/providers": "Providers",
+    "/connections": "Kết nối website",
+    "/api-providers": "API providers",
     "/combos": "Combos",
     "/profiles": "Profiles",
     "/logs": "Logs",

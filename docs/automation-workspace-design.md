@@ -1,5 +1,10 @@
 # Workspace automation website — bố cục đã duyệt
 
+> Điều chỉnh theo yêu cầu mới: sidebar chỉ còn **Web chats**; danh sách website
+> là một trang lưới icon. Thêm domain độc lập rồi giao automation cho agent CLI.
+> Phần workspace account/model/hội thoại và quản trị vẫn giữ. Xem
+> `website-agent-cli.md`; mô tả rail website bên dưới là brief lịch sử đã thay thế.
+
 Người dùng duyệt bản bố cục tương tác ngày 2026-10-20, không có ghi chú chỉnh
 sửa. Brief này đã được triển khai vào UI production ngày 2026-10-21; thiết kế
 thực tế được ghi trong `../DESIGN.md`, kiểm chứng ở `automation-ui-verification.md`.

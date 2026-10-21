@@ -33,6 +33,21 @@ export async function fetchWebsites(key: string): Promise<WebsiteInfo[]> {
   return (await asJson(response)).websites;
 }
 
+export async function addWebsite(key: string, domain: string): Promise<{ id: string; created: boolean }> {
+  const base = await apiBase();
+  return asJson(await fetch(base + "/admin/websites", {
+    method: "POST", headers: headers(key), body: JSON.stringify({ domain }),
+  }));
+}
+
+export async function fetchWebsiteAgentBrief(key: string, site: string, requirement: string): Promise<string> {
+  const base = await apiBase();
+  const result = await asJson(await fetch(base + "/admin/websites/" + encodeURIComponent(site) + "/agent-brief", {
+    method: "POST", headers: headers(key), body: JSON.stringify({ requirement }),
+  }));
+  return result.brief;
+}
+
 export async function generateWebsiteImage(key: string, model: string, prompt: string,
   headed: boolean, accountId?: number): Promise<string> {
   const base = await apiBase();
@@ -52,6 +67,8 @@ export interface TrialStatus {
 }
 
 export interface RecipeInfo {
+  loaded?: boolean;
+  enabled?: boolean;
   slug: string;
   models: string[];
   unhealthy: boolean;
@@ -704,9 +721,9 @@ export interface TestTargetList {
 
 /** Ma trận target đã ghép sẵn account ↔ recipe ở server, nên desktop không
  * phải tự đoán domain nào khớp model nào. */
-export async function fetchTestTargets(key: string): Promise<TestTargetList> {
+export async function fetchTestTargets(key: string, site = ""): Promise<TestTargetList> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/test-targets", { headers: headers(key) });
+  const r = await fetch(base + "/admin/automation-targets" + (site ? "?site=" + encodeURIComponent(site) : ""), { headers: headers(key) });
   return asJson(r);
 }
 
@@ -721,7 +738,7 @@ export async function openTestTarget(
   url: string; model: string; recipe: string;
 }> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/test-targets/open", {
+  const r = await fetch(base + "/admin/automation-targets/open", {
     method: "POST",
     headers: headers(key),
     body: JSON.stringify({ model, account_id: accountId }),
@@ -745,21 +762,22 @@ export async function openSessionConversation(
 
 export async function fetchRecipes(key: string): Promise<RecipeInfo[]> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/recipes", { headers: headers(key) });
+  const r = await fetch(base + "/admin/automations", { headers: headers(key) });
   return asJson(r);
 }
 
 export async function reloadRecipe(key: string, slug: string): Promise<void> {
   const base = await apiBase();
-  await fetch(base + "/admin/recipes/" + encodeURIComponent(slug) + "/reload", {
+  const r = await fetch(base + "/admin/automations/" + encodeURIComponent(slug) + "/reload", {
     method: "POST",
     headers: headers(key),
   });
+  await asJson(r);
 }
 
 export async function closeRecipeBrowser(key: string, slug: string): Promise<number> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug) + "/browser/close", {
+  const r = await fetch(base + "/admin/automations/" + encodeURIComponent(slug) + "/browser/close", {
     method: "POST",
     headers: headers(key),
   });
@@ -769,7 +787,7 @@ export async function closeRecipeBrowser(key: string, slug: string): Promise<num
 
 export async function deleteRecipe(key: string, slug: string): Promise<void> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug), {
+  const r = await fetch(base + "/admin/automations/" + encodeURIComponent(slug), {
     method: "DELETE",
     headers: headers(key),
   });
@@ -782,7 +800,7 @@ export async function renameRecipe(
   newSlug: string,
 ): Promise<{ ok: true; slug: string }> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug), {
+  const r = await fetch(base + "/admin/automations/" + encodeURIComponent(slug), {
     method: "PATCH",
     headers: headers(key),
     body: JSON.stringify({ slug: newSlug }),
@@ -835,7 +853,7 @@ export async function createRecipe(
   spec: ManualRecipeSpec,
 ): Promise<{ ok: true; slug: string }> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/recipes", {
+  const r = await fetch(base + "/admin/automations", {
     method: "POST",
     headers: headers(key),
     body: JSON.stringify(spec),
@@ -859,7 +877,7 @@ export async function analyzeRecipeDraft(
   const base = await apiBase();
   const body: Record<string, unknown> = { url, headed: !!opts.headed };
   if (opts.profileId != null) body.profile_id = opts.profileId;
-  const r = await fetch(base + "/admin/recipes/analyze", {
+  const r = await fetch(base + "/admin/automations/analyze", {
     method: "POST",
     headers: headers(key),
     body: JSON.stringify(body),
@@ -874,7 +892,7 @@ export async function discoverRecipeModels(
   headed = false,
 ): Promise<{ models: DiscoveredRecipeModel[]; method?: "dom" | "agent" }> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/recipes/discover-models", {
+  const r = await fetch(base + "/admin/automations/discover-models", {
     method: "POST",
     headers: headers(key),
     body: JSON.stringify({ url, headed }),
@@ -885,6 +903,7 @@ export async function discoverRecipeModels(
 /** recipe.yaml nguyên văn + bản đã parse. `data` là null khi file hỏng cú
  * pháp — lúc đó chỉ tab YAML sửa được, và `parse_error` nói hỏng ở đâu. */
 export interface RecipeSource {
+  read_only?: boolean;
   slug: string;
   yaml: string;
   data: Record<string, unknown> | null;
@@ -893,7 +912,7 @@ export interface RecipeSource {
 
 export async function fetchRecipeSource(key: string, slug: string): Promise<RecipeSource> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug) + "/source", {
+  const r = await fetch(base + "/admin/automations/" + encodeURIComponent(slug) + "/source", {
     headers: headers(key),
   });
   return asJson(r);
@@ -910,7 +929,7 @@ export async function updateRecipe(
   edit: RecipeEdit,
 ): Promise<{ ok: true; slug: string }> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug), {
+  const r = await fetch(base + "/admin/automations/" + encodeURIComponent(slug), {
     method: "PUT",
     headers: headers(key),
     body: JSON.stringify(edit),
@@ -926,7 +945,7 @@ export async function previewRecipeEdit(
   edit: RecipeEdit,
 ): Promise<{ slug: string; yaml: string; data: Record<string, unknown> }> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug) + "/preview", {
+  const r = await fetch(base + "/admin/automations/" + encodeURIComponent(slug) + "/preview", {
     method: "POST",
     headers: headers(key),
     body: JSON.stringify(edit),
@@ -986,7 +1005,7 @@ export async function testRecipeEdit(
   opts: TrialOptions = {},
 ): Promise<TrialResult> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug) + "/test", {
+  const r = await fetch(base + "/admin/automations/" + encodeURIComponent(slug) + "/test", {
     method: "POST",
     headers: headers(key),
     body: JSON.stringify({ ...edit, ...trialBody(opts) }),
@@ -1002,7 +1021,7 @@ export async function testRecipe(
   opts: TrialOptions = {},
 ): Promise<TrialResult> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/recipes/test", {
+  const r = await fetch(base + "/admin/automations/test", {
     method: "POST",
     headers: headers(key),
     body: JSON.stringify({ ...spec, ...trialBody(opts) }),
@@ -1019,7 +1038,7 @@ export async function startIntegration(
   headed = false,
 ): Promise<{ job_id: string }> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/integrate", {
+  const r = await fetch(base + "/admin/automation-jobs/integrate", {
     method: "POST",
     headers: headers(key),
     body: JSON.stringify({ url, headed, profile_id: profileId }),
@@ -1029,7 +1048,7 @@ export async function startIntegration(
 
 export async function fetchJob(key: string, jobId: string, signal?: AbortSignal): Promise<JobStatus> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/integrate/" + encodeURIComponent(jobId), {
+  const r = await fetch(base + "/admin/automation-jobs/integrate/" + encodeURIComponent(jobId), {
     headers: headers(key),
     signal,
   });
@@ -1042,7 +1061,7 @@ export async function jobAction(
   action: "login-complete" | "cancel",
 ): Promise<JobStatus> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/integrate/" + encodeURIComponent(jobId) + "/" + action, {
+  const r = await fetch(base + "/admin/automation-jobs/integrate/" + encodeURIComponent(jobId) + "/" + action, {
     method: "POST",
     headers: headers(key),
   });
@@ -1058,7 +1077,7 @@ export async function startRecord(
   const base = await apiBase();
   const body: Record<string, unknown> = { url, profile_id: profileId };
   if (slug) body.slug = slug;
-  const r = await fetch(base + "/admin/record", {
+  const r = await fetch(base + "/admin/automation-jobs/record", {
     method: "POST",
     headers: headers(key),
     body: JSON.stringify(body),
@@ -1073,7 +1092,7 @@ export async function setRecordSegment(
   flow: FlowKind | null,
 ): Promise<JobStatus> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/record/" + encodeURIComponent(jobId) + "/segment", {
+  const r = await fetch(base + "/admin/automation-jobs/record/" + encodeURIComponent(jobId) + "/segment", {
     method: "POST",
     headers: headers(key),
     body: JSON.stringify(flow ? { action: "start", flow } : { action: "stop" }),
@@ -1083,7 +1102,7 @@ export async function setRecordSegment(
 
 export async function finishRecord(key: string, jobId: string, analyze = false): Promise<JobStatus> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/record/" + encodeURIComponent(jobId) + "/finish?analyze=" + analyze, {
+  const r = await fetch(base + "/admin/automation-jobs/record/" + encodeURIComponent(jobId) + "/finish?analyze=" + analyze, {
     method: "POST",
     headers: headers(key),
   });
@@ -1096,11 +1115,11 @@ export async function fetchTrace(
   format: "json" | "md" = "json",
 ): Promise<string | any> {
   const base = await apiBase();
-  // Spec: GET /admin/record/{id}/trace(.md/.json) — dùng extension path, fallback ?format alias
+  // Trace downloads use the automation job namespace (extension or format query).
   const suffix = format === "md" ? ".md" : ".json";
   const urls = [
-    base + "/admin/record/" + encodeURIComponent(jobId) + "/trace" + suffix,
-    base + "/admin/record/" + encodeURIComponent(jobId) + "/trace?format=" + format,
+    base + "/admin/automation-jobs/record/" + encodeURIComponent(jobId) + "/trace" + suffix,
+    base + "/admin/automation-jobs/record/" + encodeURIComponent(jobId) + "/trace?format=" + format,
   ];
   let lastErr: string | null = null;
   for (const url of urls) {
@@ -1115,13 +1134,13 @@ export async function fetchTrace(
 
 export async function fetchTraces(key: string): Promise<{ traces: { name: string; size?: number; mtime?: number }[]; count: number }> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/traces", { headers: headers(key) });
+  const r = await fetch(base + "/admin/automation-traces", { headers: headers(key) });
   return asJson(r);
 }
 
 export function traceDownloadUrl(jobId: string, format: "json" | "md" = "json"): string {
   // Dùng cho <a href> / nút Tải trace (desktop mở qua apiBase + auth header)
-  return "/admin/record/" + encodeURIComponent(jobId) + "/trace." + format;
+  return "/admin/automation-jobs/record/" + encodeURIComponent(jobId) + "/trace." + format;
 }
 
 export async function startPicker(key: string, profileId: number, url = ""): Promise<{ picker_id: string; profile: string; url: string }> {
@@ -1155,7 +1174,7 @@ export async function reanalyzeRecipe(
   const body: Record<string, unknown> = { headed: !!opts.headed };
   if (opts.url) body.url = opts.url;
   if (opts.profile_id != null) body.profile_id = opts.profile_id;
-  const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug) + "/reanalyze", {
+  const r = await fetch(base + "/admin/automations/" + encodeURIComponent(slug) + "/reanalyze", {
     method: "POST",
     headers: headers(key),
     body: JSON.stringify(body),
@@ -1167,7 +1186,7 @@ export async function reanalyzeRecipe(
  * the given recipe's URL so the user can log in and register a new account. */
 export async function startAccountLogin(key: string, slug: string): Promise<{ session_id: string }> {
   const base = await apiBase();
-  const r = await fetch(base + "/admin/recipes/" + encodeURIComponent(slug) + "/accounts", {
+  const r = await fetch(base + "/admin/automations/" + encodeURIComponent(slug) + "/accounts", {
     method: "POST",
     headers: headers(key),
   });
@@ -1182,7 +1201,7 @@ export async function completeAccountLogin(
 ): Promise<{ ok: true; slug: string; account: string }> {
   const base = await apiBase();
   const r = await fetch(
-    base + "/admin/recipes/" + encodeURIComponent(slug) + "/accounts/" + encodeURIComponent(sessionId) + "/complete",
+    base + "/admin/automations/" + encodeURIComponent(slug) + "/accounts/" + encodeURIComponent(sessionId) + "/complete",
     { method: "POST", headers: headers(key), body: JSON.stringify({ name }) },
   );
   return asJson(r);
@@ -1191,7 +1210,7 @@ export async function completeAccountLogin(
 export async function cancelAccountLogin(key: string, slug: string, sessionId: string): Promise<void> {
   const base = await apiBase();
   await fetch(
-    base + "/admin/recipes/" + encodeURIComponent(slug) + "/accounts/" + encodeURIComponent(sessionId) + "/cancel",
+    base + "/admin/automations/" + encodeURIComponent(slug) + "/accounts/" + encodeURIComponent(sessionId) + "/cancel",
     { method: "POST", headers: headers(key) },
   );
 }
@@ -1207,7 +1226,7 @@ export async function reopenAccountLogin(
 ): Promise<{ session_id: string; name: string }> {
   const base = await apiBase();
   const r = await fetch(
-    base + "/admin/recipes/" + encodeURIComponent(slug) + "/accounts/" + encodeURIComponent(name) + "/reopen",
+    base + "/admin/automations/" + encodeURIComponent(slug) + "/accounts/" + encodeURIComponent(name) + "/reopen",
     { method: "POST", headers: headers(key) },
   );
   return asJson(r);

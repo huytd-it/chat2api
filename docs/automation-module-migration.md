@@ -2,6 +2,26 @@
 
 ## Trạng thái
 
+### Icon launcher + domain-first/agent CLI — 2026-10-21
+
+Theo điều chỉnh mới, sidebar không bung từng domain; `/` là trang icon Web chats.
+Thêm domain lưu vào bảng `website` (migration 0010), không tạo model/driver giả.
+CLI `website add/list/brief` và trang Agent CLI giúp giao yêu cầu tùy chỉnh cho
+coding agent ngoài app. Brief không chạy LLM hay browser. Chi tiết ở
+`website-agent-cli.md`. Đây không thay thế phần runtime migration còn thiếu.
+
+### Chuyển giao tính năng UI/API quản trị — 2026-10-21
+
+Các trang cũ `/recipes`, `/integrations`, `/providers` đã gỡ khỏi source.
+Công cụ edit/preview/trial/record/reanalyze/reload/rename/browser-close/quota
+được chuyển vào cấu hình workspace website. Direct API được tách riêng.
+Admin client + route chuyển sang automations/automation-jobs/automation-targets;
+route cũ không còn trong OpenAPI. `/v1/*` giữ nguyên. Nguồn SQLite chưa có
+provider được hiện rõ để xem, không tự kích hoạt hay ghi đè.
+
+Đây **không phải** hoàn tất thay engine: BrowserRecipe/flow runtime vẫn còn.
+Xem `workspace-admin-migration.md` cho vị trí tính năng, mapping API và hạn chế.
+
 ### Checkpoint UI production — 2026-10-21
 
 Đã triển khai UI mới vào app thật: danh sách website ở `/`, 10 workspace theo

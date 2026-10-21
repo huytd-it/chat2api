@@ -42,23 +42,34 @@ Its production direction contract is emitted by `desktop/src/routes/+layout.svel
 
 ## Application shell
 
-The collapsible website rail is primary: all websites, then the ten individual
-workspaces. Administration is secondary: Profiles/account, API/integrations,
-Combos, global history/API, system overview, logs and integration authoring.
+The sidebar has a single **Web chats** entry, not one entry per domain. The root
+page is an icon launcher; clicking one website opens its workspace. Administration
+stays secondary: profiles/accounts, direct APIs, combos, global history/API,
+system overview and logs. This supersedes the earlier per-website sidebar brief
+at the user's explicit request.
 Settings and actual backend status stay at the foot of the rail.
 
 The header provides breadcrumbs, sidebar toggle, backend connection and theme.
 The old Overview remains available at `/overview`; global session tools remain
-at `/sessions`. The Recipe editor is no longer a primary navigation item, but is
-reachable as advanced engine configuration until backend migration can safely
-remove it. Do not claim it has been deleted.
+at `/sessions`. Duplicate `/recipes`, `/integrations` and `/providers` pages are
+removed. Website management is now `/websites/<site>/settings`, authoring lives
+at `/connections`, and direct API configuration at `/api-providers`. The former
+components were transferred into AutomationManager/Editor/Fields/Setup, scoped
+to their new roles. This removes duplicate UI, not the underlying recipe engine.
 
 ## Directory
 
-`WebsiteDirectory.svelte` uses one scan-friendly list, not a grid of metric cards:
-website/domain, configured account count, loaded model count or unconfigured
-state, then a clear navigation affordance. Counts come from server APIs.
-Search, refresh, loading, failed catalog/account reads and no matches are explicit.
+`WebsiteDirectory.svelte` is a quiet icon launcher: five columns on wide screens,
+two on narrow screens. Website mark/name and domain identify each shortcut;
+unconfigured automation is stated without suggesting readiness. No repeated
+account/model count columns. Search, refresh, loading, error and no matches are
+explicit. **Thêm web chat** expands a domain-only form.
+
+Domain registration persists independently from executable automations. After
+adding a domain the user describes their goal on `/websites/<id>/agent`, copies
+a brief and gives it to their coding agent CLI in this repo. The app does not
+silently run an LLM or self-publish generated code. CLI `website add/list/brief`
+uses the same registration/brief service; see `docs/website-agent-cli.md`.
 
 ## Workspace
 
@@ -103,6 +114,8 @@ Other websites retain the current API path until their runtime migration.
 ## Verification and limitations
 
 Read `docs/automation-ui-verification.md` for reproducible commands and coverage.
+Read `docs/workspace-admin-migration.md` for the subsequent UI feature transfer,
+breaking admin API namespace change, custom/SQLite-source handling and limits.
 Browser QA uses fresh contexts, not the user's saved website profiles. Live UI
 checks are read-only; behavioral API tests use intercepted fixtures. Neither is
 evidence of a new live Qwen/ChatGPT/MiniMax provider verification.

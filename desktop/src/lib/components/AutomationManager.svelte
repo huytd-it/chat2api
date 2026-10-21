@@ -1,13 +1,16 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { cooldowns, ensureProfiles, ensureOpenAIProviders, profilesLoading, profilesError, refreshCooldowns } from "../sync";
+  import { refreshWebsites } from "../websites";
   // Panel tự nạp dữ liệu của mình: ở route /providers không có
   // refreshIntegrations() chạy kèm nên khối OpenAI sẽ trống nếu chờ trang cha.
-  onMount(() => { void ensureProfiles(); void ensureOpenAIProviders(); void refreshCooldowns(); });
+  onMount(() => { void ensureProfiles(); void ensureOpenAIProviders(); void refreshCooldowns(); void refreshRecipes(); });
+  $effect(() => { $recipes; void refreshWebsites($apiKey); });
   import { apiKey, showToast } from "../stores";
   import { profiles, recipes, recipesLoading, openaiProviders, openaiProvidersLoading, refreshAfterRecipeChange, refreshAfterRecipeDelete, refreshProfiles, refreshRecipes, refreshOpenAIProviders, refreshAfterOpenAIChange } from "../sync";
   import { closeRecipeBrowser, deleteRecipe, fetchJob, jobAction, reanalyzeRecipe, removeDomainProfile, reloadRecipe, renameRecipe, type RecipeInfo, createOpenAIProvider, updateOpenAIProvider, deleteOpenAIProvider, type OpenAIProviderInfo } from "../api";
-  import RecipeEditorSheet from "./RecipeEditorSheet.svelte";
+  import AutomationEditor from "./AutomationEditor.svelte";
+  import type { WebsiteInfo } from "../api";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Label } from "$lib/components/ui/label";
@@ -25,11 +28,17 @@
   import { get } from "svelte/store";
 
   interface Props {
+    site?: WebsiteInfo;
+    apiOnly?: boolean;
     highlightSlug?: string | null;
     onHighlighted?: () => void;
     onManageProfiles?: () => void;
   }
-  let { highlightSlug = null, onHighlighted, onManageProfiles }: Props = $props();
+  let { highlightSlug = null, onHighlighted, onManageProfiles, site, apiOnly = false }: Props = $props();
+  const visibleAutomations = $derived($recipes.filter((item) => {
+    if (!site) return false;
+    return site.history_slugs.includes(item.slug);
+  }));
 
   let expanded = $state<Record<string, boolean>>({});
   let busySlug = $state<string | null>(null);
@@ -284,11 +293,12 @@
   }
 
   function healthOf(rec: RecipeInfo, profileCount: number): { label: string; variant: BadgeVariant } {
+    if (rec.loaded === false) return { label: rec.enabled === false ? "Đang tắt · nguồn lưu" : "Chỉ có nguồn lưu", variant: "outline" };
     if (rec.unhealthy) return { label: "Lỗi sức khỏe", variant: "destructive" };
     if (rec.type === "BrowserRecipe" && profileCount === 0 && rec.trial) {
       return { label: `Dùng thử: ${rec.trial.used}/${rec.trial.limit}`, variant: "warning" };
     }
-    return { label: "Sẵn sàng", variant: "success" };
+    return { label: "Đã nạp cấu hình", variant: "outline" };
   }
 
   $effect(() => {
@@ -303,15 +313,15 @@
 
 <!-- Browser Providers Card -->
 <Card.Root class="overflow-hidden" aria-labelledby="providers-title">
-  <Card.Header class="flex-row items-center justify-between gap-4 border-b"><div class="flex items-start gap-3"><div class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Browser size={19} /></div><div><Card.Title id="providers-title">Providers</Card.Title><Card.Description>Browser automation & OpenAI-compatible. Quản lý model, domain và đăng nhập.</Card.Description></div></div><Button variant="outline" size="sm" disabled={refreshing} onclick={refresh}><Repeat class={refreshing ? "animate-spin" : ""} /> {refreshing ? "Đang tải" : "Làm mới"}</Button></Card.Header>
+  <Card.Header class="flex flex-row flex-wrap items-center justify-between gap-4 border-b"><div><Card.Title id="providers-title">{apiOnly ? "API providers" : "Cấu hình automation"}</Card.Title><Card.Description>{apiOnly ? "Endpoint OpenAI-compatible, model và API key." : "Model, browser, ghi thao tác, kiểm thử và giới hạn account của website này."}</Card.Description></div><Button variant="outline" size="sm" disabled={refreshing} onclick={refresh}><Repeat class={refreshing ? "animate-spin" : ""} /> {refreshing ? "Đang tải" : "Làm mới"}</Button></Card.Header>
   <Card.Content class="p-0">
     {#if panelError}<div class="m-4 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive" role="alert"><WarningCircle class="mt-0.5 shrink-0" />{panelError}</div>{/if}
-    <!-- Browser section -->
-    <div class="border-b bg-muted/20 px-4 py-2 text-xs font-medium text-muted-foreground flex items-center gap-2"><Browser size={14}/> Browser Providers — { $recipes.length } provider</div>
-    {#if $recipesLoading && !$recipes.length}<div class="flex min-h-24 flex-col items-center justify-center gap-2 p-6 text-muted-foreground" role="status"><CircleNotch class="animate-spin" size={20} /><p class="text-sm">Đang tải providers…</p></div>
-    {:else if !$recipes.length}<div class="flex min-h-24 flex-col items-center justify-center p-6 text-center"><Browser class="mb-2 text-muted-foreground" size={24} /><p class="text-sm font-medium">Chưa có Browser provider</p><p class="mt-1 text-xs text-muted-foreground">Dùng “Thêm integration” để phân tích site bằng AI.</p></div>{/if}
+    {#if !apiOnly}
+    <div class="border-b bg-muted/20 px-4 py-2 text-xs font-medium text-muted-foreground flex items-center gap-2"><Browser size={14}/> {visibleAutomations.length} cấu hình website</div>
+    {#if $recipesLoading && !visibleAutomations.length}<div class="p-6 text-sm text-muted-foreground">Đang tải cấu hình…</div>
+    {:else if !visibleAutomations.length}<div class="p-6 text-sm text-muted-foreground">Chưa có cấu hình đang nạp. Có thể thêm cấu hình ở bên dưới; thao tác này không tạo driver module mới.</div>{/if}
     <div class="divide-y">
-      {#each $recipes as rec (rec.slug)}
+      {#each visibleAutomations as rec (rec.slug)}
         {@const isBrowser = rec.type === "BrowserRecipe"}{@const serving = profilesServing(rec.domain)}{@const health = healthOf(rec, serving.length)}
         <article id={`recipe-row-${rec.slug}`} class={highlightSlug === rec.slug ? "ring-2 ring-inset ring-primary/60 transition-shadow" : ""}>
           <button class="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 text-left hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring sm:grid-cols-[auto_minmax(10rem,1fr)_minmax(8rem,1fr)_auto_auto]" onclick={() => toggle(rec.slug)} aria-expanded={expanded[rec.slug] ?? false}>
@@ -326,6 +336,8 @@
                   <Button type="submit" size="sm" disabled={renameBusy}>{#if renameBusy}<CircleNotch class="animate-spin" />{:else}<Check />{/if} Lưu</Button>
                   <Button type="button" variant="ghost" size="sm" disabled={renameBusy} onclick={cancelRename}><X /> Hủy</Button>
                 </form>
+              {:else if rec.loaded === false}
+                <div><Button variant="outline" size="sm" onclick={() => editingSlug = rec.slug}><Sliders /> Xem nguồn đã lưu</Button><p class="mt-2 text-xs text-muted-foreground">Chưa có provider chạy cho cấu hình này. Không bật hoặc xóa nguồn lưu tự động.</p></div>
               {:else}
                 <div class="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => onReload(rec.slug)}><Repeat class={busySlug === rec.slug ? "animate-spin" : ""} /> Reload</Button>{#if isBrowser}<Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => openReanalyze(rec.slug)}><Sparkle /> Phân tích lại</Button><Button variant="outline" size="sm" disabled={busySlug === rec.slug} title="Ghi thao tác thật để sửa selector hỏng" onclick={() => openRecord(rec.slug, rec.url || (rec.domain ? `https://${rec.domain}` : ""))}><RecordIcon /> Ghi thao tác</Button><Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => (editingSlug = rec.slug)}><Sliders /> Chỉnh sửa</Button>{/if}<Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => startRename(rec.slug)}><PencilSimple /> Đổi tên</Button>{#if isBrowser}<Button variant="outline" size="sm" disabled={busySlug === rec.slug} onclick={() => onCloseBrowser(rec.slug)}><X /> Đóng browser</Button>{/if}<Button variant="destructive" size="sm" disabled={busySlug === rec.slug} onclick={() => (deleteRecipeTarget = rec.slug)}><Trash /> Xóa</Button></div>
               {/if}
@@ -355,7 +367,7 @@
                     </ul>
                     <p class="mt-2 text-xs text-muted-foreground">Request được chia cho {serving.length} profile — càng nhiều profile thì càng nhiều request song song.</p>
                   {:else}
-                    <div class="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning"><WarningCircle class="mt-0.5 shrink-0" />Chưa profile nào đăng nhập {rec.domain} — provider đang chạy ẩn danh.</div>
+                    <div class="flex items-start gap-2 rounded-lg bg-muted p-3 text-sm text-muted-foreground"><WarningCircle class="mt-0.5 shrink-0" />Chưa có profile gắn account cho {rec.domain}. Dữ liệu cấu hình không xác nhận trạng thái đăng nhập.</div>
                   {/if}
                   <div class="mt-3">
                     <AccountCooldownsPanel recipeSlug={rec.slug} compact={true} />
@@ -367,7 +379,8 @@
         </article>
       {/each}
     </div>
-    <!-- OpenAI section -->
+    {/if}
+    {#if apiOnly}
     <div class="border-y bg-muted/20 px-4 py-2 text-xs font-medium text-muted-foreground flex items-center justify-between">
       <span class="flex items-center gap-2"><Globe size={14}/> OpenAI Providers — { $openaiProviders.length } provider</span>
       <Button size="sm" variant="outline" onclick={openOpenAICreate}><Plus size={14}/> Thêm OpenAI</Button>
@@ -394,10 +407,11 @@
         {/each}
       </div>
     {/if}
+    {/if}
   </Card.Content>
 </Card.Root>
 
-<RecipeEditorSheet slug={editingSlug} onClose={() => (editingSlug = null)} />
+<AutomationEditor slug={editingSlug} onClose={() => (editingSlug = null)} />
 
 <AlertDialog.Root open={deleteRecipeTarget !== null} onOpenChange={(open) => { if (!open) deleteRecipeTarget = null; }}><AlertDialog.Content><AlertDialog.Header><AlertDialog.Title>Xóa provider {deleteRecipeTarget}?</AlertDialog.Title><AlertDialog.Description>Provider sẽ bị gỡ khỏi router. Các model sẽ không còn khả dụng.</AlertDialog.Description></AlertDialog.Header><AlertDialog.Footer><AlertDialog.Cancel>Hủy</AlertDialog.Cancel><AlertDialog.Action variant="destructive" onclick={confirmDeleteRecipe}>Xóa</AlertDialog.Action></AlertDialog.Footer></AlertDialog.Content></AlertDialog.Root>
 

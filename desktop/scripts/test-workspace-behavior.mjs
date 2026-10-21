@@ -26,10 +26,17 @@ await context.route(origin + "/**", async (route) => {
   if (url.pathname === "/health") { healthSeen = true; return json({ contexts: 0, engine: "fixture", models: 2 }); }
   if (url.pathname === "/admin/websites") return json({ websites: [{ id: "qwen", slug: "qwen-web", title: "Qwen", url: "https://chat.qwen.ai/", hosts: ["chat.qwen.ai"], operations: ["chat", "projects", "thinking"], history_slugs: ["qwen-web"], models: modelData, runtime: "legacy", unhealthy: false }] });
   if (url.pathname === "/v1/models") return json({ data: modelData });
-  if (url.pathname === "/admin/recipes") return json([]);
+  if (url.pathname === "/admin/automations") return json([
+    {slug:"qwen-web",type:"BrowserRecipe",url:"https://chat.qwen.ai",domain:"chat.qwen.ai",models:["qwen3.7-plus"],unhealthy:false,loaded:true},
+    {slug:"chatgpt-web",type:"BrowserRecipe",url:"https://chatgpt.com",domain:"chatgpt.com",models:["default"],unhealthy:false,loaded:true},
+  ]);
+  if (url.pathname === "/admin/profiles") return json({profiles:[],mode:"profile",profiles_dir:"fixture",max_profiles:6,persisted:true});
+  if (url.pathname === "/admin/openai") return json([]);
+  if (url.pathname === "/admin/account-cooldowns") return json({cooldowns:[]});
+  if (url.pathname === "/admin/automations/qwen-web/source") return json({slug:"qwen-web",yaml:"slug: qwen-web\nurl: https://chat.qwen.ai/",data:{slug:"qwen-web",url:"https://chat.qwen.ai/",models:[{id:"qwen3.7-plus"}]},parse_error:null});
   if (url.pathname === "/admin/accounts") return json({ domains: [] });
   if (url.pathname === "/admin/overview") return json({ request_routes: [], session_distribution: [], models: 2 });
-  if (url.pathname === "/admin/test-targets") { if (!healthSeen) targetBeforeHealth = true; return json({ targets: [], profile_mode: "profile", max_profiles: 6, max_tabs: 8, open_profiles: [], persisted: true }); }
+  if (url.pathname === "/admin/automation-targets") { if (!healthSeen) targetBeforeHealth = true; return json({ targets: [], profile_mode: "profile", max_profiles: 6, max_tabs: 8, open_profiles: [], persisted: true }); }
   if (url.pathname === "/admin/sessions") return json({ sessions: [...sessions.values()], persisted: true });
   if (url.pathname.startsWith("/admin/sessions/")) {
     const detail = sessions.get(url.pathname.split("/").at(-1));
@@ -57,11 +64,24 @@ async function send(text, result) {
   await page.getByText(result, { exact: true }).first().waitFor();
 }
 try {
-  const initialTargets = page.waitForResponse((response) => response.url().endsWith("/admin/test-targets"));
+  const initialCatalog = page.waitForResponse((response) => response.url().endsWith("/admin/websites"));
   await page.goto(process.env.UI_BASE_URL || "http://127.0.0.1:5199");
-  await initialTargets;
-  await page.getByText("1 module · dữ liệu từ server").waitFor();
+  await initialCatalog;
+  await page.getByRole("heading", {name:"Web chats",exact:true,level:2}).waitFor();
   assert.equal(targetBeforeHealth, false, "Directory must wait for sidecar health before loading accounts");
+  await page.goto((process.env.UI_BASE_URL || "http://127.0.0.1:5199") + "/websites/qwen/settings");
+  await page.getByRole("heading", {name:"Cấu hình Qwen",exact:true}).waitFor();
+  await page.locator("#recipe-row-qwen-web > button").click();
+  assert.equal(await page.locator("#recipe-row-chatgpt-web").count(),0,"Another website's automation must not appear in settings");
+  for (const name of ["Phân tích lại","Ghi thao tác","Chỉnh sửa","Đổi tên","Đóng browser","Xóa"]) {
+    assert.equal(await page.getByRole("button",{name,exact:true}).count(),1,`Missing migrated control: ${name}`);
+  }
+  await page.getByRole("button",{name:"Chỉnh sửa",exact:true}).click();
+  await page.getByRole("tab",{name:"YAML",exact:true}).waitFor();
+  await page.keyboard.press("Escape");
+  await page.goto((process.env.UI_BASE_URL || "http://127.0.0.1:5199") + "/api-providers");
+  await page.getByRole("button",{name:"Thêm provider đầu tiên",exact:true}).waitFor();
+  assert.equal(await page.locator("#recipe-row-qwen-web").count(),0,"Direct API page must not duplicate website management");
   await page.goto((process.env.UI_BASE_URL || "http://127.0.0.1:5199") + "/websites/qwen");
   await page.getByText("Legacy fixture", { exact: true }).first().click();
   await page.getByRole("button", { name: "Mở đúng hội thoại website" }).count();

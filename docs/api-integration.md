@@ -1,5 +1,9 @@
 # chat2api — Tài liệu tích hợp API đầy đủ + tùy biến nâng cao
 
+> Admin API đã chuyển namespace theo workspace; endpoint cũ trả 404.
+> Xem [mapping và phạm vi migration](workspace-admin-migration.md).
+> OpenAI-compatible `/v1/*` không thay đổi.
+
 Tài liệu duy nhất cho ứng dụng ngoài tích hợp chat2api: gọi chat, giữ
 session, tạo ảnh, quản lý session, recipe, combo, provider passthrough,
 profile/account, settings, API key, giám sát — và tùy biến nâng cao
@@ -288,15 +292,15 @@ Session nối đúng khi `messages[].seq` tăng liên tục, không trùng.
 
 ```bash
 # [{slug, models, unhealthy, type, accounts, account_names, trial, domain, url}]
-curl http://127.0.0.1:8100/admin/recipes -H "Authorization: Bearer $ADMIN"
+curl http://127.0.0.1:8100/admin/automations -H "Authorization: Bearer $ADMIN"
 
 # YAML nguyên văn + bản parse (data=null + parse_error khi hỏng cú pháp)
-curl http://127.0.0.1:8100/admin/recipes/qwen-web/source -H "Authorization: Bearer $ADMIN"
+curl http://127.0.0.1:8100/admin/automations/qwen-web/source -H "Authorization: Bearer $ADMIN"
 ```
 
 ### 10.2 Tạo recipe thủ công
 
-`POST /admin/recipes` — body `RecipeManualSpec`:
+`POST /admin/automations` — body `RecipeManualSpec`:
 
 ```json
 {
@@ -314,7 +318,7 @@ curl http://127.0.0.1:8100/admin/recipes/qwen-web/source -H "Authorization: Bear
 
 - `slug`: `[a-z0-9-]`, không trùng `gemini|openai`; đã tồn tại → 409.
 - `submit`: `"Enter"` hoặc `"click:<css selector>"`.
-- Nên chạy thử trước qua `POST /admin/recipes/test` với cùng body +
+- Nên chạy thử trước qua `POST /admin/automations/test` với cùng body +
   `headed|flow|test_prompt|model` (§11).
 
 ### 10.3 Sửa / xem trước / đổi tên / xoá
@@ -326,46 +330,46 @@ Hai đường sửa, chỉ gửi **một** trong hai:
 
 ```bash
 # Xem trước (không ghi đĩa) -> {slug, yaml, data}
-curl -X POST http://127.0.0.1:8100/admin/recipes/qwen-web/preview \
+curl -X POST http://127.0.0.1:8100/admin/automations/qwen-web/preview \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{"patch":{"timing":{"ready_delay_ms":2000}}}'
 
 # Ghi + reload router ngay
-curl -X PUT http://127.0.0.1:8100/admin/recipes/qwen-web \
+curl -X PUT http://127.0.0.1:8100/admin/automations/qwen-web \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{"patch":{"timing":{"ready_delay_ms":2000}}}'
 
 # Đổi tên (đổi cả thư mục) — không sửa slug trong YAML
-curl -X PATCH http://127.0.0.1:8100/admin/recipes/old-slug \
+curl -X PATCH http://127.0.0.1:8100/admin/automations/old-slug \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{"slug":"new-slug"}'
 
 # Nạp lại router / đóng browser recipe / xoá
-curl -X POST http://127.0.0.1:8100/admin/recipes/qwen-web/reload -H "Authorization: Bearer $ADMIN"
-curl -X POST http://127.0.0.1:8100/admin/recipes/qwen-web/browser/close -H "Authorization: Bearer $ADMIN"
-curl -X DELETE http://127.0.0.1:8100/admin/recipes/qwen-web -H "Authorization: Bearer $ADMIN"
+curl -X POST http://127.0.0.1:8100/admin/automations/qwen-web/reload -H "Authorization: Bearer $ADMIN"
+curl -X POST http://127.0.0.1:8100/admin/automations/qwen-web/browser/close -H "Authorization: Bearer $ADMIN"
+curl -X DELETE http://127.0.0.1:8100/admin/automations/qwen-web -H "Authorization: Bearer $ADMIN"
 ```
 
 ### 10.4 Phân tích lại bằng AI
 
 ```bash
 # -> {job_id, slug, url}; poll job như §12
-curl -X POST http://127.0.0.1:8100/admin/recipes/qwen-web/reanalyze \
+curl -X POST http://127.0.0.1:8100/admin/automations/qwen-web/reanalyze \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{"headed":false}'
 ```
 
 ## 11. Chạy thử recipe (trial)
 
-- `POST /admin/recipes/test` — thử spec **chưa lưu**.
-- `POST /admin/recipes/{slug}/test` — thử bản sửa **chưa ghi** (`yaml|patch`).
+- `POST /admin/automations/test` — thử spec **chưa lưu**.
+- `POST /admin/automations/{slug}/test` — thử bản sửa **chưa ghi** (`yaml|patch`).
 
 Thêm vào body: `headed`, `flow` (mặc định `text`),
 `test_prompt` (trống = mặc định theo flow), `model` (trống = model đầu
 phục vụ flow; nhận cả `id` trần lẫn `slug/id`).
 
 ```bash
-curl -X POST http://127.0.0.1:8100/admin/recipes/qwen-web/test \
+curl -X POST http://127.0.0.1:8100/admin/automations/qwen-web/test \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{"patch":{}, "flow":"text", "test_prompt":"Reply with exactly: OK", "headed":false}'
 ```
@@ -398,7 +402,7 @@ Ba đường đưa site mới vào, từ tự động hoàn toàn đến thủ c
 
 ```bash
 # profile_id: để AI thấy DOM sau đăng nhập
-curl -X POST http://127.0.0.1:8100/admin/recipes/analyze \
+curl -X POST http://127.0.0.1:8100/admin/automations/analyze \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{"url":"https://chat.example.com","headed":false}'
 # -> {status: ok|login_required|failed, recipe?, notes?, log?, hint?, slug?}
@@ -409,7 +413,7 @@ Cần `AGENT_LLM_*` (§17), không thì 503.
 ### 12.2 Discover models — dò control chọn model
 
 ```bash
-curl -X POST http://127.0.0.1:8100/admin/recipes/discover-models \
+curl -X POST http://127.0.0.1:8100/admin/automations/discover-models \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{"url":"https://chat.example.com","headed":false}'
 # -> {models:[...], method: dom|agent}
@@ -419,7 +423,7 @@ curl -X POST http://127.0.0.1:8100/admin/recipes/discover-models \
 
 ```bash
 # profile_id BẮT BUỘC: login lúc tích hợp gắn vào profile này
-curl -X POST http://127.0.0.1:8100/admin/integrate \
+curl -X POST http://127.0.0.1:8100/admin/automation-jobs/integrate \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{"url":"https://chat.example.com","headed":false,"profile_id":1}'
 # -> {"job_id":"..."}
@@ -428,42 +432,42 @@ curl -X POST http://127.0.0.1:8100/admin/integrate \
 Poll job:
 
 ```bash
-curl http://127.0.0.1:8100/admin/integrate/$JOB -H "Authorization: Bearer $ADMIN"
+curl http://127.0.0.1:8100/admin/automation-jobs/integrate/$JOB -H "Authorization: Bearer $ADMIN"
 # {id, kind, url, slug, status, log[], login_attempts,
 #  can_complete_login, can_finish_record, segment, segments[],
 #  trace_path, trace_md_path}
 ```
 
 - `status` cuối: `ok|recorded|failed|cancelled|login_timeout|record_timeout`.
-- Log SSE live: `GET /admin/integrate/{job_id}/log` (`data:` từng dòng,
+- Log SSE live: `GET /admin/automation-jobs/integrate/{job_id}/log` (`data:` từng dòng,
   `event: done` khi kết thúc).
-- Đăng nhập xong: `POST /admin/integrate/{job_id}/login-complete`.
-  Hủy: `POST /admin/integrate/{job_id}/cancel`.
+- Đăng nhập xong: `POST /admin/automation-jobs/integrate/{job_id}/login-complete`.
+  Hủy: `POST /admin/automation-jobs/integrate/{job_id}/cancel`.
 
 ### 12.4 Record — ghi thao tác tay thành trace
 
 ```bash
-curl -X POST http://127.0.0.1:8100/admin/record \
+curl -X POST http://127.0.0.1:8100/admin/automation-jobs/record \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{"url":"https://chat.example.com","profile_id":1}'
 # -> {"job_id":"..."}
 
 # Mở/đóng đoạn ghi theo việc (flow tự đặt tên được: ^[a-z][a-z0-9_]{0,39}$)
-curl -X POST http://127.0.0.1:8100/admin/record/$JOB/segment \
+curl -X POST http://127.0.0.1:8100/admin/automation-jobs/record/$JOB/segment \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{"action":"start","flow":"text"}'
-curl -X POST http://127.0.0.1:8100/admin/record/$JOB/segment \
+curl -X POST http://127.0.0.1:8100/admin/automation-jobs/record/$JOB/segment \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{"action":"stop"}'
 
 # Kết thúc (?analyze=true cần LLM, nếu không thì lưu trace phân tích sau)
-curl -X POST "http://127.0.0.1:8100/admin/record/$JOB/finish?analyze=false" \
+curl -X POST "http://127.0.0.1:8100/admin/automation-jobs/record/$JOB/finish?analyze=false" \
   -H "Authorization: Bearer $ADMIN"
 
 # Tải trace
-curl "http://127.0.0.1:8100/admin/record/$JOB/trace.json" -H "Authorization: Bearer $ADMIN"
-curl "http://127.0.0.1:8100/admin/record/$JOB/trace.md" -H "Authorization: Bearer $ADMIN"
-curl http://127.0.0.1:8100/admin/traces -H "Authorization: Bearer $ADMIN"
+curl "http://127.0.0.1:8100/admin/automation-jobs/record/$JOB/trace.json" -H "Authorization: Bearer $ADMIN"
+curl "http://127.0.0.1:8100/admin/automation-jobs/record/$JOB/trace.md" -H "Authorization: Bearer $ADMIN"
+curl http://127.0.0.1:8100/admin/automation-traces -H "Authorization: Bearer $ADMIN"
 ```
 
 ### 12.5 Picker — bắt selector trực tiếp trên browser
@@ -565,7 +569,7 @@ Hai hệ account song song — chọn đúng đường theo `BROWSER_PROFILE_MOD
 - `profile` (khuyên dùng): một Chromium profile giữ đăng nhập mọi domain,
   mỗi recipe một tab. Quản lý qua `/admin/profiles/*` (DB).
 - `storage_state` (mặc định): mỗi recipe một context file. Quản lý qua
-  `/admin/accounts` + `/admin/recipes/{slug}/accounts` (file).
+  `/admin/accounts` + `/admin/automations/{slug}/accounts` (file).
 
 Ma trận ghép account↔recipe xem ở §16.
 
@@ -662,14 +666,14 @@ curl -X DELETE http://127.0.0.1:8100/admin/accounts/chat.example.com/main \
   -H "Authorization: Bearer $ADMIN"
 
 # Lối tắt theo recipe (account ghi vào kho chung của domain)
-curl -X POST http://127.0.0.1:8100/admin/recipes/my-site/accounts \
+curl -X POST http://127.0.0.1:8100/admin/automations/my-site/accounts \
   -H "Authorization: Bearer $ADMIN"
-curl -X POST http://127.0.0.1:8100/admin/recipes/my-site/accounts/main/reopen \
+curl -X POST http://127.0.0.1:8100/admin/automations/my-site/accounts/main/reopen \
   -H "Authorization: Bearer $ADMIN"
-curl -X POST http://127.0.0.1:8100/admin/recipes/my-site/accounts/$SID/complete \
+curl -X POST http://127.0.0.1:8100/admin/automations/my-site/accounts/$SID/complete \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{"name":"main"}'
-curl -X POST http://127.0.0.1:8100/admin/recipes/my-site/accounts/$SID/cancel \
+curl -X POST http://127.0.0.1:8100/admin/automations/my-site/accounts/$SID/cancel \
   -H "Authorization: Bearer $ADMIN"
 ```
 
@@ -698,7 +702,7 @@ Ma trận account↔recipe đã ghép sẵn — client không tự đoán domain
 khớp model nào:
 
 ```bash
-curl http://127.0.0.1:8100/admin/test-targets -H "Authorization: Bearer $ADMIN"
+curl http://127.0.0.1:8100/admin/automation-targets -H "Authorization: Bearer $ADMIN"
 # {targets:[{account_id,label,host,domain,status,profile_id,profile_name,
 #   profile_headless,profile_open,profile_tabs,profile_max_tabs,
 #   recipes[],models[],ready,busy}],
@@ -706,7 +710,7 @@ curl http://127.0.0.1:8100/admin/test-targets -H "Authorization: Bearer $ADMIN"
 
 # Mở đúng tab headed mà request có target sẽ dùng lại
 # (model trống = server tự chọn recipe đầu phục vụ domain)
-curl -X POST http://127.0.0.1:8100/admin/test-targets/open \
+curl -X POST http://127.0.0.1:8100/admin/automation-targets/open \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{"model":"","account_id":5}'
 ```

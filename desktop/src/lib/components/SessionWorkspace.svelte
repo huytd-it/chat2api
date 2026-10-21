@@ -377,7 +377,7 @@
   async function loadTargets() {
     targetsLoading = true;
     try {
-      const { targets: list, ...meta } = await fetchTestTargets($apiKey);
+      const { targets: list, ...meta } = await fetchTestTargets($apiKey, site?.id);
       targets = site ? list.filter((target) => belongsToWebsite(target, site)) : list;
       targetMeta = meta;
       // Account bị xoá/tắt giữa chừng phải rơi khỏi lựa chọn, nếu không batch
@@ -936,7 +936,7 @@
             Chọn một hội thoại để xem lịch sử, hoặc gửi yêu cầu mới. Bản ghi từ API cũng xuất hiện ở đây.
           {/if}
         </p>
-        {#if site && !chatModels.length}<a href="/profiles" class="mt-5 text-sm font-medium text-primary hover:underline">Quản lý profile & đăng nhập</a>{/if}
+        {#if site && !chatModels.length}<a href={`/websites/${site.id}/agent`} class="mt-5 text-sm font-medium text-primary hover:underline">Tạo automation bằng agent CLI</a>{/if}
       </div>
     {:else}
       <div

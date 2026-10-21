@@ -72,7 +72,7 @@ async def test_add_account_saves_into_shared_domain_store(tmp_path):
     client, app, fake, d = await _client(tmp_path, login={"anon_trial_limit": 5})
     store = tmp_path / "recipes" / ".accounts" / "site.example"
     async with client:
-        r = await client.post("/admin/recipes/sitea/accounts")
+        r = await client.post("/admin/automations/sitea/accounts")
         assert r.status_code == 200
         session_id = r.json()["session_id"]
         slug, url, recipe_dir, storage_state = fake.starts[session_id]
@@ -81,12 +81,12 @@ async def test_add_account_saves_into_shared_domain_store(tmp_path):
         assert storage_state is None
 
         r2 = await client.post(
-            f"/admin/recipes/sitea/accounts/{session_id}/complete", json={"name": "acct-1"})
+            f"/admin/automations/sitea/accounts/{session_id}/complete", json={"name": "acct-1"})
         assert r2.status_code == 200
         assert r2.json() == {"ok": True, "slug": "sitea", "account": "acct-1",
                              "domain": "site.example"}
 
-        r3 = await client.get("/admin/recipes")
+        r3 = await client.get("/admin/automations")
         entry = next(e for e in r3.json() if e["slug"] == "sitea")
         assert entry["accounts"] == 1
         assert entry["trial"] is None
@@ -103,13 +103,13 @@ async def test_recipe_sees_both_declared_and_shared_accounts(tmp_path):
     (d / "auth").mkdir(parents=True, exist_ok=True)
     (d / "auth" / "acct-1.json").write_text('{"cookies": [], "origins": []}', encoding="utf-8")
     async with client:
-        r = await client.post("/admin/recipes/sitea/accounts")
+        r = await client.post("/admin/automations/sitea/accounts")
         session_id = r.json()["session_id"]
         r2 = await client.post(
-            f"/admin/recipes/sitea/accounts/{session_id}/complete", json={"name": "acct-2"})
+            f"/admin/automations/sitea/accounts/{session_id}/complete", json={"name": "acct-2"})
         assert r2.status_code == 200
 
-        r3 = await client.get("/admin/recipes")
+        r3 = await client.get("/admin/automations")
         entry = next(e for e in r3.json() if e["slug"] == "sitea")
         assert set(entry["account_names"]) == {"acct-1", "acct-2"}
 
@@ -118,15 +118,15 @@ async def test_second_recipe_on_same_domain_reuses_accounts(tmp_path):
     """Đúng yêu cầu chính: đăng nhập một lần, mọi recipe cùng domain dùng lại."""
     client, app, fake, d = await _client(tmp_path)
     async with client:
-        r = await client.post("/admin/recipes/sitea/accounts")
+        r = await client.post("/admin/automations/sitea/accounts")
         session_id = r.json()["session_id"]
         await client.post(
-            f"/admin/recipes/sitea/accounts/{session_id}/complete", json={"name": "shared-1"})
+            f"/admin/automations/sitea/accounts/{session_id}/complete", json={"name": "shared-1"})
 
         _write_recipe(tmp_path, slug="siteb")
-        await client.post("/admin/recipes/siteb/reload")
+        await client.post("/admin/automations/siteb/reload")
 
-        r2 = await client.get("/admin/recipes")
+        r2 = await client.get("/admin/automations")
         entry = next(e for e in r2.json() if e["slug"] == "siteb")
         assert entry["account_names"] == ["shared-1"]
 
@@ -134,10 +134,10 @@ async def test_second_recipe_on_same_domain_reuses_accounts(tmp_path):
 async def test_accounts_page_lists_domains_with_using_recipes(tmp_path):
     client, app, fake, d = await _client(tmp_path)
     async with client:
-        r = await client.post("/admin/recipes/sitea/accounts")
+        r = await client.post("/admin/automations/sitea/accounts")
         session_id = r.json()["session_id"]
         await client.post(
-            f"/admin/recipes/sitea/accounts/{session_id}/complete", json={"name": "acct-1"})
+            f"/admin/automations/sitea/accounts/{session_id}/complete", json={"name": "acct-1"})
 
         r2 = await client.get("/admin/accounts")
         assert r2.status_code == 200
@@ -149,14 +149,14 @@ async def test_accounts_page_lists_domains_with_using_recipes(tmp_path):
 async def test_delete_shared_account(tmp_path):
     client, app, fake, d = await _client(tmp_path)
     async with client:
-        r = await client.post("/admin/recipes/sitea/accounts")
+        r = await client.post("/admin/automations/sitea/accounts")
         session_id = r.json()["session_id"]
         await client.post(
-            f"/admin/recipes/sitea/accounts/{session_id}/complete", json={"name": "acct-1"})
+            f"/admin/automations/sitea/accounts/{session_id}/complete", json={"name": "acct-1"})
 
         r2 = await client.delete("/admin/accounts/site.example/acct-1")
         assert r2.status_code == 200
-        r3 = await client.get("/admin/recipes")
+        r3 = await client.get("/admin/automations")
         entry = next(e for e in r3.json() if e["slug"] == "sitea")
         assert entry["account_names"] == []
 
@@ -166,9 +166,9 @@ async def test_delete_shared_account(tmp_path):
 async def test_cancel_account_login(tmp_path):
     client, app, fake, d = await _client(tmp_path)
     async with client:
-        r = await client.post("/admin/recipes/sitea/accounts")
+        r = await client.post("/admin/automations/sitea/accounts")
         session_id = r.json()["session_id"]
-        r2 = await client.post(f"/admin/recipes/sitea/accounts/{session_id}/cancel")
+        r2 = await client.post(f"/admin/automations/sitea/accounts/{session_id}/cancel")
         assert r2.status_code == 200
         assert r2.json() == {"ok": True}
     assert fake.cancelled == [session_id]
@@ -177,10 +177,10 @@ async def test_cancel_account_login(tmp_path):
 async def test_invalid_account_name_rejected(tmp_path):
     client, app, fake, d = await _client(tmp_path)
     async with client:
-        r = await client.post("/admin/recipes/sitea/accounts")
+        r = await client.post("/admin/automations/sitea/accounts")
         session_id = r.json()["session_id"]
         r2 = await client.post(
-            f"/admin/recipes/sitea/accounts/{session_id}/complete", json={"name": "Bad Name!"})
+            f"/admin/automations/sitea/accounts/{session_id}/complete", json={"name": "Bad Name!"})
         assert r2.status_code == 400
         assert r2.json()["error"]["code"] == "invalid_account_name"
 
@@ -188,7 +188,7 @@ async def test_invalid_account_name_rejected(tmp_path):
 async def test_add_account_unknown_recipe_404(tmp_path):
     client, app, fake, d = await _client(tmp_path)
     async with client:
-        r = await client.post("/admin/recipes/does-not-exist/accounts")
+        r = await client.post("/admin/automations/does-not-exist/accounts")
         assert r.status_code == 404
         assert r.json()["error"]["code"] == "not_found"
 
@@ -197,7 +197,7 @@ async def test_recipes_list_exposes_account_names(tmp_path):
     client, app, fake, d = await _client(
         tmp_path, login={"accounts": [{"name": "acct-1", "storage_state": "auth/acct-1.json"}]})
     async with client:
-        r = await client.get("/admin/recipes")
+        r = await client.get("/admin/automations")
         entry = next(e for e in r.json() if e["slug"] == "sitea")
         assert entry["account_names"] == ["acct-1"]
 
@@ -206,7 +206,7 @@ async def test_reopen_account_login_uses_saved_storage_state(tmp_path):
     client, app, fake, d = await _client(
         tmp_path, login={"accounts": [{"name": "acct-1", "storage_state": "auth/acct-1.json"}]})
     async with client:
-        r = await client.post("/admin/recipes/sitea/accounts/acct-1/reopen")
+        r = await client.post("/admin/automations/sitea/accounts/acct-1/reopen")
         assert r.status_code == 200
         session_id = r.json()["session_id"]
         assert r.json()["name"] == "acct-1"
@@ -219,7 +219,7 @@ async def test_reopen_unknown_account_404(tmp_path):
     client, app, fake, d = await _client(
         tmp_path, login={"accounts": [{"name": "acct-1", "storage_state": "auth/acct-1.json"}]})
     async with client:
-        r = await client.post("/admin/recipes/sitea/accounts/nope/reopen")
+        r = await client.post("/admin/automations/sitea/accounts/nope/reopen")
         assert r.status_code == 404
         assert r.json()["error"]["code"] == "not_found"
 
@@ -309,7 +309,7 @@ async def test_explicit_domain_still_wins_over_cookies(tmp_path):
 async def test_recipes_listing_exposes_domain_for_grouping(tmp_path):
     client, app, fake, d = await _client(tmp_path)
     async with client:
-        entry = next(e for e in (await client.get("/admin/recipes")).json()
+        entry = next(e for e in (await client.get("/admin/automations")).json()
                      if e["slug"] == "sitea")
         assert entry["domain"] == "site.example"
         assert entry["url"] == "https://site.example/chat"

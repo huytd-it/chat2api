@@ -1,4 +1,4 @@
-"""Flows đã xoá — /admin/flows trả 410, recipe là nguồn duy nhất."""
+"""Legacy flow routes were removed from the workspace/admin surface."""
 import yaml
 from httpx import ASGITransport, AsyncClient
 
@@ -51,8 +51,7 @@ async def test_flow_endpoints_gone(tmp_path):
             r = await client.put(path, json={"slug": "sitea", "nodes": []})
         else:
             r = await client.post(path, json={})
-        assert r.status_code == 410, f"{method} {path} expected 410 got {r.status_code}: {r.text}"
-        assert "Flows" in r.text or "gone" in r.text.lower()
+        assert r.status_code == 404, f"{method} {path} expected 404 got {r.status_code}: {r.text}"
 
 
 async def test_flow_overrides_recipe_now_resolves_browser_recipe(tmp_path):

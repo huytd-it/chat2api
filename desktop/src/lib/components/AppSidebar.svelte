@@ -4,7 +4,7 @@
   import * as Tooltip from "$lib/components/ui/tooltip/index.js";
   import GaugeIcon from "phosphor-svelte/lib/GaugeIcon";
   import ChatCircleTextIcon from "phosphor-svelte/lib/ChatCircleTextIcon";
-  import { Globe, Plus } from "phosphor-svelte";
+  import { Globe } from "phosphor-svelte";
   import BrowserIcon from "phosphor-svelte/lib/BrowserIcon";
   import ShuffleIcon from "phosphor-svelte/lib/ShuffleIcon";
   import StackIcon from "phosphor-svelte/lib/StackIcon";
@@ -13,12 +13,10 @@
   import { serverStatus } from "$lib/stores";
   import { recipes } from "$lib/sync";
   import { cn } from "$lib/utils";
-  import { websites } from "$lib/websites";
-  import ProviderIcon from "./sessions/ProviderIcon.svelte";
 
   const links = [
     { href: "/profiles", label: "Profiles & account", icon: StackIcon },
-    { href: "/providers", label: "API & tích hợp", icon: BrowserIcon },
+    { href: "/api-providers", label: "API providers", icon: BrowserIcon },
     { href: "/combos", label: "Combos", icon: ShuffleIcon },
     { href: "/sessions", label: "Lịch sử & API", icon: ChatCircleTextIcon },
     { href: "/overview", label: "Hệ thống", icon: GaugeIcon },
@@ -69,29 +67,12 @@
       <Sidebar.GroupContent>
         <Sidebar.Menu>
           <Sidebar.MenuItem>
-            <Sidebar.MenuButton isActive={isActive("/")} tooltipContent="Tất cả website">
-              {#snippet child({ props })}<a href="/" {...props}><Globe size={18} /><span>Tất cả website</span></a>{/snippet}
+            <Sidebar.MenuButton isActive={isActive("/") || isActive("/websites")} tooltipContent="Web chats">
+              {#snippet child({ props })}<a href="/" {...props}><Globe size={18} /><span>Web chats</span></a>{/snippet}
             </Sidebar.MenuButton>
           </Sidebar.MenuItem>
         </Sidebar.Menu>
       </Sidebar.GroupContent>
-    </Sidebar.Group>
-    <Sidebar.Group>
-      <Sidebar.GroupLabel>Workspaces</Sidebar.GroupLabel>
-      <Sidebar.GroupContent><Sidebar.Menu>
-        {#each $websites as site (site.id)}
-          <Sidebar.MenuItem>
-            <Sidebar.MenuButton isActive={isActive(`/websites/${site.id}`)} tooltipContent={site.title}>
-              {#snippet child({ props })}
-                <a href={`/websites/${site.id}`} {...props}>
-                  <ProviderIcon model={site.slug} size={18} /><span>{site.title}</span>
-                  {#if !site.models.length}<span class="ml-auto size-1.5 rounded-full bg-muted-foreground/40 group-data-[collapsible=icon]:hidden" title="Chưa có automation đang nạp"></span>{/if}
-                </a>
-              {/snippet}
-            </Sidebar.MenuButton>
-          </Sidebar.MenuItem>
-        {/each}
-      </Sidebar.Menu></Sidebar.GroupContent>
     </Sidebar.Group>
     <Sidebar.Group>
       <Sidebar.GroupLabel>Quản trị</Sidebar.GroupLabel>
@@ -109,11 +90,6 @@
               </Sidebar.MenuButton>
             </Sidebar.MenuItem>
           {/each}
-          <Sidebar.MenuItem>
-            <Sidebar.MenuButton isActive={isActive("/integrations")} tooltipContent="Kết nối website">
-              {#snippet child({ props })}<a href="/integrations" {...props}><Plus size={18} /><span>Kết nối website</span></a>{/snippet}
-            </Sidebar.MenuButton>
-          </Sidebar.MenuItem>
         </Sidebar.Menu>
       </Sidebar.GroupContent>
     </Sidebar.Group>

@@ -36,8 +36,8 @@ async function capture(name) {
 }
 try {
   await page.goto(base);
-  await page.getByRole("heading", { name: "Không gian làm việc", exact: true }).waitFor();
-  await page.getByText("10 module · dữ liệu từ server").waitFor();
+  await page.getByRole("heading", { name: "Web chats", exact: true, level: 2 }).waitFor();
+  await page.locator('main a[href="/websites/qwen"]').waitFor();
   await capture("directory-desktop");
 
   await Promise.all([

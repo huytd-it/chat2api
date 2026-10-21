@@ -115,8 +115,21 @@ def main(argv=None) -> int:
     p_int = sub.add_parser("integrate")
     p_int.add_argument("url")
 
+    p_web = sub.add_parser("website", help="Domain workspace và brief cho agent CLI")
+    web_sub = p_web.add_subparsers(dest="website_action", required=True)
+    web_add = web_sub.add_parser("add", help="Lưu domain, không chạy automation")
+    web_add.add_argument("domain")
+    web_sub.add_parser("list")
+    web_brief = web_sub.add_parser("brief", help="In yêu cầu để gửi cho coding agent, không chạy LLM")
+    web_brief.add_argument("domain")
+    web_brief.add_argument("--request", default="", help="Automation mong muốn")
+
     args = parser.parse_args(argv)
     cfg = Config()
+
+    if args.cmd == "website":
+        from .automation.website_cli import run
+        return run(cfg, args)
 
     if args.cmd == "serve":
         import uvicorn

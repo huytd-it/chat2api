@@ -150,6 +150,15 @@ CREATE TABLE IF NOT EXISTS account_failstreak (
 
 -- --------------------------------------------------------- recipe / model
 
+-- Launcher-only website registrations, independent of runnable automation.
+CREATE TABLE IF NOT EXISTS website (
+    id TEXT PRIMARY KEY,
+    origin TEXT NOT NULL UNIQUE,
+    slug TEXT NOT NULL,
+    title TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS recipe (
   id              INTEGER PRIMARY KEY,
   slug            TEXT    NOT NULL UNIQUE,       -- [a-z0-9-]

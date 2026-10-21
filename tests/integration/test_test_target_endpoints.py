@@ -46,7 +46,7 @@ async def test_list_pairs_every_account_with_the_recipes_of_its_domain(targets_a
     add(profiles_mod, tmp_path, "work", "beta.test", "acc2")
     add(profiles_mod, tmp_path, "spare", "alpha.test", "acc3")
 
-    body = (await client.get("/admin/test-targets")).json()
+    body = (await client.get("/admin/automation-targets")).json()
     rows = {(t["profile_name"], t["host"], t["label"]): t for t in body["targets"]}
 
     assert len(rows) == 3
@@ -61,7 +61,7 @@ async def test_www_prefix_still_matches_the_recipe_domain(targets_app, tmp_path)
     client, _, profiles_mod = targets_app
     add(profiles_mod, tmp_path, "work", "www.alpha.test", "acc1")
 
-    target = (await client.get("/admin/test-targets")).json()["targets"][0]
+    target = (await client.get("/admin/automation-targets")).json()["targets"][0]
     assert target["host"] == "www.alpha.test" and target["domain"] == "alpha.test"
     assert target["models"] == ["alpha/fast", "alpha/deep"] and target["ready"] is True
 
@@ -70,7 +70,7 @@ async def test_account_without_recipe_is_listed_but_not_ready(targets_app, tmp_p
     client, _, profiles_mod = targets_app
     add(profiles_mod, tmp_path, "work", "gamma.test", "acc1")
 
-    target = (await client.get("/admin/test-targets")).json()["targets"][0]
+    target = (await client.get("/admin/automation-targets")).json()["targets"][0]
     # Vẫn liệt kê để người dùng thấy vì sao nó không chọn được, thay vì giấu đi.
     assert target["models"] == [] and target["ready"] is False
 
@@ -82,14 +82,14 @@ async def test_disabled_account_is_hidden(targets_app, tmp_path):
     with conn:
         conn.execute("UPDATE account SET disabled = 1 WHERE id = ?", (account["id"],))
 
-    assert (await client.get("/admin/test-targets")).json()["targets"] == []
+    assert (await client.get("/admin/automation-targets")).json()["targets"] == []
 
 
 async def test_list_reports_the_pool_caps_so_ui_can_warn(targets_app, tmp_path):
     client, _, profiles_mod = targets_app
     add(profiles_mod, tmp_path, "work", "alpha.test", "acc1")
 
-    body = (await client.get("/admin/test-targets")).json()
+    body = (await client.get("/admin/automation-targets")).json()
     # Chọn nhiều profile hơn trần thì Chromium sẽ đóng bớt — UI cần con số này
     # để cảnh báo trước, không để tab tự biến mất giữa chừng.
     assert body["max_profiles"] >= 1 and body["max_tabs"] >= 1
@@ -111,7 +111,7 @@ async def test_open_without_model_picks_the_recipe_serving_that_domain(targets_a
     app = client._transport.app
     app.state.router.providers["beta"].open_target = open_target
 
-    response = await client.post("/admin/test-targets/open",
+    response = await client.post("/admin/automation-targets/open",
                                  json={"account_id": account["id"]})
     assert response.status_code == 200
     body = response.json()
@@ -124,7 +124,7 @@ async def test_open_rejects_an_account_no_recipe_serves(targets_app, tmp_path):
     client, _, profiles_mod = targets_app
     _, account = add(profiles_mod, tmp_path, "work", "gamma.test", "acc1")
 
-    response = await client.post("/admin/test-targets/open",
+    response = await client.post("/admin/automation-targets/open",
                                  json={"account_id": account["id"]})
     assert response.status_code == 400
     assert "gamma.test" in response.json()["error"]["message"]

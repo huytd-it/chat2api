@@ -1074,11 +1074,11 @@ def register_admin(app: FastAPI, admin) -> None:
             "JOIN domain d ON d.id = a.domain_id "
             "WHERE a.disabled = 0 ORDER BY p.name, d.host, a.label")]
 
-    @admin.get("/test-targets")
-    async def test_target_list(request: Request):
+    @admin.get("/automation-targets")
+    async def test_target_list(request: Request, site: str = ""):
         """Toàn bộ ma trận profile × domain × account có thể đem ra test.
 
-        Khác `/admin/profiles` (chỉ kể account) và `/admin/recipes` (chỉ kể
+        Khác `/admin/profiles` (chỉ kể account) và `/admin/automations` (chỉ kể
         model): ở đây hai bên đã được ghép sẵn, nên desktop không phải tự đoán
         domain nào khớp recipe nào — chỗ mà 'www.' hay recipe trùng domain vẫn
         làm lệch danh sách.
@@ -1086,12 +1086,20 @@ def register_admin(app: FastAPI, admin) -> None:
         cfg = request.app.state.cfg
         pool_ = request.app.state.pool
         by_domain = _browser_recipes_by_domain(request.app.state.router)
+        manifest = None
+        if site:
+            from .automation.websites import site_for_id
+            manifest = site_for_id(site, request.app.state.router)
         open_now = set(pool_.open_profiles)
         targets = []
         for row in _account_rows():
             host = str(row["host"] or "").lower()
             domain = host[4:] if host.startswith("www.") else host
+            if manifest and domain not in {h.removeprefix("www.").lower() for h in manifest.hosts}:
+                continue
             providers_ = by_domain.get(domain, [])
+            if manifest:
+                providers_ = [p for p in providers_ if manifest.accepts_url(p.url)]
             models_ = [m.id for provider in providers_ for m in provider.models()]
             targets.append({
                 "account_id": row["id"], "label": row["label"] or "main",
@@ -1159,7 +1167,7 @@ def register_admin(app: FastAPI, admin) -> None:
         account_limits.clear_cooldown(recipe_slug.strip(), account_key.strip())
         return {"ok": True}
 
-    @admin.post("/test-targets/open")
+    @admin.post("/automation-targets/open")
     async def test_target_open(body: TestTargetOpenRequest, request: Request):
         """Open the exact headed tab used by a targeted desktop chat request."""
         provider = _provider_for_target(request, body.model.strip(), body.account_id)
@@ -1179,7 +1187,7 @@ def register_admin(app: FastAPI, admin) -> None:
     # 4). Không phải domain hợp lệ nên không lọt vào danh sách domain.
     PENDING_DIRNAME = "_pending"
 
-    @admin.post("/integrate")
+    @admin.post("/automation-jobs/integrate")
     async def integrate(body: IntegrateRequest, request: Request):
         cfg = request.app.state.cfg
         if not llm.configured(cfg):
@@ -1210,7 +1218,7 @@ def register_admin(app: FastAPI, admin) -> None:
             return Path(cfg.traces_dir)  # type: ignore[attr-defined]
         return Path("data/traces")
 
-    @admin.get("/record/{job_id}/trace")
+    @admin.get("/automation-jobs/record/{job_id}/trace")
     async def get_trace(job_id: str, request: Request, format: str = "json"):
         # Hỗ trợ cả ?format=json|md và path extension /trace.json /trace.md (spec)
         # FastAPI không match dấu chấm trong path param, nên extension truyền qua ?format hoặc suffix trong job_id
@@ -1243,16 +1251,16 @@ def register_admin(app: FastAPI, admin) -> None:
             return Response(content=f.read_bytes(), media_type=mt)
         raise OpenAIError(404, "not_found", "Trace không tồn tại")
 
-    # Alias đúng spec: GET /admin/record/{id}/trace.json và /trace.md (extension trong path)
-    @admin.get("/record/{job_id}/trace.json")
+    # Persisted trace downloads in the automation job namespace.
+    @admin.get("/automation-jobs/record/{job_id}/trace.json")
     async def get_trace_json(job_id: str, request: Request):
         return await get_trace(job_id, request, format="json")
 
-    @admin.get("/record/{job_id}/trace.md")
+    @admin.get("/automation-jobs/record/{job_id}/trace.md")
     async def get_trace_md(job_id: str, request: Request):
         return await get_trace(job_id, request, format="md")
 
-    @admin.get("/traces")
+    @admin.get("/automation-traces")
     async def list_traces(request: Request):
         traces_dir = _traces_dir_for_request(request)
         if not traces_dir.exists():
@@ -1269,14 +1277,14 @@ def register_admin(app: FastAPI, admin) -> None:
                 out.append({"name": f.name})
         return {"traces": out, "count": len(out)}
 
-    @admin.get("/integrate/{job_id}")
+    @admin.get("/automation-jobs/integrate/{job_id}")
     async def integrate_status(job_id: str):
         job = await jobs.get(job_id)
         if not job:
             raise OpenAIError(404, "not_found", "Job không tồn tại")
         return job
 
-    @admin.post("/integrate/{job_id}/login-complete")
+    @admin.post("/automation-jobs/integrate/{job_id}/login-complete")
     async def integrate_login_complete(job_id: str, request: Request):
         try:
             return await jobs.complete_login(
@@ -1291,7 +1299,7 @@ def register_admin(app: FastAPI, admin) -> None:
         except jobs.ContextResetFailed:
             raise OpenAIError(500, "context_reset_failed", "Không thể reset analyzer context")
 
-    @admin.post("/integrate/{job_id}/cancel")
+    @admin.post("/automation-jobs/integrate/{job_id}/cancel")
     async def integrate_cancel(job_id: str, request: Request):
         try:
             return await jobs.cancel_job(job_id, request.app.state.login_manager)
@@ -1300,7 +1308,7 @@ def register_admin(app: FastAPI, admin) -> None:
         except jobs.InvalidJobState:
             raise OpenAIError(409, "invalid_job_state", "Không thể hủy job ở trạng thái này")
 
-    @admin.post("/record")
+    @admin.post("/automation-jobs/record")
     async def record_start(body: RecordRequest, request: Request):
         cfg = request.app.state.cfg
         profile_row = await asyncio.to_thread(profiles.find, str(body.profile_id))
@@ -1320,7 +1328,7 @@ def register_admin(app: FastAPI, admin) -> None:
         applog.log(f"record: bắt đầu {body.url} (job={job_id}, profile={profile_row['name']}, slug={forced or '-'})")
         return {"job_id": job_id}
 
-    @admin.post("/record/{job_id}/segment")
+    @admin.post("/automation-jobs/record/{job_id}/segment")
     async def record_segment(job_id: str, body: RecordSegmentRequest):
         """Chuyển đoạn ghi: mỗi đoạn là một việc (chọn model / text / image / video)."""
         action = (body.action or "start").strip().lower()
@@ -1341,7 +1349,7 @@ def register_admin(app: FastAPI, admin) -> None:
         except jobs.InvalidJobState:
             raise OpenAIError(409, "invalid_job_state", "Job không ở trạng thái ghi thao tác")
 
-    @admin.post("/record/{job_id}/finish")
+    @admin.post("/automation-jobs/record/{job_id}/finish")
     async def record_finish(job_id: str, request: Request, analyze: bool = False):
         if analyze and not llm.configured(request.app.state.cfg):
             raise OpenAIError(503, "agent_not_configured",
@@ -1357,7 +1365,7 @@ def register_admin(app: FastAPI, admin) -> None:
         except jobs.ContextResetFailed:
             raise OpenAIError(500, "context_reset_failed", "Không thể reset context sau khi ghi")
 
-    @admin.get("/integrate/{job_id}/log")
+    @admin.get("/automation-jobs/integrate/{job_id}/log")
     async def integrate_log(job_id: str):
         async def gen():
             cursor = 0
@@ -1745,11 +1753,11 @@ def register_admin(app: FastAPI, admin) -> None:
         return {"ok": True, "closed": closed}
 
     @admin.get("/sessions")
-    async def session_list(q: str = "", model: str = "", archived: bool = False,
+    async def session_list(request: Request, q: str = "", model: str = "", archived: bool = False,
                            limit: int = 100, site: str = ""):
         if site:
             from .automation.websites import history_slugs, site_for_id
-            manifest = site_for_id(site)
+            manifest = site_for_id(site, request.app.state.router)
             slugs = await asyncio.to_thread(history_slugs, manifest)
             items = await asyncio.to_thread(sessions.list_sessions, q, model, archived, limit,
                                             recipe_slugs=slugs)
@@ -1873,16 +1881,23 @@ def register_admin(app: FastAPI, admin) -> None:
         entries = await asyncio.to_thread(applog.history, level, source, q, before, limit)
         return {"entries": entries, "persisted": store.default() is not None}
 
-    @admin.get("/recipes")
-    async def recipes(request: Request):
+    @admin.get("/automations")
+    async def automations(request: Request, site: str = ""):
         from .providers.browser_recipe import BrowserRecipe as BR
 
         rt = request.app.state.router
+        if site:
+            from .automation.websites import site_for_id
+            manifest = site_for_id(site, rt)
+        else:
+            manifest = None
         out = []
         for slug, provider in sorted(rt.providers.items()):
             if slug == "combo":
                 continue
             if not isinstance(provider, BR):
+                continue
+            if manifest is not None and not manifest.accepts_url(provider.url):
                 continue
             entry = {"slug": slug,
                     "models": [m.id.split("/", 1)[1] for m in provider.models()],
@@ -1893,10 +1908,23 @@ def register_admin(app: FastAPI, admin) -> None:
             entry["trial"] = provider.trial_status
             entry["domain"] = provider.domain
             entry["url"] = provider.url
+            entry["loaded"] = True
             out.append(entry)
+        # Stored/disabled/custom configurations must remain visible even when
+        # there is no executable provider. Do not silently enable or overwrite
+        # them merely because the operator opened a workspace.
+        db = store.default()
+        if db:
+            loaded = {entry["slug"] for entry in out}
+            for row in db.query("SELECT slug,url,enabled FROM recipe WHERE kind='browser' ORDER BY slug"):
+                if row["slug"] in loaded or (manifest and not manifest.accepts_url(row["url"])):
+                    continue
+                out.append({"slug": row["slug"], "url": row["url"], "models": [],
+                            "unhealthy": False, "type": "StoredAutomation", "loaded": False,
+                            "enabled": bool(row["enabled"]), "accounts": 0, "account_names": []})
         return out
 
-    @admin.post("/recipes")
+    @admin.post("/automations")
     async def create_recipe(body: RecipeManualSpec, request: Request):
         """Tạo recipe thủ công (không qua analyzer AI) — người dùng tự khai CSS
         selector, dùng khi site quá lạ hoặc analyzer đoán selector sai."""
@@ -1925,7 +1953,7 @@ def register_admin(app: FastAPI, admin) -> None:
         applog.log(f"recipe: tạo thủ công {slug}")
         return {"ok": True, "slug": slug}
 
-    @admin.post("/recipes/test")
+    @admin.post("/automations/test")
     async def test_recipe(body: RecipeTestRequest, request: Request):
         """Chạy thử một prompt cố định qua recipe CHƯA lưu, để người dùng biết
         selector đúng hay sai trước khi bấm tạo (form thủ công không có bước
@@ -1940,7 +1968,7 @@ def register_admin(app: FastAPI, admin) -> None:
                                       recipe, body.headed, body.flow, body.test_prompt,
                                       body.model)
 
-    @admin.post("/recipes/analyze")
+    @admin.post("/automations/analyze")
     async def analyze_recipe(body: RecipeAnalyzeRequest, request: Request):
         """Phân tích URL bằng AI và trả về recipe chưa lưu — dùng để auto-fill
         vào form chi tiết. Không ghi đĩa, không thử round-trip."""
@@ -1996,7 +2024,7 @@ def register_admin(app: FastAPI, admin) -> None:
         return {"status": "ok", "recipe": result["recipe"], "notes": result.get("notes", ""),
                 "log": log_lines, "slug": result.get("slug", "")}
 
-    @admin.post("/recipes/discover-models")
+    @admin.post("/automations/discover-models")
     async def discover_recipe_models(body: RecipeModelDiscoveryRequest, request: Request):
         """Chủ động mở trang và dò model controls; không chạy trong tải trang nền."""
         from urllib.parse import urlparse
@@ -2045,13 +2073,13 @@ def register_admin(app: FastAPI, admin) -> None:
             await page.close()
             await request.app.state.pool.drop(key)
 
-    @admin.post("/recipes/{slug}/reload")
+    @admin.post("/automations/{slug}/reload")
     async def reload_recipes(slug: str, request: Request):
         request.app.state.router.reload()
         applog.log(f"recipe: reload {slug}")
         return {"ok": True}
 
-    @admin.delete("/recipes/{slug}")
+    @admin.delete("/automations/{slug}")
     async def delete_recipe(slug: str, request: Request):
         if not re.fullmatch(r"[a-z0-9-]+", slug or "") or slug in {"gemini", "openai"}:
             raise OpenAIError(400, "invalid_slug", "Slug không được xóa")
@@ -2062,7 +2090,7 @@ def register_admin(app: FastAPI, admin) -> None:
         applog.log(f"recipe: xóa {slug}", "warn")
         return {"ok": True}
 
-    @admin.patch("/recipes/{slug}")
+    @admin.patch("/automations/{slug}")
     async def rename_recipe(slug: str, body: RecipeRenameRequest, request: Request):
         import yaml
 
@@ -2142,25 +2170,37 @@ def register_admin(app: FastAPI, admin) -> None:
             raise OpenAIError(400, "invalid_recipe", "; ".join(errs))
         return data
 
-    @admin.get("/recipes/{slug}/source")
+    @admin.get("/automations/{slug}/source")
     async def recipe_source(slug: str, request: Request):
         """recipe.yaml nguyên văn + bản đã parse, cho màn sửa nâng cao."""
         import yaml as yaml_mod
 
-        recipe_file = _recipe_file(request, slug)
-        text = recipe_file.read_text(encoding="utf-8")
+        read_only = False
+        try:
+            recipe_file = _recipe_file(request, slug)
+            text = recipe_file.read_text(encoding="utf-8")
+        except OpenAIError as error:
+            if error.status != 404:
+                raise
+            db = store.default()
+            rows = db.query("SELECT yaml,config FROM recipe WHERE slug=? AND kind='browser'", (slug,)) if db else []
+            if not rows:
+                raise
+            import json
+            text = rows[0]["yaml"] or yaml_mod.safe_dump(json.loads(rows[0]["config"]), allow_unicode=True, sort_keys=False)
+            read_only = True
         try:
             data = yaml_mod.safe_load(text) or {}
         except yaml_mod.YAMLError as error:
             # File hỏng vẫn phải mở được ở tab YAML — đó chính là lúc cần sửa.
-            return {"slug": slug, "yaml": text, "data": None, "parse_error": str(error)}
+            return {"slug": slug, "yaml": text, "data": None, "parse_error": str(error), "read_only": read_only}
         if not isinstance(data, dict):
             return {"slug": slug, "yaml": text, "data": None,
-                    "parse_error": "YAML phải là một mapping"}
+                    "parse_error": "YAML phải là một mapping", "read_only": read_only}
         data.setdefault("slug", slug)
-        return {"slug": slug, "yaml": text, "data": data, "parse_error": None}
+        return {"slug": slug, "yaml": text, "data": data, "parse_error": None, "read_only": read_only}
 
-    @admin.put("/recipes/{slug}")
+    @admin.put("/automations/{slug}")
     async def update_recipe(slug: str, body: RecipeEditRequest, request: Request):
         """Ghi đè recipe.yaml rồi nạp lại router ngay."""
         import yaml as yaml_mod
@@ -2176,7 +2216,7 @@ def register_admin(app: FastAPI, admin) -> None:
         applog.log(f"recipe: sửa {slug} ({mode})")
         return {"ok": True, "slug": slug}
 
-    @admin.post("/recipes/{slug}/preview")
+    @admin.post("/automations/{slug}/preview")
     async def preview_recipe_edit(slug: str, body: RecipeEditRequest, request: Request):
         """Bản sửa sau khi áp, KHÔNG ghi đĩa — trả về cả YAML lẫn dict.
 
@@ -2190,7 +2230,7 @@ def register_admin(app: FastAPI, admin) -> None:
         text = yaml_mod.safe_dump(data, allow_unicode=True, sort_keys=False)
         return {"slug": slug, "yaml": text, "data": data}
 
-    @admin.post("/recipes/{slug}/test")
+    @admin.post("/automations/{slug}/test")
     async def test_recipe_edit(slug: str, body: RecipeEditTestRequest, request: Request):
         """Chạy thử bản đang sửa mà chưa ghi đè recipe đang chạy."""
         data = _edited_recipe(request, slug, body)
@@ -2198,7 +2238,7 @@ def register_admin(app: FastAPI, admin) -> None:
                                       data, body.headed, body.flow, body.test_prompt,
                                       body.model)
 
-    @admin.post("/recipes/{slug}/reanalyze")
+    @admin.post("/automations/{slug}/reanalyze")
     async def reanalyze_recipe(slug: str, body: RecipeReanalyzeRequest, request: Request):
         """Phân tích lại recipe đã có bằng AI — giữ nguyên slug, ghi đè YAML."""
         import yaml as yaml_mod
@@ -2261,7 +2301,7 @@ def register_admin(app: FastAPI, admin) -> None:
             raise OpenAIError(404, "not_found", "Recipe không tồn tại")
         return provider
 
-    @admin.post("/recipes/{slug}/browser/close")
+    @admin.post("/automations/{slug}/browser/close")
     async def close_recipe_browser(slug: str, request: Request):
         # Browser của recipe được giữ mở sau mỗi request; đây là đường duy nhất
         # để tắt nó từ app (ngoài việc người dùng tự đóng cửa sổ).
@@ -2269,35 +2309,6 @@ def register_admin(app: FastAPI, admin) -> None:
         closed = await provider.close_browser()
         applog.log(f"browser: đóng thủ công {slug} ({closed} context)")
         return {"ok": True, "closed": closed}
-
-    # Flows đã xoá — các endpoint cũ trả 410 để client biết migrate sang recipes.
-    @admin.get("/flows")
-    async def flow_list(request: Request):
-        raise OpenAIError(410, "gone", "Flows đã xoá — dùng /admin/recipes (mọi flow giờ là recipe + BrowserRecipe).")
-
-    @admin.get("/flows/{slug}")
-    async def flow_detail(slug: str, request: Request):
-        raise OpenAIError(410, "gone", "Flows đã xoá — dùng /admin/recipes/{slug}/source.")
-
-    @admin.put("/flows/{slug}")
-    async def flow_save(slug: str, request: Request):
-        raise OpenAIError(410, "gone", "Flows đã xoá — dùng PUT /admin/recipes/{slug}.")
-
-    @admin.delete("/flows/{slug}")
-    async def flow_delete(slug: str, request: Request):
-        raise OpenAIError(410, "gone", "Flows đã xoá.")
-
-    @admin.post("/flows/{slug}/duplicate")
-    async def flow_duplicate(slug: str, request: Request):
-        raise OpenAIError(410, "gone", "Flows đã xoá — tạo recipe mới bằng POST /admin/recipes.")
-
-    @admin.post("/flows/{slug}/reload")
-    async def flow_reload(slug: str, request: Request):
-        raise OpenAIError(410, "gone", "Flows đã xoá.")
-
-    @admin.post("/flows/{slug}/test")
-    async def flow_test(slug: str, request: Request):
-        raise OpenAIError(410, "gone", "Flows đã xoá — dùng POST /admin/recipes/{slug}/test.")
 
     # ------------------------------------------------------------- picker — chọn selector trực tiếp trên headed browser
     from .schemas import PickerCountRequest, PickerStartRequest
@@ -2861,7 +2872,7 @@ def register_admin(app: FastAPI, admin) -> None:
     # Các endpoint theo recipe dưới đây là lối tắt tiện tay từ trang Recipes:
     # chúng chỉ suy ra domain của recipe rồi ghi vào đúng kho account chung, nên
     # account thêm ở đây lập tức dùng được cho mọi recipe cùng domain.
-    @admin.post("/recipes/{slug}/accounts")
+    @admin.post("/automations/{slug}/accounts")
     async def start_account_login(slug: str, request: Request):
         provider = _browser_recipe_or_404(request, slug)
         cfg = request.app.state.cfg
@@ -2877,7 +2888,7 @@ def register_admin(app: FastAPI, admin) -> None:
         applog.log(f"account: mở browser thêm account mới cho {slug} (session={session_id})")
         return {"session_id": session_id, "domain": provider.domain}
 
-    @admin.post("/recipes/{slug}/accounts/{name}/reopen")
+    @admin.post("/automations/{slug}/accounts/{name}/reopen")
     async def reopen_account_login(slug: str, name: str, request: Request):
         # Mở lại browser bằng đúng profile (storage_state) của account đã lưu —
         # để re-login khi session hết hạn, thay vì phải tạo account mới.
@@ -2899,7 +2910,7 @@ def register_admin(app: FastAPI, admin) -> None:
         applog.log(f"account: mở lại browser cho {slug}/{name} (session={session_id})")
         return {"session_id": session_id, "name": name}
 
-    @admin.post("/recipes/{slug}/accounts/{session_id}/complete")
+    @admin.post("/automations/{slug}/accounts/{session_id}/complete")
     async def complete_account_login(slug: str, session_id: str, request: Request,
                                      body: AddAccountRequest):
         provider = _browser_recipe_or_404(request, slug)
@@ -2932,7 +2943,7 @@ def register_admin(app: FastAPI, admin) -> None:
         applog.log(f"account: đã lưu {provider.domain}/{name} (từ recipe {slug})")
         return {"ok": True, "slug": slug, "account": name, "domain": provider.domain}
 
-    @admin.post("/recipes/{slug}/accounts/{session_id}/cancel")
+    @admin.post("/automations/{slug}/accounts/{session_id}/cancel")
     async def cancel_account_login(slug: str, session_id: str, request: Request):
         await request.app.state.login_manager.cancel(session_id)
         return {"ok": True}

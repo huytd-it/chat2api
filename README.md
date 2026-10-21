@@ -585,7 +585,9 @@ Khuyến nghị khi triển khai:
 `CHAT2API_DATA_DIR` mặc định là `./data` và chứa `chat2api.db` + `traces/` (xem `data/traces/README.md`). Dữ liệu ghi chép bao gồm:
 
 - Request/response tổng quát (vào `chat2api.db`) để thống kê và xem lại lịch sử.
-- **Trace thao tác:** Mỗi phiên record thao tác được lưu chi tiết thành tệp `.json` và `.md` trong `data/traces/<jobId>-<slug>.{json,md}` — giữ vĩnh viễn, đọc qua `GET /admin/record/{id}/trace.json|.md` (alias `?format=json|md`) và `GET /admin/traces`. Desktop có nút **Tải trace** trong *Ghi thao tác*. Skill `trace-analyzer` (`skills/trace-analyzer/SKILL.md` → sync ra `.claude/.opencode/.codex`) phân tích `.md` → đề xuất `recipe.yaml` → sửa → chạy thử.
+- **Trace thao tác:** Mỗi phiên record thao tác được lưu chi tiết thành tệp `.json` và `.md` trong `data/traces/<jobId>-<slug>.{json,md}` — giữ vĩnh viễn, đọc qua `GET /admin/automation-jobs/record/{id}/trace.json|.md` (alias `?format=json|md`) và `GET /admin/automation-traces`. Desktop có nút **Tải trace** trong *Ghi thao tác*. Skill `trace-analyzer` (`skills/trace-analyzer/SKILL.md` → sync ra `.claude/.opencode/.codex`) phân tích `.md` → đề xuất `recipe.yaml` → sửa → chạy thử.
+- **Workspace UI/admin API:** Công cụ quản trị website nằm trong workspace → Cấu hình; direct API được tách riêng. Namespace admin cũ đã gỡ; xem [hướng dẫn chuyển đổi](docs/workspace-admin-migration.md). `/v1/*` giữ nguyên; migration engine vẫn đang tiếp tục.
+- **Web chats:** Trang icon chọn website, không liệt kê mọi domain trên sidebar. Thêm domain trước rồi giao yêu cầu automation cho coding agent CLI qua `python -m chat2api website brief <domain> --request "..."`. [Luồng domain → agent CLI](docs/website-agent-cli.md).
 
 Mỗi request được ghi ở đầu và cuối — không ghi từng SSE delta — để giảm lock contention nhưng vẫn giữ được:
 

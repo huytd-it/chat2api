@@ -15,7 +15,7 @@
   } from "../api";
   import { RecipeForm } from "../recipeForm.svelte";
   import { refreshAfterRecipeChange } from "../sync";
-  import RecipeFields from "./RecipeFields.svelte";
+  import RecipeFields from "./AutomationFields.svelte";
   import TrialReport from "./TrialReport.svelte";
   import { Button } from "$lib/components/ui/button";
   import { Switch } from "$lib/components/ui/switch";
@@ -71,11 +71,12 @@
     loading = true; loadError = ""; parseError = ""; testResult = null; form.error = "";
     try {
       const source = await fetchRecipeSource($apiKey, target);
+      readOnly = !!source.read_only;
       yamlText = source.yaml;
       parseError = source.parse_error ?? "";
       if (source.data) form.load(source.data);
       // File hỏng thì biểu mẫu không có gì để hiện — mở thẳng tab YAML.
-      mode = source.data ? "form" : "yaml";
+      mode = source.data && !readOnly ? "form" : "yaml";
       tab = mode;
     } catch (e) {
       loadError = (e as Error).message;
@@ -114,7 +115,7 @@
   });
 
   async function onTest() {
-    if (!slug) return;
+    if (!slug || readOnly) return;
     const payload = edit();
     if (!payload) { showToast(form.error); return; }
     testing = true; testResult = null;
@@ -124,7 +125,7 @@
   }
 
   async function onSave() {
-    if (!slug) return;
+    if (!slug || readOnly) return;
     const payload = edit();
     if (!payload) { showToast(form.error); return; }
     saving = true;
@@ -152,6 +153,7 @@
   });
 
   const busy = $derived(saving || testing || switching);
+  let readOnly = $state(false);
 </script>
 
 <Sheet.Root open={slug !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -177,6 +179,7 @@
         </div>
       {:else}
         <div class="grid gap-5">
+          {#if readOnly}<p role="status" class="rounded-lg bg-muted p-4 text-sm leading-relaxed">Cấu hình chỉ có trong SQLite, chưa có file chạy tương ứng. Nội dung được giữ nguyên để xem/sao chép; không ghi đè hoặc bật chạy tự động. Chỉnh sửa và kích hoạt nguồn này còn chờ migration runtime.</p>{/if}
           {#if form.error}<div class="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive" role="alert">{form.error}</div>{/if}
           {#if parseError}
             <div class="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning" role="alert">
@@ -186,7 +189,7 @@
 
           <Tabs.Root bind:value={tab}>
             <Tabs.List class="w-fit">
-              <Tabs.Trigger value="form" disabled={switching || !!parseError}>Biểu mẫu</Tabs.Trigger>
+              <Tabs.Trigger value="form" disabled={readOnly || switching || !!parseError}>Biểu mẫu</Tabs.Trigger>
               <Tabs.Trigger value="yaml" disabled={switching}>YAML</Tabs.Trigger>
             </Tabs.List>
 
@@ -196,7 +199,7 @@
 
             <Tabs.Content value="yaml" class="mt-4 grid gap-2">
               <label for="re-yaml" class="text-sm font-medium">recipe.yaml</label>
-              <Textarea id="re-yaml" class="min-h-[26rem] font-data text-xs leading-relaxed" spellcheck={false} bind:value={yamlText} />
+              <Textarea id="re-yaml" class="min-h-[26rem] font-data text-xs leading-relaxed" spellcheck={false} readonly={readOnly} bind:value={yamlText} />
               <p class="text-xs text-muted-foreground">Toàn văn file. Giữ được cả những khóa biểu mẫu không có (<span class="font-data">login.accounts</span>, <span class="font-data">response.exclude</span>…).</p>
             </Tabs.Content>
           </Tabs.Root>
@@ -243,8 +246,8 @@
       </div>
       <div class="flex flex-wrap gap-2">
         <Button type="button" variant="ghost" size="sm" disabled={loading || busy} onclick={() => slug && load(slug)}><ArrowClockwise /> Đọc lại</Button>
-        <Button type="button" variant="outline" size="sm" disabled={loading || busy} onclick={onTest}>{#if testing}<CircleNotch class="animate-spin" /> Đang kiểm tra{:else}<Check /> Kiểm tra{/if}</Button>
-        <Button type="button" size="sm" disabled={loading || busy} onclick={onSave}>{#if saving}<CircleNotch class="animate-spin" /> Đang lưu{:else}<FloppyDisk /> Lưu{/if}</Button>
+        <Button type="button" variant="outline" size="sm" disabled={readOnly || loading || busy} onclick={onTest}>{#if testing}<CircleNotch class="animate-spin" /> Đang kiểm tra{:else}<Check /> Kiểm tra{/if}</Button>
+        <Button type="button" size="sm" disabled={readOnly || loading || busy} onclick={onSave}>{#if saving}<CircleNotch class="animate-spin" /> Đang lưu{:else}<FloppyDisk /> Lưu{/if}</Button>
       </div>
     </Sheet.Footer>
   </Sheet.Content>
