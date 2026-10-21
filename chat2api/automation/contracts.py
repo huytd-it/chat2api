@@ -72,7 +72,11 @@ class SiteManifest:
             raise ValueError("Site origin must be an HTTPS URL on an allowed host")
         if not self.id or not self.slug or "/" in self.slug or not self.title.strip():
             raise ValueError("Site identity is required")
-        if not self.models or len({m.id for m in self.models}) != len(self.models):
+        # An unprobed site can be catalogued without inventing a model or
+        # advertising executable operations. Existing modules still require
+        # model IDs when declaring operations.
+        if ((not self.models and self.operations)
+                or len({m.id for m in self.models}) != len(self.models)):
             raise ValueError("Site requires distinct model IDs")
         if any(m.operation not in self.operations for m in self.models):
             raise ValueError("Model operation is not declared by the site")

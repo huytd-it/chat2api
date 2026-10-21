@@ -7,7 +7,8 @@
   import * as Sidebar from "$lib/components/ui/sidebar/index.js";
   import AppSidebar from "$lib/components/AppSidebar.svelte";
   import AppHeader from "$lib/components/AppHeader.svelte";
-  import { serverStatus, serverLog } from "$lib/stores";
+  import { serverStatus, serverLog, apiKey } from "$lib/stores";
+  import { refreshWebsites } from "$lib/websites";
   import { fetchHealth } from "$lib/api";
   import { refreshModels, refreshRecipes, refreshAccounts, refreshOverview } from "$lib/sync";
 
@@ -48,6 +49,7 @@
         refreshRecipes();
         refreshAccounts();
         refreshOverview();
+        refreshWebsites($apiKey);
       }
     })();
 
@@ -58,20 +60,15 @@
   // direction contract is injected via {@html} to survive as a real DOM
   // comment node the production build can be grepped for.
   const directionContract = `<!--
-THESIS: chat2api desktop reads as a focused developer tool, not a themed
-instrument panel: dense enough to work in, quiet enough to trust, honest
-about state (connecting, healthy, degraded) at every layer.
-OWN-WORLD: neutral zinc surfaces, one cobalt-blue accent for interactive
-intent, green/amber/red reserved strictly for healthy/running/error
-semantics; shadcn-svelte + Bits UI primitives on Tailwind v4 tokens, system
-sans for UI text, monospace only for ids, models, timestamps and logs.
-STORY: an operator opens the app to a collapsible sidebar and a slim header
-with live connection status; Sessions is the dense workbench (session list,
-conversation, composer, inspector); Integrations, Logs and Settings stay
-narrow and legible.
-FINISH: DESIGN.md documents the token system and component inventory this
-build ships with; light, dark and system themes are first-class, not an
-afterthought.
+THESIS: website-first automation workspaces replace the generic playground.
+OWN-WORLD: cool slate surfaces, cobalt actions, precise sans typography;
+semantic status colors never claim unverified account readiness.
+STORY: choose a website, select account/model, work in its own history and
+inspect the real context. Global administration is secondary.
+FIRST VIEWPORT: website rail, module header and target strip, conversation
+and composer, with context inspector at wide widths and drawers below.
+FORM: operator desk, grounded direction 3, seed 210f6e51; user-approved.
+FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
 -->`;
 </script>
 

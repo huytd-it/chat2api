@@ -4,7 +4,7 @@
   import * as Tooltip from "$lib/components/ui/tooltip/index.js";
   import GaugeIcon from "phosphor-svelte/lib/GaugeIcon";
   import ChatCircleTextIcon from "phosphor-svelte/lib/ChatCircleTextIcon";
-  import FileTextIcon from "phosphor-svelte/lib/FileTextIcon";
+  import { Globe, Plus } from "phosphor-svelte";
   import BrowserIcon from "phosphor-svelte/lib/BrowserIcon";
   import ShuffleIcon from "phosphor-svelte/lib/ShuffleIcon";
   import StackIcon from "phosphor-svelte/lib/StackIcon";
@@ -13,15 +13,16 @@
   import { serverStatus } from "$lib/stores";
   import { recipes } from "$lib/sync";
   import { cn } from "$lib/utils";
+  import { websites } from "$lib/websites";
+  import ProviderIcon from "./sessions/ProviderIcon.svelte";
 
   const links = [
-    { href: "/", label: "Overview", icon: GaugeIcon },
-    { href: "/sessions", label: "Sessions", icon: ChatCircleTextIcon },
-    { href: "/recipes", label: "Recipes", icon: FileTextIcon },
-    { href: "/providers", label: "Providers", icon: BrowserIcon },
+    { href: "/profiles", label: "Profiles & account", icon: StackIcon },
+    { href: "/providers", label: "API & tích hợp", icon: BrowserIcon },
     { href: "/combos", label: "Combos", icon: ShuffleIcon },
-    { href: "/profiles", label: "Profiles", icon: StackIcon },
-    { href: "/logs", label: "Logs", icon: ScrollIcon },
+    { href: "/sessions", label: "Lịch sử & API", icon: ChatCircleTextIcon },
+    { href: "/overview", label: "Hệ thống", icon: GaugeIcon },
+    { href: "/logs", label: "Nhật ký", icon: ScrollIcon },
   ];
 
   function isActive(href: string): boolean {
@@ -58,13 +59,42 @@
       </div>
       <div class="grid min-w-0 flex-1 leading-tight group-data-[collapsible=icon]:hidden">
         <span class="truncate text-sm font-semibold">chat2api</span>
-        <span class="truncate font-data text-[11px] text-muted-foreground">local gateway</span>
+        <span class="truncate text-[11px] text-muted-foreground">website automation</span>
       </div>
     </div>
   </Sidebar.Header>
 
   <Sidebar.Content>
     <Sidebar.Group>
+      <Sidebar.GroupContent>
+        <Sidebar.Menu>
+          <Sidebar.MenuItem>
+            <Sidebar.MenuButton isActive={isActive("/")} tooltipContent="Tất cả website">
+              {#snippet child({ props })}<a href="/" {...props}><Globe size={18} /><span>Tất cả website</span></a>{/snippet}
+            </Sidebar.MenuButton>
+          </Sidebar.MenuItem>
+        </Sidebar.Menu>
+      </Sidebar.GroupContent>
+    </Sidebar.Group>
+    <Sidebar.Group>
+      <Sidebar.GroupLabel>Workspaces</Sidebar.GroupLabel>
+      <Sidebar.GroupContent><Sidebar.Menu>
+        {#each $websites as site (site.id)}
+          <Sidebar.MenuItem>
+            <Sidebar.MenuButton isActive={isActive(`/websites/${site.id}`)} tooltipContent={site.title}>
+              {#snippet child({ props })}
+                <a href={`/websites/${site.id}`} {...props}>
+                  <ProviderIcon model={site.slug} size={18} /><span>{site.title}</span>
+                  {#if !site.models.length}<span class="ml-auto size-1.5 rounded-full bg-muted-foreground/40 group-data-[collapsible=icon]:hidden" title="Chưa có automation đang nạp"></span>{/if}
+                </a>
+              {/snippet}
+            </Sidebar.MenuButton>
+          </Sidebar.MenuItem>
+        {/each}
+      </Sidebar.Menu></Sidebar.GroupContent>
+    </Sidebar.Group>
+    <Sidebar.Group>
+      <Sidebar.GroupLabel>Quản trị</Sidebar.GroupLabel>
       <Sidebar.GroupContent>
         <Sidebar.Menu>
           {#each links as link (link.href)}
@@ -79,6 +109,11 @@
               </Sidebar.MenuButton>
             </Sidebar.MenuItem>
           {/each}
+          <Sidebar.MenuItem>
+            <Sidebar.MenuButton isActive={isActive("/integrations")} tooltipContent="Kết nối website">
+              {#snippet child({ props })}<a href="/integrations" {...props}><Plus size={18} /><span>Kết nối website</span></a>{/snippet}
+            </Sidebar.MenuButton>
+          </Sidebar.MenuItem>
         </Sidebar.Menu>
       </Sidebar.GroupContent>
     </Sidebar.Group>
@@ -87,11 +122,11 @@
   <Sidebar.Footer>
     <Sidebar.Menu>
       <Sidebar.MenuItem>
-        <Sidebar.MenuButton isActive={settingsActive} tooltipContent="Settings">
+        <Sidebar.MenuButton isActive={settingsActive} tooltipContent="Cài đặt">
           {#snippet child({ props })}
             <a href="/settings" {...props}>
               <GearSixIcon size={18} />
-              <span>Settings</span>
+              <span>Cài đặt</span>
             </a>
           {/snippet}
         </Sidebar.MenuButton>

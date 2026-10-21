@@ -354,6 +354,8 @@ def create_app(cfg: Config) -> FastAPI:
             "X-Chat2api-Account-Label", "X-Chat2api-Profile-Id",
             "X-Chat2api-Profile-Name", "X-Chat2api-Target",
             "X-Chat2api-Conversation-Url", "X-Chat2api-Headed",
+            "X-Chat2api-Request-Id", "X-Chat2api-Generation",
+            "X-Chat2api-Successful-Requests", "X-Chat2api-Context-Reset",
             "X-Chat2api-Combo", "X-Chat2api-Combo-Member", "X-Chat2api-Combo-Strategy",
         ],
     )
@@ -1017,6 +1019,8 @@ def create_app(cfg: Config) -> FastAPI:
     register_projects(app)
     from .automation.catalog import register as register_catalog
     register_catalog(app)
+    from .automation.websites import register as register_websites
+    register_websites(app)
     register_admin(app, admin)
 
     app.include_router(v1, prefix="/v1")
@@ -1742,8 +1746,15 @@ def register_admin(app: FastAPI, admin) -> None:
 
     @admin.get("/sessions")
     async def session_list(q: str = "", model: str = "", archived: bool = False,
-                           limit: int = 100):
-        items = await asyncio.to_thread(sessions.list_sessions, q, model, archived, limit)
+                           limit: int = 100, site: str = ""):
+        if site:
+            from .automation.websites import history_slugs, site_for_id
+            manifest = site_for_id(site)
+            slugs = await asyncio.to_thread(history_slugs, manifest)
+            items = await asyncio.to_thread(sessions.list_sessions, q, model, archived, limit,
+                                            recipe_slugs=slugs)
+        else:
+            items = await asyncio.to_thread(sessions.list_sessions, q, model, archived, limit)
         return {"sessions": items, "persisted": store.default() is not None}
 
     @admin.delete("/sessions")
@@ -1757,6 +1768,13 @@ def register_admin(app: FastAPI, admin) -> None:
         item = await asyncio.to_thread(sessions.get_session, session_id)
         if item is None:
             raise OpenAIError(404, "not_found", "Session không tồn tại")
+        db = store.default()
+        if db is not None:
+            def context():
+                rows = db.query("SELECT account_id,project_id,generation,successes,busy_operation "
+                                "FROM automation_session WHERE id=?", (session_id,))
+                return dict(rows[0]) if rows else None
+            item["automation"] = await asyncio.to_thread(context)
         return item
 
     @admin.get("/sessions/{session_id}/attachments/{attachment_id}")

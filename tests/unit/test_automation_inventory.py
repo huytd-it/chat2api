@@ -77,6 +77,10 @@ def test_builtin_public_model_parity_with_checked_in_recipes():
     report = inspect_sources(root / "recipes", root / "nonexistent-data-for-test")
     file_models = {e["slug"]: e["model_ids"] for e in report["entries"]}
     for site in builtin_registry().all():
+        if not site.models:
+            # New websites start as module registrations, not guessed recipes.
+            assert site.slug not in file_models
+            continue
         assert file_models[site.slug] == list(site.public_model_ids)
 
 

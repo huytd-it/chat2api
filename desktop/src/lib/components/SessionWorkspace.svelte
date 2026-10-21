@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { page } from "$app/state";
   import { Broadcast, List, X } from "phosphor-svelte";
   import { apiKey, headedBrowser, showToast } from "../stores";
-  import { models, selectedModel } from "../sync";
+  import { models, selectedModel, refreshModels } from "../sync";
+  import { belongsToWebsite, refreshWebsites } from "$lib/websites";
   import {
     deleteSessions,
     exportSession,
@@ -26,6 +27,7 @@
     type SessionSummary,
     type TestTarget,
     type TestTargetList,
+    type WebsiteInfo,
   } from "../api";
   import MessageInspector from "./MessageInspector.svelte";
   import SessionMessageCard from "./SessionMessageCard.svelte";
@@ -38,6 +40,27 @@
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
+  import * as Sheet from "$lib/components/ui/sheet/index.js";
+  import WebsiteToolbar from "./websites/WebsiteToolbar.svelte";
+  import WorkspaceContext from "./websites/WorkspaceContext.svelte";
+  import ImageStudio from "./websites/ImageStudio.svelte";
+
+  let { site }: { site?: WebsiteInfo } = $props();
+  let inspectorOpen = $state(true);
+  let narrowWorkspace = $state(false);
+  let workspaceTab = $state<"chat" | "image">("chat");
+  let openingProfile = $state(false);
+  let requestError = $state("");
+  let listError = $state("");
+  let listTicket = 0;
+  const scopedModels = $derived(site ? $models.filter((model) => site.history_slugs.includes(model.id.split("/")[0])) : $models);
+  const chatModels = $derived(scopedModels.filter((model) => model.capability !== "image" && model.capability !== "video"));
+
+  $effect(() => {
+    if (site && !sending && !chatModels.some((model) => model.id === $selectedModel)) {
+      $selectedModel = chatModels[0]?.id ?? "";
+    }
+  });
 
   let sessions = $state<SessionSummary[]>([]);
   let active = $state<SessionDetail | null>(null);
@@ -155,6 +178,28 @@
     return target ? `${target.profile_name} · ${target.host} · ${target.label}` : "";
   });
   const durableChat = $derived(!selected.length && Boolean(thinkingCapable || projectId));
+  const projectAvailable = $derived(thinkingCapable);
+  const contextAccount = $derived(targets.find((item) => item.account_id === (liveTarget?.accountId ?? chatAccountId ?? active?.account_id)));
+
+  async function openProfile() {
+    if (!chatAccountId || !$selectedModel || openingProfile) return;
+    openingProfile = true;
+    try { await openTestTarget($apiKey, $selectedModel, chatAccountId); }
+    catch (error) { showToast("Không mở được profile: " + (error as Error).message); }
+    finally { openingProfile = false; }
+  }
+
+  function setImageBusy(busy: boolean) {
+    sending = busy;
+    if (busy) { elapsed = 0; ticker = setInterval(() => elapsed += 1, 1000); }
+    else if (ticker) { clearInterval(ticker); ticker = null; }
+  }
+
+  async function imageCreated(id: string) {
+    workspaceTab = "chat";
+    await openSession(id);
+    await loadList();
+  }
 
   /** Bàn test và trình xem message dùng chung một rail bên phải. */
   function openBench() {
@@ -193,9 +238,13 @@
   }
 
   async function loadList(preserve = true) {
+    const ticket = ++listTicket;
     loadingList = true;
     try {
-      sessions = await fetchSessions($apiKey, query.trim(), modelFilter, archived);
+      const list = await fetchSessions($apiKey, query.trim(), modelFilter, archived, site?.id);
+      if (ticket !== listTicket) return;
+      sessions = list;
+      listError = "";
       const available = new Set(sessions.map((item) => item.id));
       selectedSessions = selectedSessions.filter((id) => available.has(id));
       if (!preserve || (active && !sessions.some((item) => item.id === active?.id))) {
@@ -203,9 +252,11 @@
         inspected = null;
       }
     } catch (error) {
+      if (ticket !== listTicket) return;
+      listError = (error as Error).message;
       showToast("Không nạp được sessions: " + (error as Error).message);
     } finally {
-      loadingList = false;
+      if (ticket === listTicket) loadingList = false;
     }
   }
 
@@ -219,7 +270,13 @@
     inspected = null;
     bankOpen = false;
     try {
-      active = await fetchSession($apiKey, id);
+      const detail = await fetchSession($apiKey, id);
+      if (site && !site.history_slugs.includes(detail.model_public_id.split("/")[0]) &&
+          !site.history_slugs.includes(detail.recipe_slug ?? "")) {
+        throw new Error("Phiên này thuộc website khác. Mở từ workspace tương ứng.");
+      }
+      if (active?.id !== id && liveTarget?.sessionId !== id) liveTarget = null;
+      active = detail;
       // Chỉ theo model của session khi model đó còn dùng được. Model cũ có thể
       // đã bị lọc khỏi danh sách (mất API key, recipe bị xóa) — gán bừa sẽ làm
       // ô chọn rỗng và nút Gửi chết mà không nói vì sao.
@@ -229,6 +286,9 @@
       // Không ghim account của session vào header: service đã giữ account
       // trong state, còn header ghim sẽ chặn failover khi account hết quota.
       chatAccountId = null;
+      await tick();
+      projectId = detail.automation?.project_id || "";
+      projectTitle = "";
       setTimeout(() => {
         if (traceEl) traceEl.scrollTop = traceEl.scrollHeight;
       });
@@ -240,6 +300,7 @@
   }
 
   function newSession() {
+    if (sending) return;
     active = null;
     inspected = null;
     prompt = "";
@@ -247,6 +308,9 @@
     projectId = "";
     projectTitle = "";
     chatAccountId = null;
+    liveTarget = null;
+    requestError = "";
+    workspaceTab = "chat";
     setTimeout(() => composer?.focusPrompt());
   }
 
@@ -297,6 +361,8 @@
           `(${result.state === "supported" ? "đã xác nhận" : result.state}).`,
       );
       await loadTargets();
+      await refreshModels();
+      await refreshWebsites($apiKey);
     } catch (error) {
       showToast("Không cập nhật được model: " + (error as Error).message);
     } finally {
@@ -312,15 +378,15 @@
     targetsLoading = true;
     try {
       const { targets: list, ...meta } = await fetchTestTargets($apiKey);
-      targets = list;
+      targets = site ? list.filter((target) => belongsToWebsite(target, site)) : list;
       targetMeta = meta;
       // Account bị xoá/tắt giữa chừng phải rơi khỏi lựa chọn, nếu không batch
       // sẽ bắn vào một id không còn tồn tại và chỉ báo lỗi lúc gửi.
-      const usable = new Set(list.filter((item) => item.ready).map((item) => item.account_id));
+      const usable = new Set(targets.filter((item) => item.ready).map((item) => item.account_id));
       selectedTargets = selectedTargets.filter((id) => usable.has(id));
       openedTargets = openedTargets.filter((id) => usable.has(id));
       const picked: Record<number, string> = {};
-      for (const item of list) {
+      for (const item of targets) {
         const kept = targetModels[item.account_id];
         picked[item.account_id] = kept && item.models.includes(kept) ? kept : (item.models[0] ?? "");
       }
@@ -514,6 +580,8 @@
     const text = prompt.trim();
     const files = attachments;
     if ((!text && !files.length) || !$selectedModel || sending) return;
+    if (site && !chatModels.some((model) => model.id === $selectedModel)) return;
+    requestError = "";
     prompt = "";
     attachments = [];
     sending = true;
@@ -521,7 +589,10 @@
     ticker = setInterval(() => (elapsed += 1), 1000);
     // Tách phiên: luôn sinh id mới và chỉ gửi đúng lượt này, không kèm
     // history của session đang mở. Giữ context: nối vào session đang mở.
-    const existingId = keepContext ? (active?.id ?? newDurableId()) : newDurableId();
+    const canContinue = keepContext && active && active.model_public_id === $selectedModel &&
+      (!durableChat || (active.automation && active.automation.project_id === (projectId || null) &&
+        (!chatAccountId || active.automation.account_id === chatAccountId)));
+    const existingId = canContinue ? active!.id : newDurableId();
     const turn: ChatMessage = { role: "user", content: chatContent(text, files) };
     // Phiên website bền nhận đúng MỘT tin user mới; history nằm ở hội thoại
     // website. Provider khác vẫn đi đường cũ (history đầy đủ như trước).
@@ -577,7 +648,7 @@
     };
     // Optimistic trace: chỉ khi giữ context mới vẽ tạm vào session đang mở.
     // Tách phiên thì session mới chưa tồn tại — đợi server chốt rồi nạp lại.
-    const showOptimistic = keepContext && active;
+    const showOptimistic = canContinue && active;
     if (showOptimistic) active!.messages.push(temporary, reply);
 
     liveTarget = null;
@@ -619,6 +690,7 @@
         showToast("Đủ 10 lượt — đã mở context mới, giữ nguyên project/file chung.");
       }
     } catch (error) {
+      requestError = (error as Error).name === "AbortError" ? "Đã ngắt kết nối. Nếu website đã nhận prompt, hãy kiểm tra tác vụ trước khi gửi lại." : (error as Error).message;
       if ((error as Error).name !== "AbortError") {
         showToast("Request lỗi: " + (error as Error).message);
       }
@@ -704,7 +776,7 @@
     try {
       const deleted = await deleteSessions(
         $apiKey,
-        deleteScope === "all" ? { all: true } : { ids },
+        { ids },
       );
       selectedSessions = [];
       if (active && (deleteScope === "all" || ids.includes(active.id))) {
@@ -749,12 +821,17 @@
   }
 
   onMount(() => {
+    const narrow = window.matchMedia("(max-width: 1279px)");
+    const resize = () => { narrowWorkspace = narrow.matches; if (narrow.matches) inspectorOpen = false; };
+    resize();
+    narrow.addEventListener("change", resize);
     loadTargets();
     loadList(false).then(() => {
       const requested = page.url.searchParams.get("open");
       if (requested) openSession(requested);
     });
     return () => {
+      narrow.removeEventListener("change", resize);
       if (listTimer) clearTimeout(listTimer);
       if (ticker) clearInterval(ticker);
       abortCtrl?.abort();
@@ -762,7 +839,16 @@
   });
 </script>
 
-<div class="relative flex h-full min-h-0 w-full overflow-hidden bg-background">
+<div class="flex h-full min-h-0 w-full flex-col overflow-hidden">
+{#if site}
+  <WebsiteToolbar {site} modelOptions={chatModels} accounts={chatAccountOptions}
+    bind:accountId={chatAccountId} bind:thinkingMode {thinkingAvailable} {projectAvailable}
+    projectLabel={projectTitle || projectId} {sending} opening={openingProfile}
+    refreshing={refreshingModels.includes(chatAccountId ?? -1)} {inspectorOpen} bind:tab={workspaceTab}
+    onOpenProfile={openProfile} onRefreshModels={() => chatAccountId && refreshModel(chatAccountId)}
+    onProject={() => projectDialogOpen = true} onToggleInspector={() => inspectorOpen = !inspectorOpen} onNew={newSession} />
+{/if}
+<div class="relative flex min-h-0 w-full flex-1 overflow-hidden bg-background">
   {#if bankOpen}
     <!-- Nền mờ chỉ tồn tại ở bề ngang hẹp, nơi rail trái đang là drawer. -->
     <button
@@ -775,8 +861,8 @@
 
   <div
     class="absolute inset-y-0 left-0 z-30 w-72 max-w-[85vw] transition-transform duration-200 ease-out
-      lg:static lg:z-auto lg:w-72 lg:translate-x-0 lg:shadow-none
-      {bankOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'}"
+      lg:static lg:z-auto lg:w-72 lg:translate-x-0 lg:shadow-none lg:visible
+      {bankOpen ? 'visible translate-x-0 shadow-2xl' : 'invisible -translate-x-full'}"
   >
     <SessionBank
       {sessions}
@@ -789,7 +875,11 @@
       onSearch={scheduleSearch}
       onFilterChange={() => loadList(false)}
       onNew={newSession}
-      onOpen={openSession}
+      onOpen={(id) => { if (!sending) { requestError = ""; void openSession(id); } }}
+      modelOptions={site ? scopedModels : undefined}
+      error={listError}
+      onRetry={() => loadList()}
+      busy={sending}
       onToggle={toggleSession}
       onSelectAll={setAllSessions}
       onDeleteSelected={() => confirmDelete("selected")}
@@ -801,6 +891,9 @@
   <!-- section chứ không main: layout shell đã có một <main>, và quy tắc CSS
        toàn cục cho `main` từng rơi vào đây làm console bị căn giữa. -->
   <section class="flex min-w-0 flex-1 flex-col bg-card" aria-label="Bản ghi phiên">
+    {#if site && workspaceTab === "image"}
+      <ImageStudio {site} accountId={chatAccountId} onCreated={imageCreated} onBusy={setImageBusy} />
+    {:else}
     {#if active && !loadingDetail}
       <SessionConsoleHeader
         session={active}
@@ -818,7 +911,7 @@
         <Button size="icon-sm" variant="ghost" aria-label="Mở danh sách sessions" onclick={() => (bankOpen = true)}>
           <List />
         </Button>
-        <span class="text-sm font-medium">Sessions</span>
+        <span class="text-sm font-medium">Hội thoại</span>
       </header>
     {/if}
 
@@ -832,11 +925,18 @@
         <div class="mb-3 grid size-12 place-items-center rounded-xl bg-primary/10 text-primary">
           <Broadcast size={24} aria-hidden="true" />
         </div>
-        <h2 class="display-face text-lg font-semibold tracking-[-0.02em]">Đầu dò sẵn sàng</h2>
+        <h2 class="display-face text-lg font-semibold tracking-[-0.02em]">{site ? (chatModels.length ? `Bắt đầu với ${site.title}` : `${site.title} chưa kết nối automation`) : "Bắt đầu hội thoại"}</h2>
         <p class="mt-1.5 max-w-[48ch] text-[13px] leading-relaxed text-muted-foreground">
-          Chọn một session để kiểm tra bản ghi, hoặc gõ vào ô bên dưới để phát tín hiệu mới. Mọi
-          lượt chat từ API đều được lưu tự động.
+          {#if site && !chatModels.length}
+            Website đã có trong danh sách module nhưng chưa có driver/model đang chạy.
+            Không có request nào được gửi cho đến khi tích hợp được kiểm chứng.
+          {:else if site}
+            Chọn account và model phía trên, sau đó gửi yêu cầu mới. Lịch sử trong workspace này chỉ thuộc {site.title}.
+          {:else}
+            Chọn một hội thoại để xem lịch sử, hoặc gửi yêu cầu mới. Bản ghi từ API cũng xuất hiện ở đây.
+          {/if}
         </p>
+        {#if site && !chatModels.length}<a href="/profiles" class="mt-5 text-sm font-medium text-primary hover:underline">Quản lý profile & đăng nhập</a>{/if}
       </div>
     {:else}
       <div
@@ -896,6 +996,8 @@
       </div>
     {/if}
 
+    {#if requestError}<div role="alert" class="mx-4 mb-3 rounded-lg bg-destructive/8 px-4 py-3 text-xs leading-relaxed text-destructive">{requestError}</div>{/if}
+    {#if !site || chatModels.length}
     <SessionComposer
       bind:this={composer}
       bind:prompt
@@ -925,7 +1027,12 @@
       {onHeadedChange}
       onRemoveTarget={toggleTarget}
       onOpenProject={() => (projectDialogOpen = true)}
+      workspaceMode={!!site}
+      modelOptions={chatModels}
+      {projectAvailable}
     />
+    {/if}
+    {/if}
   </section>
 
   <ProjectDialog
@@ -937,6 +1044,16 @@
     accountLabel={projectAccountLabel}
     onChanged={loadList}
   />
+
+  {#snippet contextPanel()}
+    {#if site}
+      <WorkspaceContext {site} session={active} target={liveTarget} account={contextAccount}
+        project={projectTitle || projectId} {sending} {elapsed} error={requestError} {projectAvailable}
+        onClose={() => inspectorOpen = false} onOpen={() => active && openConversation(active.id)}
+        onTargets={openBench} onProject={() => projectDialogOpen = true}
+        onRefresh={() => { void loadList(); void loadTargets(); }} />
+    {/if}
+  {/snippet}
 
   {#if benchOpen}
     <div
@@ -977,7 +1094,19 @@
         onopen={() => active && openConversation(active.id)}
       />
     </div>
+  {:else if site && inspectorOpen && !narrowWorkspace}
+    <div class="w-64 flex-none border-l border-border">{@render contextPanel()}</div>
   {/if}
+  {#if site && narrowWorkspace}
+    <Sheet.Root open={inspectorOpen && !benchOpen && !inspected} onOpenChange={(open) => inspectorOpen = open}>
+      <Sheet.Content side="right" class="w-72 gap-0 p-0" showCloseButton={false}>
+        <Sheet.Title class="sr-only">Ngữ cảnh & chẩn đoán</Sheet.Title>
+        <Sheet.Description class="sr-only">Thông tin account, project và phiên automation hiện tại.</Sheet.Description>
+        {@render contextPanel()}
+      </Sheet.Content>
+    </Sheet.Root>
+  {/if}
+</div>
 </div>
 
 <AlertDialog.Root bind:open={deleteDialogOpen}>

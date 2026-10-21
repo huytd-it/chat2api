@@ -2,11 +2,44 @@
 
 ## Trạng thái
 
+### Checkpoint UI production — 2026-10-21
+
+Đã triển khai UI mới vào app thật: danh sách website ở `/`, 10 workspace theo
+website, toolbar account/model, lịch sử lọc phía server và context inspector.
+Quản trị toàn hệ thống là nhóm phụ; Recipe editor chỉ còn đường nâng cao trong
+giai đoạn chưa cutover. MiniMax chưa có driver nên không có composer giả.
+
+EXE release `chat2api-desktop.exe` đã được build, so hash với target release và
+mở lại. Đã xác minh cửa sổ native hiển thị directory mới và account thực; sửa
+race khởi động để directory chờ sidecar health trước khi nạp account.
+
+Kiểm chứng UI: Svelte check 0 lỗi/0 warning, Vite + Tauri release build đạt,
+selected Python suite 438 passed, browser smoke desktop/narrow/light/dark và
+behavioral fixtures (context isolation, continuation, no automatic resend,
+drawer keyboard focus/Escape) đạt. Không gửi prompt thật lên provider trong QA
+UI. Chi tiết tại `automation-ui-verification.md`; thiết kế hiện tại ở
+`../DESIGN.md`. Runtime migration vẫn chưa hoàn tất.
+
 Đang triển khai theo kế hoạch đã duyệt. **Chưa cutover router, chưa gỡ engine
 recipe/flow, chưa coi 9 website đã được migrate.** Các manifest mới mô tả ranh
 giới module và public model ID, không phải chứng nhận tài khoản hoạt động.
 
 ## Baseline 2026-10-20
+
+### Bổ sung phạm vi: MiniMax Agent
+
+Người dùng yêu cầu thêm `https://agent.minimax.io/` sau checkpoint nền.
+Danh sách đích hiện có **10 module**, thêm package `sites/minimax/`,
+module ID `minimax`, slug nội bộ `minimax-agent`. Đây là website Agent,
+không phải cấu hình provider MiniMax API trực tiếp.
+
+Chưa probe đăng nhập, model, task lifecycle, file/artifact, project, Thinking,
+resume hay quota. Manifest không có model/operation để tránh xuất bản khả năng
+giả. Cần khảo sát cả tác vụ dài và artifact của website, không mặc định mọi
+tương tác là chat completion. Không tạo recipe YAML mới cho MiniMax.
+
+Các số liệu baseline 9 recipe bên dưới là snapshot trước khi bổ sung website,
+không phải danh sách module đích hiện tại.
 
 - Checkout sạch trước khi bắt đầu đợt này. Không tạo worktree.
 - `RECIPES_DIR=./recipes`, `CHAT2API_DATA_DIR=./data`; không có `flow.json`

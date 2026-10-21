@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ChatCircleDots, MagnifyingGlass, Plus, PushPin, X } from "phosphor-svelte";
-  import type { SessionSummary } from "../../api";
+  import type { SessionSummary, ModelInfo } from "../../api";
   import { models } from "../../sync";
   import { Badge } from "$lib/components/ui/badge";
   import { Button } from "$lib/components/ui/button";
@@ -28,6 +28,10 @@
     onDeleteSelected,
     onDeleteAll,
     onClose,
+    modelOptions,
+    error = "",
+    onRetry,
+    busy = false,
   }: {
     sessions: SessionSummary[];
     activeId: string | null;
@@ -46,6 +50,10 @@
     onDeleteAll: () => void;
     /** Chỉ hiện ở bề ngang hẹp, nơi rail này là drawer chồng lên console. */
     onClose?: () => void;
+    modelOptions?: ModelInfo[];
+    error?: string;
+    onRetry?: () => void;
+    busy?: boolean;
   } = $props();
 
   const allSelected = $derived(
@@ -63,13 +71,13 @@
 >
   <header class="flex flex-none items-center justify-between gap-3 border-b border-border px-3 py-3">
     <div class="min-w-0">
-      <h2 class="display-face text-base font-semibold leading-none tracking-[-0.02em]">Sessions</h2>
+      <h2 class="display-face text-base font-semibold leading-none tracking-[-0.02em]">Hội thoại</h2>
       <p class="mt-1 font-data text-[11px] text-muted-foreground">
         {sessions.length} phiên trong bộ lọc
       </p>
     </div>
     <div class="flex flex-none items-center gap-1">
-      <Button size="icon-sm" variant="outline" aria-label="Tạo session mới" title="Session mới" onclick={onNew}>
+      <Button size="icon-sm" variant="outline" disabled={busy} aria-label="Tạo session mới" title="Session mới" onclick={onNew}>
         <Plus />
       </Button>
       {#if onClose}
@@ -115,7 +123,7 @@
       </Select.Trigger>
       <Select.Content>
         <Select.Item value={ALL} label="Mọi model">Mọi model</Select.Item>
-        {#each $models as model (model.id)}
+        {#each modelOptions ?? $models as model (model.id)}
           <Select.Item value={model.id} label={model.id}>{model.id}</Select.Item>
         {/each}
       </Select.Content>
@@ -161,10 +169,12 @@
           <Skeleton class="h-2 w-1/2" />
         </div>
       {/each}
+    {:else if error}
+      <div role="alert" class="p-4 text-xs leading-relaxed"><p class="font-medium text-destructive">Không nạp được hội thoại</p><p class="mt-2 break-words text-muted-foreground">{error}</p><Button variant="outline" size="sm" class="mt-3" onclick={onRetry}>Thử lại</Button></div>
     {:else if sessions.length === 0}
       <div class="flex min-h-45 flex-col items-center justify-center px-6 py-10 text-center">
         <ChatCircleDots size={30} class="mb-2 text-muted-foreground" aria-hidden="true" />
-        <p class="text-sm font-medium">Không có tín hiệu</p>
+        <p class="text-sm font-medium">Chưa có hội thoại</p>
         <p class="mt-1 max-w-[36ch] text-xs text-muted-foreground">
           {query ? "Thử từ khóa ngắn hơn." : "Gửi prompt đầu tiên để ghi một phiên."}
         </p>
@@ -187,6 +197,7 @@
             </div>
             <button
               type="button"
+              disabled={busy}
               class="flex min-w-0 flex-1 items-start gap-2.5 py-2.5 pr-1 text-left outline-none"
               onclick={() => onOpen(item.id)}
             >

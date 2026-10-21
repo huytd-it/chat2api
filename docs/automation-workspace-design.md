@@ -1,7 +1,8 @@
 # Workspace automation website — bố cục đã duyệt
 
 Người dùng duyệt bản bố cục tương tác ngày 2026-10-20, không có ghi chú chỉnh
-sửa. Đây là brief cho giao diện mới, không phải mô tả UI production hiện tại.
+sửa. Brief này đã được triển khai vào UI production ngày 2026-10-21; thiết kế
+thực tế được ghi trong `../DESIGN.md`, kiểm chứng ở `automation-ui-verification.md`.
 
 ## Chế độ và mục tiêu
 

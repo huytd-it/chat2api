@@ -24,6 +24,67 @@ async def _chat(client, text="Xin chào", session_id=None, stream=False):
     })
 
 
+async def test_website_scope_filters_before_limit_and_preserves_other_sites(session_client):
+    client, db = session_client
+    conn = db.connection()
+    with conn:
+        for index, model in enumerate(("qwen-web/qwen-web", "chatgpt-web/default", "grok-web/default")):
+            conn.execute("INSERT INTO session(id,title,kind,model_public_id,created_at,updated_at) "
+                         "VALUES(?,?,'chat',?,?,?)", (f"scoped-session-{index}", model, model, index + 1, index + 1))
+    response = await client.get("/admin/sessions?site=qwen&limit=1")
+    assert response.status_code == 200
+    assert [item["model_public_id"] for item in response.json()["sessions"]] == ["qwen-web/qwen-web"]
+    assert len((await client.get("/admin/sessions")).json()["sessions"]) == 3
+    assert (await client.get("/admin/sessions?site=minimax")).json()["sessions"] == []
+    assert (await client.get("/admin/sessions?site=unknown")).status_code == 404
+    assert len(db.query("SELECT id FROM session")) == 3
+
+
+async def test_website_scope_includes_database_only_alias_but_not_similar_slug(session_client):
+    client, db = session_client
+    conn = db.connection()
+    now = store.now_ms()
+    with conn:
+        conn.execute("INSERT INTO recipe(slug,kind,url,created_at,updated_at) VALUES('chat','browser','https://chat.qwen.ai/',?,?)", (now, now))
+        for index, model in enumerate(("chat/qwen-web", "chat-evil/default")):
+            conn.execute("INSERT INTO session(id,title,kind,model_public_id,created_at,updated_at) VALUES(?,?,'chat',?,?,?)", (f"alias-session-{index}", model, model, now, now))
+    result = (await client.get("/admin/sessions?site=qwen")).json()["sessions"]
+    assert [item["model_public_id"] for item in result] == ["chat/qwen-web"]
+
+
+async def test_website_scope_includes_combo_runs_through_the_underlying_website(session_client):
+    client, db = session_client
+    now = store.now_ms()
+    with db.connection() as conn:
+        recipe_id = conn.execute("INSERT INTO recipe(slug,kind,url,created_at,updated_at) VALUES('qwen-web','browser','https://chat.qwen.ai/',?,?)", (now, now)).lastrowid
+        conn.execute("INSERT INTO session(id,title,kind,model_public_id,recipe_id,created_at,updated_at) VALUES('combo-through-qwen','combo','chat','combo/free-stack',?,?,?)", (recipe_id, now, now))
+    qwen = (await client.get("/admin/sessions?site=qwen")).json()["sessions"]
+    assert [item["id"] for item in qwen] == ["combo-through-qwen"]
+    assert (await client.get("/admin/sessions?site=chatgpt")).json()["sessions"] == []
+
+
+async def test_session_detail_reports_persisted_context_without_operation_results(session_client):
+    client, db = session_client
+    await _chat(client, session_id="durable-context-test")
+    now = store.now_ms()
+    with db.connection() as conn:
+        conn.execute("INSERT INTO automation_session(id,model,generation,successes,updated_at) VALUES(?,?,2,3,?)", ("durable-context-test", "fake/m1", now))
+    detail = (await client.get("/admin/sessions/durable-context-test")).json()
+    assert detail["automation"] == {"account_id": None, "project_id": None, "generation": 2, "successes": 3, "busy_operation": None}
+
+
+async def test_website_catalog_exposes_unconfigured_minimax_without_fake_model(session_client):
+    client, _ = session_client
+    response = await client.get("/admin/websites")
+    assert response.status_code == 200
+    sites = response.json()["websites"]
+    assert len(sites) == 10
+    minimax = next(site for site in sites if site["id"] == "minimax")
+    assert minimax["runtime"] == "not_configured"
+    assert minimax["models"] == []
+    assert minimax["operations"] == []
+
+
 async def test_non_stream_creates_session_messages_and_request_log(session_client):
     client, db = session_client
     response = await _chat(client)

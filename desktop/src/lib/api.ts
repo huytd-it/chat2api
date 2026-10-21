@@ -11,6 +11,39 @@ export interface HealthInfo {
 export interface ModelInfo {
   id: string;
   ready?: boolean;
+  capability?: string;
+}
+
+export interface WebsiteInfo {
+  id: string;
+  slug: string;
+  title: string;
+  url: string;
+  hosts: string[];
+  operations: string[];
+  history_slugs: string[];
+  models: ModelInfo[];
+  runtime: "legacy" | "module" | "not_configured";
+  unhealthy: boolean;
+}
+
+export async function fetchWebsites(key: string): Promise<WebsiteInfo[]> {
+  const base = await apiBase();
+  const response = await fetch(base + "/admin/websites", { headers: headers(key) });
+  return (await asJson(response)).websites;
+}
+
+export async function generateWebsiteImage(key: string, model: string, prompt: string,
+  headed: boolean, accountId?: number): Promise<string> {
+  const base = await apiBase();
+  const response = await fetch(base + "/v1/images/generations", {
+    method: "POST", headers: headers(key, headed, "", accountId),
+    body: JSON.stringify({ model, prompt, n: 1, response_format: "url" }),
+  });
+  await asJson(response);
+  const sessionId = response.headers.get("X-Chat2api-Session-Id");
+  if (!sessionId) throw new Error("Ảnh đã tạo nhưng response thiếu session ID. Kiểm tra lịch sử phiên.");
+  return sessionId;
 }
 
 export interface TrialStatus {
@@ -409,6 +442,8 @@ export interface SessionSummary {
 export interface SessionDetail extends SessionSummary {
   tags: string[];
   messages: SessionMessage[];
+  automation?: { account_id: number | null; project_id: string | null; generation: number;
+    successes: number; busy_operation: string | null } | null;
 }
 
 /** Account/profile mà server đã chọn cho một request — đọc từ header response,
@@ -1780,12 +1815,14 @@ export async function fetchSessions(
   query = "",
   model = "",
   archived = false,
+  site = "",
 ): Promise<SessionSummary[]> {
   const base = await apiBase();
   const params = new URLSearchParams();
   if (query) params.set("q", query);
   if (model) params.set("model", model);
   if (archived) params.set("archived", "true");
+  if (site) params.set("site", site);
   const r = await fetch(base + "/admin/sessions?" + params, { headers: headers(key) });
   const data = await asJson(r);
   return data.sessions as SessionSummary[];

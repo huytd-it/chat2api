@@ -15,11 +15,28 @@ from chat2api.automation.runtime import TurnExecutionError, execute_turn
 def test_builtin_identities_preserve_public_models():
     registry = builtin_registry()
     assert {s.id for s in registry.all()} == {
-        "qwen", "chatgpt", "deepseek", "gemini", "grok", "kimi", "dola", "tencent", "zai"}
+        "qwen", "chatgpt", "deepseek", "gemini", "grok", "kimi", "dola", "tencent", "zai", "minimax"}
     assert registry.get("qwen").public_model_ids == (
         "qwen-web/qwen3.7-plus", "qwen-web/qwen3.8-max", "qwen-web/image", "qwen-web/qwen-web")
     assert registry.get("gemini").public_model_ids == ("gemini-web/gemini-web",)
     assert registry.for_slug("chat-z-ai").id == "zai"
+
+
+def test_minimax_is_registered_without_invented_capabilities_or_models():
+    registry = builtin_registry()
+    site = registry.get("minimax")
+    assert registry.for_url("https://agent.minimax.io/") is site
+    assert registry.for_slug("minimax-agent") is site
+    assert site.public_model_ids == ()
+    assert site.operations == frozenset()
+    assert registry.for_url("https://api.minimax.io/") is None
+    assert registry.for_url("https://agent.minimax.io.evil.test/") is None
+    assert registry.for_url("https://user@agent.minimax.io/") is None
+
+
+def test_unprobed_manifest_cannot_advertise_an_executable_operation():
+    with pytest.raises(ValueError, match="distinct model IDs"):
+        replace(builtin_registry().get("minimax"), operations=frozenset({Operation.CHAT}))
 
 
 @pytest.mark.parametrize("url", [

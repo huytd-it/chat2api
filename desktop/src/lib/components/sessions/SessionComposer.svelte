@@ -50,6 +50,9 @@
     onHeadedChange,
     onRemoveTarget,
     onOpenProject,
+    workspaceMode = false,
+    modelOptions,
+    projectAvailable = true,
   }: {
     prompt: string;
     extraPrompts: string[];
@@ -80,6 +83,9 @@
     onHeadedChange: () => void;
     onRemoveTarget: (accountId: number) => void;
     onOpenProject: () => void;
+    workspaceMode?: boolean;
+    modelOptions?: import("../../api").ModelInfo[];
+    projectAvailable?: boolean;
   } = $props();
 
   let promptEl = $state<HTMLTextAreaElement | null>(null);
@@ -242,7 +248,7 @@
     placeholder={selected.length
       ? `Prompt 1 — chạy trên ${selected.length} target đã chọn…`
       : $selectedModel
-        ? "Phát tín hiệu tới model…"
+        ? "Nhập yêu cầu mới…"
         : "Chưa có model khả dụng"}
     rows={1}
     bind:value={prompt}
@@ -287,7 +293,7 @@
       >
         {selected.length} target · {profileCount} profile · {domainCount} domain
       </Button>
-    {:else}
+    {:else if !workspaceMode}
       <Select.Root type="single" bind:value={$selectedModel}>
         <Select.Trigger class="w-full max-w-56 font-data text-xs" aria-label="Model">
           <span class="flex min-w-0 items-center gap-1.5">
@@ -296,7 +302,7 @@
           </span>
         </Select.Trigger>
         <Select.Content>
-          {#each $models as model (model.id)}
+          {#each modelOptions ?? $models as model (model.id)}
             <Select.Item value={model.id} label={model.id}>
               <span class="flex items-center gap-2">
                 <ProviderIcon model={model.id} />
@@ -332,7 +338,7 @@
         </Select.Content>
       </Select.Root>
 
-      <Button
+      {#if projectAvailable}<Button
         size="sm"
         variant={projectLabel ? "secondary" : "outline"}
         class="max-w-52 text-[11px]"
@@ -343,7 +349,7 @@
       >
         <FolderSimple />
         <span class="truncate">{projectLabel || "Project"}</span>
-      </Button>
+      </Button>{/if}
 
       {#if thinkingAvailable}
         <Select.Root

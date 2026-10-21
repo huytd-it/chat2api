@@ -325,13 +325,25 @@ def _write_artifacts(conn: sqlite3.Connection, message_id: int, content: str, no
         )
 
 
-def list_sessions(q: str = "", model: str = "", archived: bool = False, limit: int = 100) -> list[dict]:
+def list_sessions(q: str = "", model: str = "", archived: bool = False, limit: int = 100,
+                  *, recipe_slugs: tuple[str, ...] | None = None) -> list[dict]:
     db = store.default()
     if db is None:
         return []
     limit = min(max(int(limit), 1), 200)
     params: list = [int(archived)]
     where = ["s.archived = ?"]
+    if recipe_slugs is not None:
+        if not recipe_slugs:
+            return []
+        # Scope before LIMIT, so another site's recent traffic cannot push
+        # this site's history out of the workspace. Public IDs survive recipe
+        # deletion; partition by the exact slug, never a LIKE wildcard prefix.
+        marks = ",".join("?" for _ in recipe_slugs)
+        where.append(f"(s.recipe_slug IN ({marks}) OR "
+                     f"substr(s.model_public_id,1,instr(s.model_public_id,'/')-1) IN ({marks}))")
+        params.extend(recipe_slugs)
+        params.extend(recipe_slugs)
     if model:
         where.append("s.model_public_id = ?")
         params.append(model)

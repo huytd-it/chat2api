@@ -9,8 +9,9 @@ from .dola import MANIFEST as DOLA
 from .gemini import MANIFEST as GEMINI
 from .grok import MANIFEST as GROK
 from .kimi import MANIFEST as KIMI
+from .minimax import MANIFEST as MINIMAX
 from .qwen import MANIFEST as QWEN
 from .tencent import MANIFEST as TENCENT
 from .zai import MANIFEST as ZAI
 
-MANIFESTS = (QWEN, CHATGPT, DEEPSEEK, GEMINI, GROK, KIMI, DOLA, TENCENT, ZAI)
+MANIFESTS = (QWEN, CHATGPT, DEEPSEEK, GEMINI, GROK, KIMI, DOLA, TENCENT, ZAI, MINIMAX)

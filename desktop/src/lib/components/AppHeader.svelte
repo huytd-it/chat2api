@@ -4,9 +4,12 @@
   import { Separator } from "$lib/components/ui/separator/index.js";
   import ServerStatus from "./ServerStatus.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
+  import { websites } from "$lib/websites";
 
   const titles: Record<string, string> = {
-    "/": "Overview",
+    "/": "Websites",
+    "/overview": "Hệ thống",
+    "/websites": "Workspace",
     "/sessions": "Sessions",
     "/recipes": "Recipes",
     "/providers": "Providers",
@@ -18,6 +21,10 @@
 
   const title = $derived.by(() => {
     const path = page.url.pathname.replace(/\/+$/, "") || "/";
+    if (path.startsWith("/websites/")) {
+      const site = $websites.find((item) => item.id === page.params.site);
+      return site ? `Websites / ${site.title}` : "Workspace";
+    }
     if (titles[path]) return titles[path];
     const section = Object.keys(titles).find((key) => key !== "/" && path.startsWith(key));
     return section ? titles[section] : "chat2api";
