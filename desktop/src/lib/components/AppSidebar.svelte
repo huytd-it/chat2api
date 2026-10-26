@@ -18,7 +18,7 @@
     { href: "/profiles", label: "Profiles & account", icon: StackIcon },
     { href: "/api-providers", label: "API providers", icon: BrowserIcon },
     { href: "/combos", label: "Combos", icon: ShuffleIcon },
-    { href: "/sessions", label: "Lịch sử & API", icon: ChatCircleTextIcon },
+    { href: "/sessions", label: "Lịch sử & session", icon: ChatCircleTextIcon },
     { href: "/overview", label: "Hệ thống", icon: GaugeIcon },
     { href: "/logs", label: "Nhật ký", icon: ScrollIcon },
   ];

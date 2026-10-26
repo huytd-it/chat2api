@@ -1,5 +1,10 @@
 # Chuyển giao UI và API quản trị sang workspace
 
+> Cập nhật 2026-10-22: website chỉ có trang cấu hình tại `/websites/<id>`;
+> `/settings` cũ redirect về đây. Mọi hội thoại/tác vụ/lịch sử dùng chung tại
+> `/sessions`. Các mô tả workspace → Cấu hình dưới đây là vị trí trước điều chỉnh
+> này; công cụ và API giữ nguyên. Xem `DESIGN.md` ở root cho UI hiện hành.
+
 ## Phạm vi đã chuyển
 
 Không còn các trang `/recipes`, `/integrations`, `/providers` và các component

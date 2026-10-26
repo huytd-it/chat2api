@@ -60,13 +60,13 @@
   // direction contract is injected via {@html} to survive as a real DOM
   // comment node the production build can be grepped for.
   const directionContract = `<!--
-THESIS: website-first automation workspaces replace the generic playground.
+THESIS: website configuration is separate; one shared session surface runs all chat tasks.
 OWN-WORLD: cool slate surfaces, cobalt actions, precise sans typography;
 semantic status colors never claim unverified account readiness.
-STORY: choose a website, select account/model, work in its own history and
-inspect the real context. Global administration is secondary.
-FIRST VIEWPORT: website rail, module header and target strip, conversation
-and composer, with context inspector at wide widths and drawers below.
+STORY: choose a website icon to configure its automation, then use shared history
+and sessions for conversations, images, account/model controls and real context.
+FIRST VIEWPORT: a compact global sidebar, website icon launcher or configuration
+page; shared sessions have history, composer and a responsive context inspector.
 FORM: operator desk, grounded direction 3, seed 210f6e51; user-approved.
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
 -->`;

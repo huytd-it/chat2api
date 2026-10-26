@@ -1,5 +1,11 @@
 # Workspace automation website — bố cục đã duyệt
 
+> **Điều chỉnh mới nhất (2026-10-22):** Không còn workspace chat theo website.
+> Icon website mở page cấu hình riêng của automation hiện tại. Hội thoại, lịch
+> sử và session dùng chung tại `/sessions`; tạo ảnh/project/Thinking cũng ở màn
+> này. Các mô tả workspace riêng bên dưới được giữ làm lịch sử, không còn là
+> yêu cầu UI hiện hành. Ràng buộc về account/capability, dữ liệu và runtime giữ nguyên.
+
 > Điều chỉnh theo yêu cầu mới: sidebar chỉ còn **Web chats**; danh sách website
 > là một trang lưới icon. Thêm domain độc lập rồi giao automation cho agent CLI.
 > Phần workspace account/model/hội thoại và quản trị vẫn giữ. Xem

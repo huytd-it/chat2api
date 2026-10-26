@@ -9,8 +9,11 @@ prompt:
 response:
   last_message_selector: div[data-turn-key] [data-markdown-text-style="assistant-message"]
   done_signal:
-    type: selector_disappear
-    selector: button[aria-label="Stop"]
+    # Chỉ sao chép khi nút Copy của reply cuối đã hiện, không đoán theo Stop.
+    type: copy_button
+    scope: after
+    use_copy_result: true
+    fallback_quiet_ms: 0
     quiet_ms: 1000
     timeout_ms: 120000
 flows:

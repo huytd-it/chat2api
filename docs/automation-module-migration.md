@@ -2,6 +2,47 @@
 
 ## Trạng thái
 
+### Thống nhất lịch sử/session, website chỉ cấu hình — 2026-10-22
+
+Theo yêu cầu mới, không còn mount SessionWorkspace ở route website. Icon mở
+`/websites/<id>` để chỉnh cấu hình automation hiện tại; đường `/settings` cũ
+chuyển về đây. Hội thoại, model/account, Thinking/project, tác vụ ảnh và lịch sử
+tập trung ở `/sessions`. Bỏ scope website ngầm khỏi request lịch sử và account
+của UI; API filter tường minh cho client ngoài vẫn giữ. Liên kết “Chat với...”
+chỉ chọn sẵn model, không lọc lịch sử hay trộn context của các session khác nhau.
+Các component toolbar/context/image đã chuyển vào nhóm sessions, không giữ
+bản workspace riêng chỉ để ẩn nó.
+
+Svelte check 0 lỗi/0 warning; release build đạt và sidecar mới health OK.
+Smoke UI read-only + behavioral fixture đã kiểm tra lịch sử chung, cấu hình
+không có composer, tạo ảnh dùng chung và đổi provider không mang history cũ.
+Chi tiết, giới hạn QA và lệnh kiểm tra ở `shared-sessions-ui.md`.
+
+### Tách broker và cổng journal trước khi xóa engine — 2026-10-21
+
+Người dùng xác nhận **chuyển hết rồi mới xóa**, giữ chức năng và dữ liệu. Đã
+chuyển implementation chọn account/slot, reservation/release, khóa tab, mở profile,
+storage-state rotation và các lỗi quota sang `automation/account_broker.py`,
+`account_source.py`, `account_errors.py`; các bản triển khai trùng trong
+BrowserRecipe đã xóa. Provider cũ đang gọi primitive chung, không có module mới
+nào bọc BrowserRecipe. Persistence lượt ẩn danh được đưa qua callback ở biên cũ.
+
+API project/catalog dùng page lease chung. Runtime có `execute_assigned_turn`
+và `execute_journaled_turn`, giữ đúng account đã chọn, giới hạn cả thời gian chờ
+tab, lưu metadata theo request và dùng journal hiện có (không tạo journal thứ hai).
+Cổng submit journal nay kiểm tra operation prepared/busy marker; cổng mới bind
+account + đánh dấu submitted trong một transaction, không cho request thua race
+ghi đè account của request đã submit. Lỗi sau boundary vẫn uncertain, không resend.
+
+**Chưa cutover hoặc xóa BrowserRecipe/FlowRunner.** Driver/module thực thi chat,
+upload/media/discovery, dữ liệu custom và routing chưa chuyển đủ. Preflight mới
+vẫn báo 3 nguồn SQLite-only `chat`, `gemini-2`, `grok` cần mapping riêng và
+`safe_to_remove_legacy=false`. Không xóa nguồn YAML/SQLite/profile/history ở đợt này.
+
+Kiểm chứng: **555 passed** (unit + nhóm HTTP durable/session/chat/account/target/
+workspace/flow-contract và persisted-state). Test broker/runtime dùng DB thật
+trong thư mục tạm và fake browser/driver, không phải xác minh website live.
+
 ### Icon launcher + domain-first/agent CLI — 2026-10-21
 
 Theo điều chỉnh mới, sidebar không bung từng domain; `/` là trang icon Web chats.

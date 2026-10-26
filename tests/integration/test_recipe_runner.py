@@ -142,6 +142,72 @@ async def test_copy_button_falls_back_to_stable_text_when_selector_never_matches
         await pool.aclose()
 
 
+async def test_strict_copy_waits_until_timeout_without_button(fixture_recipe, tmp_path):
+    recipe = _copy_button_recipe(
+        fixture_recipe, selector="button.never-present", fallback_quiet_ms=0,
+        use_copy_result=True, timeout_ms=3500)
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(recipe, tmp_path, pool)
+        out = []
+        with pytest.raises(TimeoutError):
+            async for delta in provider.stream(
+                    [{"role": "user", "content": "hi"}], "fixture-web"):
+                out.append(delta)
+        assert out == []
+    finally:
+        await pool.aclose()
+
+
+async def test_strict_copy_never_returns_dom_when_clipboard_empty(
+        fixture_recipe, tmp_path, monkeypatch):
+    recipe = _copy_button_recipe(
+        fixture_recipe, fallback_quiet_ms=0, use_copy_result=True, timeout_ms=3500)
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(recipe, tmp_path, pool)
+        from unittest.mock import AsyncMock
+        copy = AsyncMock(return_value="")
+        monkeypatch.setattr(provider, "_copy_button_result", copy)
+        out = []
+        with pytest.raises(TimeoutError):
+            async for delta in provider.stream(
+                    [{"role": "user", "content": "hi"}], "fixture-web"):
+                out.append(delta)
+        assert copy.await_count > 0
+        assert out == []
+    finally:
+        await pool.aclose()
+
+
+async def test_copy_button_requires_visibility_and_reveals_hover_toolbar(
+        fixture_recipe, tmp_path):
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(fixture_recipe, tmp_path, pool)
+        context = await pool.context_for("copy-hover")
+        page = await context.new_page()
+        await page.set_content('''
+          <style>
+            .toolbar { opacity: 0; }
+            .reply:hover .toolbar { opacity: 1; }
+          </style>
+          <div class="reply">
+            <div class="msg">Full reply.</div>
+            <div class="toolbar"><button aria-label="Copy">Copy</button></div>
+          </div>
+        ''')
+        sel = DEFAULT_COPY_BUTTON_SELECTOR
+        assert await provider._copy_button_ready(page, sel, "after", "") is True
+        await page.locator(".reply").evaluate("el => el.style.opacity = '0'")
+        assert await provider._copy_button_ready(page, sel, "after", "") is False
+    finally:
+        await pool.aclose()
+
+
 async def test_use_copy_result_warns_when_clipboard_comes_back_empty(
         fixture_recipe, tmp_path):
     """Rơi về text DOM phải KÊU, không được im.

@@ -82,7 +82,7 @@ async def test_website_catalog_exposes_unconfigured_minimax_without_fake_model(s
     minimax = next(site for site in sites if site["id"] == "minimax")
     assert minimax["runtime"] == "not_configured"
     assert minimax["models"] == []
-    assert minimax["operations"] == []
+    assert minimax["operations"] == ["chat"]
 
 
 async def test_non_stream_creates_session_messages_and_request_log(session_client):

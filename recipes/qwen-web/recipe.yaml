@@ -17,12 +17,13 @@ response:
     - "reached today's.+limit"
     - "Upgrade your membership or switch to another model"
   limit_cooldown_hours: 24
-  # Nút Stop chỉ tồn tại khi site đang trả lời (kể cả lúc model "thinking"),
-  # biến mất đúng lúc xong. Nút Copy của Qwen chỉ render khi hover nên không
-  # dùng làm mốc "xong" được.
+  # Bắt buộc nút Copy của reply cuối hiện ra; không chốt khi Stop biến mất
+  # hoặc text tạm đứng yên trong lúc stream. Runner hover reply để lộ nút.
   done_signal:
-    type: selector_disappear
-    selector: 'button[aria-label="Stop"]'
+    type: copy_button
+    scope: after
+    use_copy_result: true
+    fallback_quiet_ms: 0
     quiet_ms: 1000
     timeout_ms: 300000
 flows:

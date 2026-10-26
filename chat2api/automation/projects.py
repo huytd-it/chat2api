@@ -71,11 +71,7 @@ def public(row):
 async def account_page(provider, account_id, headed=None):
     assignment = await provider.assign(account_id)
     try:
-        if assignment.profile is None:
-            raise OpenAIError(422, "profile_required", "Project cần profile đã lưu")
-        async with provider._lock_for(assignment.ctx_key), provider.pool.hold(assignment.profile.name, assignment.ctx_key):
-            page = await provider.open_profile_page(assignment.profile, assignment.ctx_key,
-                                                    provider.resolve_headed(headed, assignment.profile))
+        async with provider.page_lease(assignment, headed) as page:
             yield page
     finally:
         assignment.release()

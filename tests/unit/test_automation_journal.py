@@ -44,6 +44,48 @@ def test_conflict_and_unknown_outcome_block_resubmit(db):
     assert journal.get_session("book")["successes"] == 0
 
 
+def test_submit_gate_requires_prepared_operation_and_its_session_reservation(db):
+    with pytest.raises(OpenAIError) as missing:
+        journal.submitted("missing")
+    assert missing.value.code == "operation_not_prepared"
+    journal.claim("book", "chunk1", "qwen/model", "digest")
+    journal.submitted("chunk1")
+    with pytest.raises(OpenAIError):
+        journal.submitted("chunk1")
+    journal.complete("book", "chunk1", {"ok": True})
+    with pytest.raises(OpenAIError):
+        journal.submitted("chunk1")
+    journal.claim("book", "chunk2", "qwen/model", "digest2")
+    with db.connection() as conn:
+        conn.execute("UPDATE automation_session SET busy_operation=NULL WHERE id='book'")
+    with pytest.raises(OpenAIError):
+        journal.submitted("chunk2")
+
+
+def test_atomic_submit_gate_cannot_rebind_a_losing_account(db):
+    journal.claim("book", "chunk", "qwen/model", "digest")
+    def submit(account_id):
+        try:
+            journal.submit_bound("book", "chunk", "qwen/model", account_id, None)
+            return account_id
+        except OpenAIError:
+            return None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        winners = [value for value in pool.map(submit, range(1, 5)) if value is not None]
+    assert len(winners) == 1
+    assert journal.get_session("book")["account_id"] == winners[0]
+
+
+def test_submit_gate_rejects_changed_context_without_writing(db):
+    journal.claim("book", "chunk", "qwen/model", "digest")
+    journal.bind("book", 7, "https://chat.qwen.ai/c/original")
+    with pytest.raises(OpenAIError) as conflict:
+        journal.submit_bound("book", "chunk", "qwen/model", 7, "https://chat.qwen.ai/c/other")
+    assert conflict.value.code == "session_context_conflict"
+    assert journal.get_session("book")["conversation_url"] == "https://chat.qwen.ai/c/original"
+    assert db.query("SELECT state FROM automation_operation WHERE id='chunk'")[0]["state"] == "prepared"
+
+
 def test_failure_before_submit_can_retry(db):
     journal.claim("book", "chunk1", "qwen/model", "digest")
     journal.fail("book", "chunk1", "model unavailable")

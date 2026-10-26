@@ -7,11 +7,15 @@ const context = await browser.newContext({ viewport: { width: 1440, height: 1000
 const origin = "http://workspace-test.invalid";
 const models = ["qwen-web/qwen3.7-plus", "qwen-web/qwen3.8-max"];
 const modelData = models.map((id) => ({ id, capability: "chat", ready: true }));
+const allModels = [...modelData, {id:"chatgpt-web/default",capability:"chat",ready:true}, {id:"qwen-web/image",capability:"image",ready:true}, {id:"api-provider/m1",capability:"chat",ready:true}];
 const now = Date.now();
 const message = (role, content, id) => ({ id, seq: id, role, content, content_markdown: null, content_html: null, reasoning: null, error: null, artifacts: [], attachments: [], request: null, created_at: now, char_count: content.length });
-const row = (id, title, model, automation = null) => ({ id, title, model_public_id: model, recipe_slug: "qwen-web", kind: "chat", account_id: null, account_label: null, account_host: null, profile_name: null, profile_id: null, site_conversation_url: null, pinned: 0, archived: 0, message_count: 1, error_count: 0, total_chars: 1, first_prompt: title, created_at: now, updated_at: now, tags: [], messages: [message("user", title, 0)], automation });
+const row = (id, title, model, automation = null) => ({ id, title, model_public_id: model, recipe_slug: model.split("/")[0], kind: "chat", account_id: null, account_label: null, account_host: null, profile_name: null, profile_id: null, site_conversation_url: null, pinned: 0, archived: 0, message_count: 1, error_count: 0, total_chars: 1, first_prompt: title, created_at: now, updated_at: now, tags: [], messages: [message("user", title, 0)], automation });
 const sessions = new Map([["legacy-fixture", row("legacy-fixture", "Legacy fixture", models[0])]]);
+sessions.set("chatgpt-fixture", {...row("chatgpt-fixture","ChatGPT fixture","chatgpt-web/default"),recipe_slug:"chatgpt-web"});
 const calls = [];
+const imageCalls = [];
+const historyScopes = [];
 let rejectNext = false;
 let healthSeen = false;
 let targetBeforeHealth = false;
@@ -21,11 +25,11 @@ await context.route(origin + "/**", async (route) => {
   const request = route.request();
   const url = new URL(request.url());
   const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*", "Access-Control-Allow-Methods": "*", "Access-Control-Expose-Headers": "X-Chat2api-Session-Id" };
-  const json = (body, status = 200) => route.fulfill({ status, headers: { ...cors, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const json = (body, status = 200, extraHeaders = {}) => route.fulfill({ status, headers: { ...cors, "Content-Type": "application/json", ...extraHeaders }, body: JSON.stringify(body) });
   if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors });
   if (url.pathname === "/health") { healthSeen = true; return json({ contexts: 0, engine: "fixture", models: 2 }); }
   if (url.pathname === "/admin/websites") return json({ websites: [{ id: "qwen", slug: "qwen-web", title: "Qwen", url: "https://chat.qwen.ai/", hosts: ["chat.qwen.ai"], operations: ["chat", "projects", "thinking"], history_slugs: ["qwen-web"], models: modelData, runtime: "legacy", unhealthy: false }] });
-  if (url.pathname === "/v1/models") return json({ data: modelData });
+  if (url.pathname === "/v1/models") return json({ data: allModels });
   if (url.pathname === "/admin/automations") return json([
     {slug:"qwen-web",type:"BrowserRecipe",url:"https://chat.qwen.ai",domain:"chat.qwen.ai",models:["qwen3.7-plus"],unhealthy:false,loaded:true},
     {slug:"chatgpt-web",type:"BrowserRecipe",url:"https://chatgpt.com",domain:"chatgpt.com",models:["default"],unhealthy:false,loaded:true},
@@ -37,7 +41,14 @@ await context.route(origin + "/**", async (route) => {
   if (url.pathname === "/admin/accounts") return json({ domains: [] });
   if (url.pathname === "/admin/overview") return json({ request_routes: [], session_distribution: [], models: 2 });
   if (url.pathname === "/admin/automation-targets") { if (!healthSeen) targetBeforeHealth = true; return json({ targets: [], profile_mode: "profile", max_profiles: 6, max_tabs: 8, open_profiles: [], persisted: true }); }
-  if (url.pathname === "/admin/sessions") return json({ sessions: [...sessions.values()], persisted: true });
+  if (url.pathname === "/admin/sessions") { historyScopes.push(url.searchParams.get("site")); return json({ sessions: [...sessions.values()], persisted: true }); }
+  if (url.pathname === "/v1/images/generations") {
+    imageCalls.push(request.postDataJSON());
+    const imageSession = row("image-fixture","Image fixture","qwen-web/image");
+    imageSession.messages.push(message("assistant","MOCK IMAGE RESULT",1));
+    sessions.set(imageSession.id,imageSession);
+    return json({data:[]},200,{"X-Chat2api-Session-Id":imageSession.id});
+  }
   if (url.pathname.startsWith("/admin/sessions/")) {
     const detail = sessions.get(url.pathname.split("/").at(-1));
     return detail ? json(detail) : json({ error: { message: "No fixture" } }, 404);
@@ -46,12 +57,13 @@ await context.route(origin + "/**", async (route) => {
     const payload = request.postDataJSON();
     calls.push(payload);
     if (rejectNext) { rejectNext = false; return json({ error: { code: "operation_unresolved", message: "FIXTURE_UNRESOLVED" } }, 409); }
-    const prior = sessions.get(payload.session_id);
+    const sessionId = payload.session_id || request.headers()["x-chat2api-session-id"];
+    const prior = sessions.get(sessionId);
     const successes = (prior?.automation?.successes || 0) + 1;
-    const detail = row(payload.session_id, payload.messages[0].content, payload.model, { account_id: null, project_id: null, generation: 0, successes, busy_operation: null });
+    const detail = row(sessionId, payload.messages.at(-1).content, payload.model, payload.session_id ? { account_id: null, project_id: null, generation: 0, successes, busy_operation: null } : null);
     detail.messages.push(message("assistant", `MOCK RESULT ${calls.length}`, 1));
-    sessions.set(payload.session_id, detail);
-    return route.fulfill({ status: 200, headers: { ...cors, "Content-Type": "text/event-stream", "X-Chat2api-Session-Id": payload.session_id }, body: `data: ${JSON.stringify({ choices: [{ delta: { content: `MOCK RESULT ${calls.length}` } }] })}\n\ndata: [DONE]\n\n` });
+    sessions.set(sessionId, detail);
+    return route.fulfill({ status: 200, headers: { ...cors, "Content-Type": "text/event-stream", "X-Chat2api-Session-Id": sessionId }, body: `data: ${JSON.stringify({ choices: [{ delta: { content: `MOCK RESULT ${calls.length}` } }] })}\n\ndata: [DONE]\n\n` });
   }
   return json({ error: { message: `Unimplemented fixture: ${url.pathname}` } }, 404);
 });
@@ -71,6 +83,7 @@ try {
   assert.equal(targetBeforeHealth, false, "Directory must wait for sidecar health before loading accounts");
   await page.goto((process.env.UI_BASE_URL || "http://127.0.0.1:5199") + "/websites/qwen/settings");
   await page.getByRole("heading", {name:"Cấu hình Qwen",exact:true}).waitFor();
+  assert.equal(await page.getByRole("textbox", {name:"Tin nhắn mới"}).count(),0,"Website pages are configuration only, not separate chats");
   await page.locator("#recipe-row-qwen-web > button").click();
   assert.equal(await page.locator("#recipe-row-chatgpt-web").count(),0,"Another website's automation must not appear in settings");
   for (const name of ["Phân tích lại","Ghi thao tác","Chỉnh sửa","Đổi tên","Đóng browser","Xóa"]) {
@@ -82,7 +95,10 @@ try {
   await page.goto((process.env.UI_BASE_URL || "http://127.0.0.1:5199") + "/api-providers");
   await page.getByRole("button",{name:"Thêm provider đầu tiên",exact:true}).waitFor();
   assert.equal(await page.locator("#recipe-row-qwen-web").count(),0,"Direct API page must not duplicate website management");
-  await page.goto((process.env.UI_BASE_URL || "http://127.0.0.1:5199") + "/websites/qwen");
+  assert.equal(historyScopes.length,0,"Website configuration and direct API pages must not fetch chat history");
+  await page.goto((process.env.UI_BASE_URL || "http://127.0.0.1:5199") + "/sessions?model="+encodeURIComponent(models[0]));
+  await page.getByText("ChatGPT fixture",{exact:true}).first().waitFor();
+  assert.equal(await page.locator(".workspace-heading select").nth(1).locator('option[value="chatgpt-web/default"]').count(),1,"Shared composer must offer models from other sites");
   await page.getByText("Legacy fixture", { exact: true }).first().click();
   await page.getByRole("button", { name: "Mở đúng hội thoại website" }).count();
   await send("chunk-one", "MOCK RESULT 1");
@@ -99,6 +115,20 @@ try {
   rejectNext = true;
   await send("uncertain-turn", "FIXTURE_UNRESOLVED");
   assert.equal(calls.length, 4, "Unresolved operations must not trigger automatic resend");
+  await page.getByRole("button",{name:"Tạo ảnh",exact:true}).click();
+  await page.getByRole("combobox",{name:"Model tạo ảnh",exact:true}).selectOption("qwen-web/image");
+  await page.getByRole("textbox",{name:"Mô tả ảnh",exact:true}).fill("fixture-image");
+  await page.getByRole("button",{name:"Tạo ảnh",exact:true}).last().click();
+  await page.getByText("MOCK IMAGE RESULT",{exact:true}).first().waitFor();
+  assert.equal(imageCalls.length,1);
+  assert.equal(imageCalls[0].model,"qwen-web/image");
+  await page.locator(".workspace-heading select").nth(1).selectOption("api-provider/m1");
+  await send("new-api-context", "MOCK RESULT 5");
+  assert.deepEqual(calls[4].messages,[{role:"user",content:"new-api-context"}],"Changing provider must not copy another session's history");
+  await send("same-api-context", "MOCK RESULT 6");
+  assert.equal(calls[5].messages.length,3,"Same-model stateless continuation must keep its own history");
+  assert.deepEqual(calls[5].messages[0],{role:"user",content:"new-api-context"});
+  assert.ok(historyScopes.length && historyScopes.every(scope=>scope===null),"Shared history must not implicitly scope by website");
   await page.setViewportSize({ width: 390, height: 844 });
   await page.reload();
   await page.getByRole("button", { name: "Ẩn hoặc hiện ngữ cảnh" }).click();
@@ -109,5 +139,5 @@ try {
   await page.keyboard.press("Escape");
   await dialog.waitFor({ state: "hidden" });
   assert.deepEqual(pageErrors, []);
-  console.log("PASS: legacy isolation, durable continuation, one new message, stable context, model change creates session, unresolved does not auto-resend, narrow drawer focus trap and Escape. All provider responses were intercepted fixtures.");
-} finally { await browser.close(); }
+  console.log("PASS: configuration-only website pages, shared cross-site history/model selection, durable isolation/continuation, no automatic resend, shared image generation and narrow drawer keyboard behavior. All provider responses were intercepted fixtures.");
+} finally { await context.close(); await browser.close(); }

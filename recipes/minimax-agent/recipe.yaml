@@ -1,0 +1,30 @@
+slug: minimax-agent
+url: https://agent.minimax.io/
+prompt:
+  input_selector: '[data-testid="message-textarea"]'
+  input_mode: type
+  submit: click:[data-testid="send-button"]
+response:
+  last_message_selector: '[data-testid="message-item"][data-role="assistant"]'
+  format: markdown
+  capture_html: true
+  done_signal:
+    type: copy_button
+    selector: '[data-testid="message-copy-button"]'
+    quiet_ms: 600
+    fallback_quiet_ms: 15000
+    timeout_ms: 120000
+    scope: after
+    use_copy_result: false
+new_chat:
+  selector: button:has-text("New task")
+timing:
+  ready_delay_ms: 2000
+  input_delay_ms: 400
+  ready_timeout_ms: 20000
+models:
+- id: m3.1-flash
+login:
+  strategy: round_robin
+  quota: 50
+keep_context: true

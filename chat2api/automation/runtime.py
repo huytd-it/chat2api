@@ -9,6 +9,7 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from .contracts import BrowserReply, BrowserTurn, Operation, Phase, SiteDriver
+from .account_broker import AccountBroker, AccountLease
 
 log = logging.getLogger(__name__)
 
@@ -17,6 +18,63 @@ class TurnExecutionError(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+async def execute_assigned_turn(
+    driver: SiteDriver,
+    broker: AccountBroker,
+    assignment: AccountLease,
+    turn: BrowserTurn,
+    *,
+    before_submit: Callable[[], Awaitable[None]],
+    observe: Callable[[Phase], None] | None = None,
+    timeout_seconds: float = 300,
+) -> BrowserReply:
+    """Run a module on the pre-reserved account and return request-local extras.
+
+    No fallback or account retry occurs here. The caller retains responsibility
+    for releasing the assignment and for journal completion/failure. Website
+    semantics execute only through SiteDriver, not a recipe/flow interpreter.
+    """
+    if timeout_seconds <= 0:
+        raise ValueError("Turn deadline must be positive")
+    async with asyncio.timeout(timeout_seconds):
+        async with broker.page_lease(assignment) as page:
+            reply = await execute_turn(driver, page, turn, before_submit=before_submit,
+                                       observe=observe, timeout_seconds=timeout_seconds)
+            assignment.conversation_url = reply.conversation_url
+            assignment.html = reply.html
+            return reply
+
+
+async def execute_journaled_turn(driver: SiteDriver, broker: AccountBroker,
+                                assignment: AccountLease, turn: BrowserTurn, *,
+                                session_id: str, request_id: str,
+                                observe: Callable[[Phase], None] | None = None,
+                                timeout_seconds: float = 300) -> BrowserReply:
+    """Use the existing durable journal, never a second idempotency mechanism.
+
+    The orchestrator must claim before reserving an account and must complete or
+    fail afterwards. This gate only binds/submits the claimed operation. Missing,
+    completed or already-submitted operations are refused before driver.submit.
+    """
+    from . import journal
+    from ..errors import OpenAIError
+
+    if assignment.account_id is None:
+        raise OpenAIError(422, "durable_account_required", "Session bền vững cần account/profile đã lưu")
+    if broker.domain not in {host.removeprefix("www.") for host in driver.manifest.hosts}:
+        raise OpenAIError(400, "invalid_target", "Account broker không thuộc website của driver")
+
+    async def before_submit():
+        await asyncio.to_thread(journal.submit_bound, session_id, request_id,
+                                f"{broker.slug}/{turn.model_id}", assignment.account_id,
+                                turn.conversation_url)
+
+    reply = await execute_assigned_turn(driver, broker, assignment, turn, before_submit=before_submit,
+                                        observe=observe, timeout_seconds=timeout_seconds)
+    await asyncio.to_thread(journal.bind, session_id, assignment.account_id, reply.conversation_url)
+    return reply
 
 
 async def execute_turn(

@@ -1,12 +1,13 @@
-# Design system: chat2api website workspaces
+# Design system: shared sessions and website automation settings
 
 ## Product surface
 
-The production UI is now website-first. `/` is the website directory;
-`/websites/<site>` is a scoped workspace. Each workspace exposes only models,
-accounts and history belonging to that website. MiniMax Agent is listed but
-has no executable driver/model yet: its empty state explains this and does not
-offer a composer or pretend that integration is complete.
+`/` is the website icon launcher. `/websites/<site>` only manages that website's
+current automation configuration, models, browser/profile links, quota and
+authoring tools. It never mounts a chat workspace or fetches conversation history.
+All conversations and tasks use the single `/sessions` surface, with global
+history, model/account selection, projects/Thinking, images and context inspection.
+MiniMax is listed without inventing a runnable model or a separate composer.
 
 This UI change is not backend runtime cutover. The current browser providers
 still execute through the existing engine; the Context inspector says so.
@@ -43,7 +44,7 @@ Its production direction contract is emitted by `desktop/src/routes/+layout.svel
 ## Application shell
 
 The sidebar has a single **Web chats** entry, not one entry per domain. The root
-page is an icon launcher; clicking one website opens its workspace. Administration
+page is an icon launcher; clicking one website opens its configuration. Administration
 stays secondary: profiles/accounts, direct APIs, combos, global history/API,
 system overview and logs. This supersedes the earlier per-website sidebar brief
 at the user's explicit request.
@@ -52,7 +53,7 @@ Settings and actual backend status stay at the foot of the rail.
 The header provides breadcrumbs, sidebar toggle, backend connection and theme.
 The old Overview remains available at `/overview`; global session tools remain
 at `/sessions`. Duplicate `/recipes`, `/integrations` and `/providers` pages are
-removed. Website management is now `/websites/<site>/settings`, authoring lives
+removed. Website management is now `/websites/<site>` (`/settings` redirects), authoring lives
 at `/connections`, and direct API configuration at `/api-providers`. The former
 components were transferred into AutomationManager/Editor/Fields/Setup, scoped
 to their new roles. This removes duplicate UI, not the underlying recipe engine.
@@ -71,23 +72,26 @@ a brief and gives it to their coding agent CLI in this repo. The app does not
 silently run an LLM or self-publish generated code. CLI `website add/list/brief`
 uses the same registration/brief service; see `docs/website-agent-cli.md`.
 
-## Workspace
+## Shared history and sessions
 
-`SessionWorkspace.svelte` reuses the established history/message tools but is
-now parameterized by a server-supplied `WebsiteInfo` and given a new layout:
+`SessionWorkspace.svelte` is mounted only at `/sessions`, not parameterized by
+a website. Its history requests have no implicit `site` scope. A link from website
+settings can preselect a model without filtering the history or reusing another
+model's durable context.
 
-1. `WebsiteToolbar`: website identity, open exact selected profile, account,
+1. `SessionToolbar`: shared session identity, open exact selected profile, account,
    model, model refresh, optional Thinking and project controls.
 2. Task navigation: conversation, image generation only when a loaded model
    actually advertises image capability, diagnostics and new session.
-3. History rail: server-side website filtering before LIMIT, full-text search,
+3. History rail: all websites/API providers together, full-text search,
    model/archive filters, selection and destructive confirmation.
 4. Conversation and composer: output is primary; files, context choice, headed
    browser, sample prompts and account batch workbench remain available.
-5. `WorkspaceContext`: actual account/project, persisted generation/count,
+5. `SessionContext`: actual account/project, persisted generation/count,
    session/operation identifiers, errors, website link and runtime explanation.
 
-`ImageStudio` calls the real image endpoint on explicit user action. It creates
+`SessionImageStudio` selects from all image-capable models and matching accounts,
+and calls the real image endpoint on explicit user action. It creates
 one image request; no automatic retry. Successful output is opened in its saved
 session, using the existing attachment preview/download controls.
 
@@ -112,6 +116,10 @@ Other websites retain the current API path until their runtime migration.
   horizontally. Respect reduced motion, visible focus and theme contrast.
 
 ## Verification and limitations
+
+The latest UI architecture supersedes the separate-website-workspace layout.
+API `site` filters remain optional for external clients; the shared UI does not
+add them. Website settings still scope configuration records by website.
 
 Read `docs/automation-ui-verification.md` for reproducible commands and coverage.
 Read `docs/workspace-admin-migration.md` for the subsequent UI feature transfer,

@@ -50,7 +50,7 @@
     onHeadedChange,
     onRemoveTarget,
     onOpenProject,
-    workspaceMode = false,
+    targetControlsInHeader = false,
     modelOptions,
     projectAvailable = true,
   }: {
@@ -83,7 +83,7 @@
     onHeadedChange: () => void;
     onRemoveTarget: (accountId: number) => void;
     onOpenProject: () => void;
-    workspaceMode?: boolean;
+    targetControlsInHeader?: boolean;
     modelOptions?: import("../../api").ModelInfo[];
     projectAvailable?: boolean;
   } = $props();
@@ -293,7 +293,7 @@
       >
         {selected.length} target · {profileCount} profile · {domainCount} domain
       </Button>
-    {:else if !workspaceMode}
+    {:else if !targetControlsInHeader}
       <Select.Root type="single" bind:value={$selectedModel}>
         <Select.Trigger class="w-full max-w-56 font-data text-xs" aria-label="Model">
           <span class="flex min-w-0 items-center gap-1.5">

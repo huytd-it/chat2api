@@ -232,4 +232,4 @@ async def test_an_unknown_flow_is_refused(db, tmp_path):
     job_id = await _start_recording(cfg, manager, tmp_path)
 
     with pytest.raises(jobs.InvalidJobState):
-        await jobs.set_record_segment(job_id, "audio", "start")
+        await jobs.set_record_segment(job_id, "Audio", "start")

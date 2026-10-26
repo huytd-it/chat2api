@@ -2,9 +2,9 @@
   import { onMount, tick } from "svelte";
   import { page } from "$app/state";
   import { Broadcast, List, X } from "phosphor-svelte";
-  import { apiKey, headedBrowser, showToast } from "../stores";
+  import { apiKey, headedBrowser, serverStatus, showToast } from "../stores";
   import { models, selectedModel, refreshModels } from "../sync";
-  import { belongsToWebsite, refreshWebsites } from "$lib/websites";
+  import { websites, refreshWebsites } from "$lib/websites";
   import {
     deleteSessions,
     exportSession,
@@ -27,7 +27,6 @@
     type SessionSummary,
     type TestTarget,
     type TestTargetList,
-    type WebsiteInfo,
   } from "../api";
   import MessageInspector from "./MessageInspector.svelte";
   import SessionMessageCard from "./SessionMessageCard.svelte";
@@ -41,11 +40,10 @@
   import { Input } from "$lib/components/ui/input";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import * as Sheet from "$lib/components/ui/sheet/index.js";
-  import WebsiteToolbar from "./websites/WebsiteToolbar.svelte";
-  import WorkspaceContext from "./websites/WorkspaceContext.svelte";
-  import ImageStudio from "./websites/ImageStudio.svelte";
+  import SessionToolbar from "./sessions/SessionToolbar.svelte";
+  import SessionContext from "./sessions/SessionContext.svelte";
+  import SessionImageStudio from "./sessions/SessionImageStudio.svelte";
 
-  let { site }: { site?: WebsiteInfo } = $props();
   let inspectorOpen = $state(true);
   let narrowWorkspace = $state(false);
   let workspaceTab = $state<"chat" | "image">("chat");
@@ -53,11 +51,29 @@
   let requestError = $state("");
   let listError = $state("");
   let listTicket = 0;
-  const scopedModels = $derived(site ? $models.filter((model) => site.history_slugs.includes(model.id.split("/")[0])) : $models);
-  const chatModels = $derived(scopedModels.filter((model) => model.capability !== "image" && model.capability !== "video"));
+  const chatModels = $derived($models.filter((model) => model.capability !== "image" && model.capability !== "video"));
+  const imageModels = $derived($models.filter((model) => model.capability === "image" || model.capability === "both"));
+  const selectedSite = $derived($websites.find(site => site.history_slugs.includes($selectedModel.split("/")[0])));
+  let requestedModelApplied = $state(false);
+  let initialized = $state(false);
+  $effect(() => {
+    if ($serverStatus.state === "ok" && !initialized) {
+      initialized = true;
+      void loadTargets();
+      void loadList(false).then(() => {
+        const requested = page.url.searchParams.get("open");
+        if (requested) void openSession(requested);
+      });
+    }
+  });
 
   $effect(() => {
-    if (site && !sending && !chatModels.some((model) => model.id === $selectedModel)) {
+    const requested = page.url.searchParams.get("model");
+    if (!requestedModelApplied && requested && !page.url.searchParams.has("open") && chatModels.some(model => model.id === requested)) {
+      requestedModelApplied = true;
+      $selectedModel = requested;
+    }
+    if (!sending && !chatModels.some((model) => model.id === $selectedModel)) {
       $selectedModel = chatModels[0]?.id ?? "";
     }
   });
@@ -178,8 +194,9 @@
     return target ? `${target.profile_name} · ${target.host} · ${target.label}` : "";
   });
   const durableChat = $derived(!selected.length && Boolean(thinkingCapable || projectId));
-  const projectAvailable = $derived(thinkingCapable);
+  const projectAvailable = $derived(!selected.length && thinkingCapable);
   const contextAccount = $derived(targets.find((item) => item.account_id === (liveTarget?.accountId ?? chatAccountId ?? active?.account_id)));
+  const contextSite = $derived($websites.find(site => site.history_slugs.includes(active?.recipe_slug || (active?.model_public_id || $selectedModel).split("/")[0])));
 
   async function openProfile() {
     if (!chatAccountId || !$selectedModel || openingProfile) return;
@@ -196,6 +213,7 @@
   }
 
   async function imageCreated(id: string) {
+    requestError = "";
     workspaceTab = "chat";
     await openSession(id);
     await loadList();
@@ -241,7 +259,7 @@
     const ticket = ++listTicket;
     loadingList = true;
     try {
-      const list = await fetchSessions($apiKey, query.trim(), modelFilter, archived, site?.id);
+      const list = await fetchSessions($apiKey, query.trim(), modelFilter, archived);
       if (ticket !== listTicket) return;
       sessions = list;
       listError = "";
@@ -271,10 +289,6 @@
     bankOpen = false;
     try {
       const detail = await fetchSession($apiKey, id);
-      if (site && !site.history_slugs.includes(detail.model_public_id.split("/")[0]) &&
-          !site.history_slugs.includes(detail.recipe_slug ?? "")) {
-        throw new Error("Phiên này thuộc website khác. Mở từ workspace tương ứng.");
-      }
       if (active?.id !== id && liveTarget?.sessionId !== id) liveTarget = null;
       active = detail;
       // Chỉ theo model của session khi model đó còn dùng được. Model cũ có thể
@@ -377,8 +391,8 @@
   async function loadTargets() {
     targetsLoading = true;
     try {
-      const { targets: list, ...meta } = await fetchTestTargets($apiKey, site?.id);
-      targets = site ? list.filter((target) => belongsToWebsite(target, site)) : list;
+      const { targets: list, ...meta } = await fetchTestTargets($apiKey);
+      targets = list;
       targetMeta = meta;
       // Account bị xoá/tắt giữa chừng phải rơi khỏi lựa chọn, nếu không batch
       // sẽ bắn vào một id không còn tồn tại và chỉ báo lỗi lúc gửi.
@@ -580,7 +594,7 @@
     const text = prompt.trim();
     const files = attachments;
     if ((!text && !files.length) || !$selectedModel || sending) return;
-    if (site && !chatModels.some((model) => model.id === $selectedModel)) return;
+    if (!chatModels.some((model) => model.id === $selectedModel)) return;
     requestError = "";
     prompt = "";
     attachments = [];
@@ -596,7 +610,7 @@
     const turn: ChatMessage = { role: "user", content: chatContent(text, files) };
     // Phiên website bền nhận đúng MỘT tin user mới; history nằm ở hội thoại
     // website. Provider khác vẫn đi đường cũ (history đầy đủ như trước).
-    const outgoing = durableChat ? [turn] : keepContext ? [...history(), turn] : [turn];
+    const outgoing = !durableChat && canContinue ? [...history(), turn] : [turn];
     // Chỉ ghim khi người dùng chọn tay. State của session đã tự giữ account;
     // gửi header account của session sẽ chặn failover khi hết quota.
     const requestedAccount = chatAccountId;
@@ -825,11 +839,7 @@
     const resize = () => { narrowWorkspace = narrow.matches; if (narrow.matches) inspectorOpen = false; };
     resize();
     narrow.addEventListener("change", resize);
-    loadTargets();
-    loadList(false).then(() => {
-      const requested = page.url.searchParams.get("open");
-      if (requested) openSession(requested);
-    });
+    if (page.url.searchParams.get("mode") === "image") workspaceTab = "image";
     return () => {
       narrow.removeEventListener("change", resize);
       if (listTimer) clearTimeout(listTimer);
@@ -840,14 +850,12 @@
 </script>
 
 <div class="flex h-full min-h-0 w-full flex-col overflow-hidden">
-{#if site}
-  <WebsiteToolbar {site} modelOptions={chatModels} accounts={chatAccountOptions}
+  <SessionToolbar site={selectedSite} modelOptions={chatModels} hasImages={imageModels.length > 0} accounts={chatAccountOptions}
     bind:accountId={chatAccountId} bind:thinkingMode {thinkingAvailable} {projectAvailable}
     projectLabel={projectTitle || projectId} {sending} opening={openingProfile}
     refreshing={refreshingModels.includes(chatAccountId ?? -1)} {inspectorOpen} bind:tab={workspaceTab}
     onOpenProfile={openProfile} onRefreshModels={() => chatAccountId && refreshModel(chatAccountId)}
     onProject={() => projectDialogOpen = true} onToggleInspector={() => inspectorOpen = !inspectorOpen} onNew={newSession} />
-{/if}
 <div class="relative flex min-h-0 w-full flex-1 overflow-hidden bg-background">
   {#if bankOpen}
     <!-- Nền mờ chỉ tồn tại ở bề ngang hẹp, nơi rail trái đang là drawer. -->
@@ -876,7 +884,7 @@
       onFilterChange={() => loadList(false)}
       onNew={newSession}
       onOpen={(id) => { if (!sending) { requestError = ""; void openSession(id); } }}
-      modelOptions={site ? scopedModels : undefined}
+      modelOptions={$models}
       error={listError}
       onRetry={() => loadList()}
       busy={sending}
@@ -891,8 +899,8 @@
   <!-- section chứ không main: layout shell đã có một <main>, và quy tắc CSS
        toàn cục cho `main` từng rơi vào đây làm console bị căn giữa. -->
   <section class="flex min-w-0 flex-1 flex-col bg-card" aria-label="Bản ghi phiên">
-    {#if site && workspaceTab === "image"}
-      <ImageStudio {site} accountId={chatAccountId} onCreated={imageCreated} onBusy={setImageBusy} />
+    {#if workspaceTab === "image"}
+      <SessionImageStudio models={imageModels} {targets} initialModel={page.url.searchParams.get("image_model") ?? ""} onCreated={imageCreated} onBusy={setImageBusy} />
     {:else}
     {#if active && !loadingDetail}
       <SessionConsoleHeader
@@ -925,18 +933,11 @@
         <div class="mb-3 grid size-12 place-items-center rounded-xl bg-primary/10 text-primary">
           <Broadcast size={24} aria-hidden="true" />
         </div>
-        <h2 class="display-face text-lg font-semibold tracking-[-0.02em]">{site ? (chatModels.length ? `Bắt đầu với ${site.title}` : `${site.title} chưa kết nối automation`) : "Bắt đầu hội thoại"}</h2>
+        <h2 class="display-face text-lg font-semibold tracking-[-0.02em]">Bắt đầu hội thoại</h2>
         <p class="mt-1.5 max-w-[48ch] text-[13px] leading-relaxed text-muted-foreground">
-          {#if site && !chatModels.length}
-            Website đã có trong danh sách module nhưng chưa có driver/model đang chạy.
-            Không có request nào được gửi cho đến khi tích hợp được kiểm chứng.
-          {:else if site}
-            Chọn account và model phía trên, sau đó gửi yêu cầu mới. Lịch sử trong workspace này chỉ thuộc {site.title}.
-          {:else}
-            Chọn một hội thoại để xem lịch sử, hoặc gửi yêu cầu mới. Bản ghi từ API cũng xuất hiện ở đây.
-          {/if}
+          Chọn một hội thoại trong lịch sử chung hoặc chọn model/account phía trên để gửi yêu cầu mới. Bản ghi từ API cũng xuất hiện ở đây.
         </p>
-        {#if site && !chatModels.length}<a href={`/websites/${site.id}/agent`} class="mt-5 text-sm font-medium text-primary hover:underline">Tạo automation bằng agent CLI</a>{/if}
+        {#if !chatModels.length}<a href="/" class="mt-5 text-sm font-medium text-primary hover:underline">Thêm hoặc cấu hình automation web</a>{/if}
       </div>
     {:else}
       <div
@@ -997,7 +998,7 @@
     {/if}
 
     {#if requestError}<div role="alert" class="mx-4 mb-3 rounded-lg bg-destructive/8 px-4 py-3 text-xs leading-relaxed text-destructive">{requestError}</div>{/if}
-    {#if !site || chatModels.length}
+    {#if chatModels.length}
     <SessionComposer
       bind:this={composer}
       bind:prompt
@@ -1027,7 +1028,7 @@
       {onHeadedChange}
       onRemoveTarget={toggleTarget}
       onOpenProject={() => (projectDialogOpen = true)}
-      workspaceMode={!!site}
+      targetControlsInHeader={true}
       modelOptions={chatModels}
       {projectAvailable}
     />
@@ -1046,13 +1047,11 @@
   />
 
   {#snippet contextPanel()}
-    {#if site}
-      <WorkspaceContext {site} session={active} target={liveTarget} account={contextAccount}
+      <SessionContext site={contextSite} session={active} target={liveTarget} account={contextAccount}
         project={projectTitle || projectId} {sending} {elapsed} error={requestError} {projectAvailable}
         onClose={() => inspectorOpen = false} onOpen={() => active && openConversation(active.id)}
         onTargets={openBench} onProject={() => projectDialogOpen = true}
         onRefresh={() => { void loadList(); void loadTargets(); }} />
-    {/if}
   {/snippet}
 
   {#if benchOpen}
@@ -1094,10 +1093,10 @@
         onopen={() => active && openConversation(active.id)}
       />
     </div>
-  {:else if site && inspectorOpen && !narrowWorkspace}
+  {:else if workspaceTab === "chat" && inspectorOpen && !narrowWorkspace}
     <div class="w-64 flex-none border-l border-border">{@render contextPanel()}</div>
   {/if}
-  {#if site && narrowWorkspace}
+  {#if workspaceTab === "chat" && narrowWorkspace}
     <Sheet.Root open={inspectorOpen && !benchOpen && !inspected} onOpenChange={(open) => inspectorOpen = open}>
       <Sheet.Content side="right" class="w-72 gap-0 p-0" showCloseButton={false}>
         <Sheet.Title class="sr-only">Ngữ cảnh & chẩn đoán</Sheet.Title>

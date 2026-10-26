@@ -18,7 +18,7 @@ from . import (account_limits, accounts, apikeys, applog, attachments, auth, err
 from .browserpool import BrowserModeError, normalize_mode
 from .config import Config
 from .errors import OpenAIError
-from .providers.browser_recipe import AccountLimitExceeded, TrialLimitExceeded
+from .automation.account_errors import AccountLimitExceeded, TrialLimitExceeded
 from .router import ModelNotFound, Router
 from .schemas import ChatRequest, ComboCreateRequest, ComboUpdateRequest, ImageGenerateRequest
 
@@ -505,8 +505,8 @@ def create_app(cfg: Config) -> FastAPI:
 
         async def _do_generate():
             nonlocal assignment
-            from .providers.browser_recipe import AccountLimitExceeded as _ALE2
-            from .providers.browser_recipe import account_key_of as _akey2
+            from .automation.account_errors import AccountLimitExceeded as _ALE2
+            from .automation.account_broker import account_key_of as _akey2
             tried_img: set[str] = set()
             if assignment is not None:
                 tried_img.add(_akey2(assignment))
@@ -842,7 +842,7 @@ def create_app(cfg: Config) -> FastAPI:
 
         async def _run_provider(sent):
             nonlocal assignment
-            from .providers.browser_recipe import account_key_of as _akey
+            from .automation.account_broker import account_key_of as _akey
             tried: set[str] = set()
             if assignment is not None:
                 tried.add(_akey(assignment))

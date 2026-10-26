@@ -69,8 +69,15 @@ def claim(session_id: str, request_id: str, model: str, digest: str, project_id:
 def submitted(request_id: str):
     conn = connection()
     with conn:
-        conn.execute("UPDATE automation_operation SET state='submitted',updated_at=? WHERE id=? AND state='prepared'",
-                     (store.now_ms(), request_id))
+        changed = conn.execute(
+            "UPDATE automation_operation SET state='submitted',updated_at=? "
+            "WHERE id=? AND state='prepared' AND EXISTS ("
+            "SELECT 1 FROM automation_session s WHERE s.id=automation_operation.session_id "
+            "AND s.busy_operation=automation_operation.id)",
+            (store.now_ms(), request_id)).rowcount
+        if changed != 1:
+            raise OpenAIError(409, "operation_not_prepared",
+                              "Không có operation prepared đang giữ session; không được gửi lại lên website")
 
 
 def bind(session_id: str, account_id: int | None, url: str | None):
@@ -78,6 +85,34 @@ def bind(session_id: str, account_id: int | None, url: str | None):
     with conn:
         conn.execute("UPDATE automation_session SET account_id=?,conversation_url=?,updated_at=? WHERE id=?",
                      (account_id, url, store.now_ms(), session_id))
+
+
+def submit_bound(session_id: str, request_id: str, model: str,
+                 account_id: int, conversation_url: str | None):
+    """Atomically validate the claim, bind its account, and cross submit gate."""
+    conn = connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT s.*,o.state AS operation_state FROM automation_session s "
+            "JOIN automation_operation o ON o.session_id=s.id AND o.id=? WHERE s.id=?",
+            (request_id, session_id)).fetchone()
+        if (row is None or row["busy_operation"] != request_id or row["model"] != model
+                or row["operation_state"] != "prepared"):
+            raise OpenAIError(409, "operation_not_prepared", "Session/request/model không khớp claim prepared hiện tại")
+        if row["account_id"] not in (None, account_id):
+            raise OpenAIError(409, "session_account_conflict", "Session thuộc account khác")
+        if row["conversation_url"] != conversation_url:
+            raise OpenAIError(409, "session_context_conflict", "Context đã thay đổi sau khi chuẩn bị request")
+        now = store.now_ms()
+        conn.execute("UPDATE automation_session SET account_id=?,updated_at=? WHERE id=?",
+                     (account_id, now, session_id))
+        conn.execute("UPDATE automation_operation SET state='submitted',updated_at=? WHERE id=?",
+                     (now, request_id))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def complete(session_id: str, request_id: str, result: dict):

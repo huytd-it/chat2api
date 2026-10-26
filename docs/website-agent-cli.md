@@ -3,7 +3,9 @@
 ## Luồng sử dụng
 
 Sidebar chỉ có mục **Web chats**. Trang này chứa các icon website; bấm một icon
-để mở workspace. Không còn bung tất cả domain thành danh sách trong sidebar.
+để mở page cấu hình automation. Hội thoại/lịch sử/session dùng chung tại
+`/sessions`, không có workspace chat theo từng domain. Không còn bung tất cả
+domain thành danh sách trong sidebar.
 
 1. Bấm **Thêm web chat**, nhập `chat.example.com`.
 2. App chỉ lưu domain vào SQLite; không mở browser, gọi LLM hoặc gửi prompt.
@@ -28,6 +30,9 @@ python -m chat2api website brief chat.example.com --request "Chọn model, uploa
 gọi API LLM nào. Có thể yêu cầu agent chạy lệnh này để đọc brief, hoặc copy nội
 dung output vào CLI agent. Không cần cố định nhà cung cấp/model/câu lệnh shell
 của agent trong app. Đăng ký trùng domain là idempotent.
+
+Trang cấu hình có liên kết mở màn session chung, có thể chọn sẵn model mà không
+lọc lịch sử theo website. `/websites/<id>/settings` cũ chuyển về `/websites/<id>`.
 
 API tương ứng: `POST /admin/websites {"domain":"chat.example.com"}`;
 `POST /admin/websites/{id}/agent-brief {"requirement":"..."}`.

@@ -36,9 +36,10 @@
 <div class="min-h-0 flex-1 overflow-y-auto">
   <div class="mx-auto max-w-5xl px-5 py-8 md:px-10 md:py-12">
     <div class="flex flex-wrap items-start justify-between gap-4">
-      <div><h2 class="text-3xl font-semibold tracking-tight">Web chats</h2><p class="mt-2 text-sm text-muted-foreground">Chọn một website để làm việc.</p></div>
+      <div><h2 class="text-3xl font-semibold tracking-tight">Web chats</h2><p class="mt-2 text-sm text-muted-foreground">Chọn website để xem và chỉnh cấu hình automation.</p></div>
       <Button onclick={() => adding = !adding} aria-expanded={adding}><Plus /> Thêm web chat</Button>
     </div>
+    <a href="/sessions" class="mt-4 inline-block text-sm text-primary hover:underline">Mở lịch sử & session dùng chung</a>
     {#if adding}
       <form class="mt-6 rounded-xl bg-card p-5" onsubmit={event => {event.preventDefault(); void register();}}>
         <div class="flex items-center justify-between"><label for="website-domain" class="text-sm font-medium">Domain website</label><Button type="button" variant="ghost" size="icon-sm" aria-label="Đóng thêm website" disabled={saving} onclick={() => adding = false}><X /></Button></div>

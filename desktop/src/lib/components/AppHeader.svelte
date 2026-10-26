@@ -9,8 +9,8 @@
   const titles: Record<string, string> = {
     "/": "Web chats",
     "/overview": "Hệ thống",
-    "/websites": "Workspace",
-    "/sessions": "Sessions",
+    "/websites": "Cấu hình automation",
+    "/sessions": "Lịch sử & session",
     "/connections": "Kết nối website",
     "/api-providers": "API providers",
     "/combos": "Combos",
@@ -23,7 +23,7 @@
     const path = page.url.pathname.replace(/\/+$/, "") || "/";
     if (path.startsWith("/websites/")) {
       const site = $websites.find((item) => item.id === page.params.site);
-      return site ? `Websites / ${site.title}` : "Workspace";
+      return site ? `Cấu hình / ${site.title}` : "Cấu hình automation";
     }
     if (titles[path]) return titles[path];
     const section = Object.keys(titles).find((key) => key !== "/" && path.startsWith(key));
