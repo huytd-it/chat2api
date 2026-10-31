@@ -242,6 +242,8 @@ def create_app(cfg: Config) -> FastAPI:
     login_manager = LoginSessionManager(mode=cfg.scrapling_mode)
     router = Router(cfg.recipes_dir, pool)
     router.reload()
+    from .google_auth import GoogleAuthService
+    google = GoogleAuthService(pool, cfg)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -318,10 +320,14 @@ def create_app(cfg: Config) -> FastAPI:
                 except Exception as error:
                     applog.log(f"profile: không dựng được profile mặc định: {error}", "error")
         router.reload()
+        # Watchdog Google: kiểm tra phiên Google của các profile theo chu kỳ
+        # GOOGLE_CHECK_INTERVAL_MIN và tự đăng nhập lại khi rớt.
+        google.start(router)
         try:
             yield
         finally:
             applog.log("Server đang tắt")
+            await google.stop()
             # Close login browsers first, then shutdown jobs; pool always last
             # (even when jobs.shutdown raises) so Chromium processes never leak.
             try:
@@ -363,6 +369,7 @@ def create_app(cfg: Config) -> FastAPI:
     app.state.cfg = cfg
     app.state.pool = pool
     app.state.login_manager = login_manager
+    app.state.google = google
     app.state.router = router
     app.state.recipe_publish_lock = asyncio.Lock()
 
@@ -1038,6 +1045,7 @@ def register_admin(app: FastAPI, admin) -> None:
     from .schemas import (AccountLoginRequest, AddAccountRequest, ApiKeyCreateRequest,
                            ComboCreateRequest, ComboUpdateRequest, IntegrateRequest,
                            OpenAIProviderCreateRequest, OpenAIProviderUpdateRequest,
+                           GoogleIdentityRequest, GoogleLoginRequest, GoogleSitesRequest,
                            ProfileAccountRequest, ProfileCloneRequest, ProfileCreateRequest,
                            ProfileImportRequest, ProfileRemoteListRequest,
                            ProfileOpenRequest, ProfileUpdateRequest, RecipeAnalyzeRequest,
@@ -1744,6 +1752,107 @@ def register_admin(app: FastAPI, admin) -> None:
             await asyncio.to_thread(profiles.remove_account, int(r["id"]))
         applog.log(f"account: gỡ profile '{prof['name']}' khỏi domain '{host}'", "warn")
         return {"ok": True}
+
+    # ----------------------------------------------------------- Google
+
+    def _google_error(error: Exception) -> OpenAIError:
+        from .google_auth import GoogleBusy
+
+        if isinstance(error, OpenAIError):
+            return error
+        if isinstance(error, GoogleBusy):
+            return OpenAIError(409, "profile_busy", str(error))
+        if isinstance(error, profiles.ProfileLocked):
+            return OpenAIError(409, "profile_locked", str(error))
+        if isinstance(error, BrowserModeError):
+            return OpenAIError(400, "no_browser_mode", str(error))
+        return OpenAIError(500, "google_failed", f"Thao tác Google thất bại: {error}")
+
+    @admin.get("/google")
+    async def google_list():
+        from . import google_auth
+
+        return {"identities": await asyncio.to_thread(google_auth.list_identities)}
+
+    @admin.post("/google/run")
+    async def google_run_all(request: Request):
+        """Chạy ngay một vòng watchdog (không chờ tới chu kỳ kế tiếp)."""
+        try:
+            results = await request.app.state.google.run_all()
+        except Exception as error:
+            raise _google_error(error)
+        return {"results": results}
+
+    @admin.get("/profiles/{ident}/google")
+    async def google_get(ident: str, request: Request):
+        from . import google_auth
+
+        row = await _profile_or_404(ident)
+        item = await asyncio.to_thread(google_auth.get_identity, row["id"])
+        return {"profile": row["name"], "identity": item,
+                "waiting": request.app.state.google.waiting(row["id"])}
+
+    @admin.put("/profiles/{ident}/google")
+    async def google_save(ident: str, body: GoogleIdentityRequest):
+        from . import google_auth
+
+        _need_store()
+        row = await _profile_or_404(ident)
+        try:
+            item = await asyncio.to_thread(google_auth.save_identity, row["id"],
+                                           body.model_dump(exclude_none=True))
+        except ValueError as error:
+            raise OpenAIError(400, "invalid_google_identity", str(error))
+        applog.log(f"google: lưu tài khoản {item['email'] or '(trống)'} cho profile '{row['name']}'")
+        return {"profile": row["name"], "identity": item}
+
+    @admin.delete("/profiles/{ident}/google")
+    async def google_delete(ident: str):
+        from . import google_auth
+
+        row = await _profile_or_404(ident)
+        ok = await asyncio.to_thread(google_auth.delete_identity, row["id"])
+        if ok:
+            applog.log(f"google: xoá tài khoản Google của profile '{row['name']}'", "warn")
+        return {"ok": ok}
+
+    @admin.post("/profiles/{ident}/google/check")
+    async def google_check(ident: str, request: Request):
+        row = await _profile_or_404(ident)
+        try:
+            item = await request.app.state.google.check(row)
+        except Exception as error:
+            raise _google_error(error)
+        return {"profile": row["name"], "identity": item}
+
+    @admin.post("/profiles/{ident}/google/login")
+    async def google_login(ident: str, body: GoogleLoginRequest, request: Request):
+        """Kiểm tra rồi tự đăng nhập Google nếu rớt. `headed=true` mở cửa sổ và,
+        khi Google đòi xác minh, giữ cửa sổ chờ người dùng làm xong ở nền."""
+        row = await _profile_or_404(ident)
+        try:
+            item = await request.app.state.google.login(row, headed=body.headed)
+        except Exception as error:
+            raise _google_error(error)
+        return {"profile": row["name"], "identity": item}
+
+    @admin.post("/profiles/{ident}/google/sites")
+    async def google_sites(ident: str, body: GoogleSitesRequest, request: Request):
+        """Đăng nhập lần lượt các web bằng nút "Continue with Google"."""
+        row = await _profile_or_404(ident)
+        targets = [t.strip() for t in body.targets if t and t.strip()]
+        if not targets:
+            raise OpenAIError(400, "invalid_request_error", "Chưa chọn web nào")
+        label = (body.label or "").strip().lower()
+        if label and not accounts.valid_name(label):
+            raise OpenAIError(400, "invalid_account_name",
+                              "Nhãn account chỉ được gồm chữ thường, số và dấu -")
+        try:
+            results = await request.app.state.google.sites(
+                row, targets, headed=body.headed, register=body.add_account, label=label)
+        except Exception as error:
+            raise _google_error(error)
+        return {"profile": row["name"], "results": results}
 
     @admin.post("/profiles/{name}/close")
     async def profile_close(name: str, request: Request):

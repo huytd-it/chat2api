@@ -266,6 +266,37 @@ async def test_copy_button_ignores_button_of_earlier_message(fixture_recipe, tmp
         await pool.aclose()
 
 
+async def test_pick_choice_waits_for_enabled_button_even_when_hidden(fixture_recipe, tmp_path):
+    """Qwen hiện 2 câu trả lời: nút chọn disabled khi đang sinh, ẩn tới khi cuộn."""
+    pool = BrowserPool(max_contexts=1)
+    await pool.start()
+    try:
+        provider = BrowserRecipe(fixture_recipe, tmp_path, pool)
+        context = await pool.context_for("choice")
+        page = await context.new_page()
+        await page.set_content("""
+          <div class="smrm-card"><button class="smrm-card__prefer-btn" disabled
+            style="visibility:hidden" onclick="window.picked='a'">A</button></div>
+          <div class="smrm-card"><button class="smrm-card__prefer-btn" disabled
+            onclick="window.picked='b'">B</button></div>
+        """)
+        sel = "button.smrm-card__prefer-btn"
+        assert await provider._pick_choice(page, sel) is False
+
+        await page.evaluate("""() => document.querySelectorAll('button')
+          .forEach(b => b.disabled = false)""")
+        assert await provider._pick_choice(page, sel) is True
+        assert await page.evaluate("window.picked") == "a"
+        assert await provider._pick_choice(page, "button.khong-co") is False
+    finally:
+        await pool.aclose()
+
+
+def test_validate_recipe_rejects_non_string_choice_selector(fixture_recipe):
+    recipe = {**fixture_recipe, "response": {**fixture_recipe["response"], "choice_selector": 1}}
+    assert any("choice_selector" in e for e in validate_recipe(recipe))
+
+
 async def test_copy_button_ignores_code_block_copy_button(fixture_recipe, tmp_path):
     """Nút "Copy code" mọc lên ngay khi code block bắt đầu stream, chưa phải xong."""
     pool = BrowserPool(max_contexts=1)

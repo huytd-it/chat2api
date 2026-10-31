@@ -8,6 +8,9 @@ prompt:
   submit: Enter
 response:
   last_message_selector: .qwen-markdown
+  # Chế độ so sánh: Qwen sinh 2 câu trả lời song song (.smrm-card) và chỉ hiện
+  # nút Copy sau khi chọn "I prefer this response" — runner tự chọn card đầu.
+  choice_selector: button.smrm-card__prefer-btn
   format: markdown
   capture_html: true
   # Msg cảnh báo limit của site KHÔNG phải câu trả lời: dính pattern thì khóa

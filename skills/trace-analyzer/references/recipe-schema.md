@@ -84,6 +84,7 @@ anon_trial_limit: 20
 - **input_selector**: lấy từ event `fill` đầu tiên của flow `text` (ô nhập chính). Ưu tiên `attributes[id]` / `data-testid`.
 - **submit**: nếu trace có `press key=Enter` ngay sau `fill` → `Enter`, nếu có `click` lên nút gửi → `click:<selector>`.
 - **last_message_selector**: suy từ snapshot cuối (dòng `---TEXT---`) hoặc `outerHTML` của message cuối trong `snapshotDiff`.
+- **choice_selector** (tùy chọn): nút "chọn câu trả lời này" khi site sinh nhiều phương án song song (vd Qwen `button.smrm-card__prefer-btn`). Runner bấm nút đầu tiên đã bật (bỏ qua `disabled`, kể cả khi bị ẩn) rồi mới chờ `done_signal`.
 - **done_signal**: mặc định `copy_button`; nếu site không có nút Copy, dùng `stable_text`.
 - **flows[].action**: click chuyển tab/mode trước khi fill (thường là flow `select_model` hoặc `image`/`video`).
 - **flows[].type**: chỉ có ý nghĩa với flow tên tự đặt (tên có sẵn tự mang hình dạng trùng tên). Thiếu `type` trên tên tự đặt là lỗi validate — mặc định `text` sẽ khiến flow sinh ảnh bị chờ như chờ chữ.

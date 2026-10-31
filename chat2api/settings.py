@@ -27,6 +27,11 @@ from . import store
 # apply: "reload"  -> có hiệu lực ngay sau khi reload recipe (đọc env lúc dựng recipe)
 #        "restart" -> Config đọc một lần lúc khởi động, phải chạy lại server
 FIELDS: list[dict] = [
+    {"key": "CHAT_TURNS_PER_CONVERSATION", "type": "int", "default": "10", "group": "Browser",
+     "apply": "reload", "label": "Số lượt hỏi trong một hội thoại",
+     "help": "Tab web chat được giữ mở, request API nối tiếp cùng một hội thoại tới đủ số "
+             "lượt này rồi mới bấm nút New Chat (không tải lại trang). 1 = mỗi request một "
+             "chat mới. Recipe có new_chat.every thì dùng giá trị của recipe."},
     {"key": "RECIPE_READY_DELAY_MS", "type": "int", "default": "1200", "group": "Browser",
      "apply": "reload", "label": "Delay chờ web sẵn sàng (ms)",
      "help": "Chờ thêm sau khi ô input hiện ra, trước khi thao tác."},
@@ -87,6 +92,15 @@ FIELDS: list[dict] = [
      "help": "per_request: mỗi request không kèm header X-Chat2api-Session-Id là một session "
              "riêng. client_window: gom các request cùng client + model trong 30 phút vào "
              "chung một session."},
+    {"key": "GOOGLE_CHECK_INTERVAL_MIN", "type": "int", "default": "60", "group": "Google",
+     "apply": "reload", "label": "Chu kỳ kiểm tra đăng nhập Google (phút)",
+     "help": "Định kỳ mở myaccount.google.com trong từng profile có khai báo tài khoản Google "
+             "(bật Tự đăng nhập) — rớt phiên thì tự đăng nhập lại, Google đòi xác minh thì "
+             "báo ở tab Profiles. 0 = tắt. Chỉ chạy ở chế độ danh tính 'profile'."},
+    {"key": "GOOGLE_VERIFY_WAIT_SEC", "type": "int", "default": "300", "group": "Google",
+     "apply": "reload", "label": "Thời gian chờ xác minh tay (giây)",
+     "help": "Khi Google đòi xác minh (SMS, xác nhận trên điện thoại...), cửa sổ profile "
+             "được giữ mở chừng này giây để bạn làm xong rồi server tự kiểm tra lại."},
     {"key": "RECIPE_TIMEOUT_MS", "type": "int", "default": "120000", "group": "Server",
      "apply": "restart", "label": "Hạn chờ recipe trả lời (ms)"},
     {"key": "ANON_TRIAL_LIMIT", "type": "int", "default": "20", "group": "Server",

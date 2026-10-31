@@ -1924,3 +1924,121 @@ export async function exportSession(
   if (!r.ok) await asJson(r);
   return r.blob();
 }
+
+// ------------------------------------------------------------- Google
+
+export type GoogleStatus = "signed_in" | "signed_out" | "verify_required" | "error" | "unknown";
+
+export interface GoogleIdentity {
+  profile_id: number;
+  email: string;
+  has_password: boolean;
+  has_totp: boolean;
+  recovery_email: string;
+  auto_login: boolean;
+  status: GoogleStatus;
+  /** Các email Google đang đăng nhập trong profile, ngăn cách bằng dấu phẩy. */
+  signed_in_as: string;
+  detail: string;
+  verify_url: string;
+  checked_at: number | null;
+  updated_at: number;
+  waiting?: boolean;
+}
+
+export interface GoogleIdentityValues {
+  email?: string;
+  /** Bỏ trống = giữ mật khẩu cũ. */
+  password?: string;
+  totp_secret?: string;
+  recovery_email?: string;
+  auto_login?: boolean;
+  clear_password?: boolean;
+  clear_totp?: boolean;
+}
+
+export interface GoogleSiteResult {
+  ok: boolean;
+  host: string;
+  url: string;
+  /** done | already | unsure | no_button | verify_required | error */
+  status: string;
+  detail: string;
+  account?: ProfileAccount;
+}
+
+function googleUrl(base: string, ident: string | number, suffix = ""): string {
+  return base + "/admin/profiles/" + encodeURIComponent(String(ident)) + "/google" + suffix;
+}
+
+export async function fetchGoogleIdentity(
+  key: string,
+  ident: string | number,
+): Promise<{ identity: GoogleIdentity | null; waiting: boolean }> {
+  const base = await apiBase();
+  return asJson(await fetch(googleUrl(base, ident), { headers: headers(key) }));
+}
+
+export async function saveGoogleIdentity(
+  key: string,
+  ident: string | number,
+  values: GoogleIdentityValues,
+): Promise<{ identity: GoogleIdentity }> {
+  const base = await apiBase();
+  return asJson(await fetch(googleUrl(base, ident), {
+    method: "PUT",
+    headers: headers(key),
+    body: JSON.stringify(values),
+  }));
+}
+
+export async function deleteGoogleIdentity(key: string, ident: string | number): Promise<void> {
+  const base = await apiBase();
+  await asJson(await fetch(googleUrl(base, ident), { method: "DELETE", headers: headers(key) }));
+}
+
+/** Mở myaccount.google.com trong profile (chạy ẩn) để biết phiên Google còn sống không. */
+export async function checkGoogle(key: string, ident: string | number): Promise<{ identity: GoogleIdentity }> {
+  const base = await apiBase();
+  return asJson(await fetch(googleUrl(base, ident, "/check"), { method: "POST", headers: headers(key) }));
+}
+
+/** Kiểm tra rồi tự đăng nhập nếu rớt. `headed` mở cửa sổ và chờ xác minh tay khi cần. */
+export async function loginGoogle(
+  key: string,
+  ident: string | number,
+  headed = false,
+): Promise<{ identity: GoogleIdentity }> {
+  const base = await apiBase();
+  return asJson(await fetch(googleUrl(base, ident, "/login"), {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify({ headed }),
+  }));
+}
+
+/** Đăng nhập các web bằng nút "Continue with Google". `targets` là URL hoặc host. */
+export async function loginSitesWithGoogle(
+  key: string,
+  ident: string | number,
+  targets: string[],
+  opts: { headed?: boolean; addAccount?: boolean; label?: string } = {},
+): Promise<{ results: GoogleSiteResult[] }> {
+  const base = await apiBase();
+  return asJson(await fetch(googleUrl(base, ident, "/sites"), {
+    method: "POST",
+    headers: headers(key),
+    body: JSON.stringify({
+      targets,
+      headed: opts.headed ?? false,
+      add_account: opts.addAccount ?? true,
+      label: opts.label ?? "",
+    }),
+  }));
+}
+
+/** Chạy ngay một vòng watchdog Google cho mọi profile bật tự đăng nhập. */
+export async function runGoogleWatchdog(key: string): Promise<{ results: GoogleIdentity[] }> {
+  const base = await apiBase();
+  return asJson(await fetch(base + "/admin/google/run", { method: "POST", headers: headers(key) }));
+}

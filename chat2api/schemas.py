@@ -390,6 +390,32 @@ class ProfileAccountRequest(BaseModel):
     label: str = ""
 
 
+class GoogleIdentityRequest(BaseModel):
+    """Tài khoản Google của một profile. Secret gửi rỗng/None = giữ giá trị cũ;
+    muốn xoá thì bật `clear_*`."""
+    email: str | None = None
+    password: str | None = None
+    totp_secret: str | None = None
+    recovery_email: str | None = None
+    auto_login: bool | None = None
+    clear_password: bool = False
+    clear_totp: bool = False
+
+
+class GoogleLoginRequest(BaseModel):
+    # true: mở cửa sổ thấy được; Google đòi xác minh thì giữ cửa sổ chờ người làm.
+    headed: bool = False
+
+
+class GoogleSitesRequest(BaseModel):
+    # URL đầy đủ hoặc host trần (host → URL của recipe phục vụ host đó).
+    targets: list[str]
+    headed: bool = False
+    # Đăng nhập xong thì khai báo luôn account profile × domain.
+    add_account: bool = True
+    label: str = ""
+
+
 class SettingsRequest(BaseModel):
     values: dict[str, str]
 

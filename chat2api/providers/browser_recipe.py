@@ -64,6 +64,16 @@ def _timing(cfg: dict, key: str) -> int:
         return default
 
 
+def _turns_per_chat(new_chat: dict) -> int:
+    raw = new_chat.get("every")
+    if raw is None:
+        raw = os.environ.get("CHAT_TURNS_PER_CONVERSATION", "10")
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 10
+
+
 def _page_url(page) -> str | None:
     """URL hiện tại của tab, None khi tab đã đóng/hỏng — không được ném lỗi."""
     try:
@@ -143,6 +153,8 @@ def validate_recipe(d: dict) -> list[str]:
         errs.append("invalid field: response.image_copy_scope (after | inside | page)")
     if resp.get("image_copy_exclude") is not None and not isinstance(resp.get("image_copy_exclude"), str):
         errs.append("invalid field: response.image_copy_exclude (phải là string)")
+    if resp.get("choice_selector") is not None and not isinstance(resp.get("choice_selector"), str):
+        errs.append("invalid field: response.choice_selector (phải là string)")
     from ..account_limits import validate_limit_fields as _validate_limits
 
     errs += _validate_limits(resp if isinstance(resp, dict) else {}, "response")
@@ -240,8 +252,12 @@ def validate_recipe(d: dict) -> list[str]:
     if new_chat is not None:
         if not isinstance(new_chat, dict):
             errs.append("invalid field: new_chat (phải là mapping)")
-        elif not new_chat.get("url") and not new_chat.get("selector"):
-            errs.append("invalid field: new_chat (cần url hoặc selector)")
+        elif (not new_chat.get("url") and not new_chat.get("selector")
+              and new_chat.get("every") is None):
+            errs.append("invalid field: new_chat (cần url, selector hoặc every)")
+        elif new_chat.get("every") is not None and (
+                not isinstance(new_chat.get("every"), int) or new_chat["every"] < 1):
+            errs.append("invalid field: new_chat.every (số nguyên >= 1)")
     return errs
 
 
@@ -343,6 +359,14 @@ class BrowserRecipe(AccountBroker, Provider):
         new_chat = recipe.get("new_chat") or {}
         self._new_chat_url = new_chat.get("url")
         self._new_chat_selector = new_chat.get("selector")
+        # Một tab giữ nguyên hội thoại cho tối đa N lượt hỏi rồi mới bấm New
+        # Chat — không tải lại trang giữa các request. `new_chat.every` trong
+        # recipe thắng CHAT_TURNS_PER_CONVERSATION; 1 = mỗi request một chat mới.
+        self._turns_per_chat = _turns_per_chat(new_chat)
+        # ctx_key -> (id(page), chủ hội thoại, số lượt đã gửi). Chủ là "" với
+        # request API thường, session_id với session bền vững — hai loại không
+        # được nối vào hội thoại của nhau.
+        self._chat_state: dict[str, tuple[int, str, int]] = {}
         mode = recipe.get("mode") or {}
         self._mode_cfg = mode if isinstance(mode, dict) else {}
         # Phần dạo đầu dùng chung trước khi chọn model (mở dropdown, chờ nó hiện).
@@ -1392,10 +1416,11 @@ class BrowserRecipe(AccountBroker, Provider):
                 page = await self._acquire_page(ctx_key, storage_state, effective_headed)
             deadline = time.monotonic() + timeout_ms / 1000
             try:
-                await page.goto(self._new_chat_url or self.url, wait_until="domcontentloaded",
-                                timeout=min(timeout_ms, 60000))
                 box = _resolve_locator(page, prompt_cfg["input_selector"]).first
-                await self._wait_chat_ready(page, box)
+                # Media luôn cần chat mới (chế độ ảnh/video bật theo hội thoại),
+                # nhưng mở bằng nút New Chat thay vì tải lại trang.
+                await self._open_chat(page, box, ctx_key, timeout_ms, fresh=True)
+                self._end_chat(ctx_key)
                 await _sleep_ms(self._input_delay_ms)
                 # Chuyển chế độ TRƯỚC khi chọn model: dropdown model của nhiều
                 # site chỉ liệt kê model hợp lệ cho chế độ đang bật.
@@ -1984,6 +2009,27 @@ class BrowserRecipe(AccountBroker, Provider):
         await asyncio.sleep(0.1)
         return str(await page.evaluate("navigator.clipboard.readText()") or "")
 
+    async def _pick_choice(self, page, selector: str) -> bool:
+        """Bấm nút chọn phương án đầu tiên đã bật (`response.choice_selector`).
+
+        Nút thường bị ẩn (visibility) tới khi cuộn card xuống đáy nên không
+        dùng `locator.click()` (chờ visible); `el.click()` vẫn gọi onClick.
+        Nút còn disabled = các phương án chưa sinh xong → chưa bấm.
+        """
+        try:
+            buttons = _resolve_locator(page, selector)
+            for i in range(await buttons.count()):
+                button = buttons.nth(i)
+                if await button.evaluate(
+                        "el => !el.disabled && el.getAttribute('aria-disabled') !== 'true'"):
+                    await button.evaluate("el => el.click()")
+                    applog.log(f"recipe: '{self.slug}' site hiện nhiều câu trả lời — "
+                               f"đã chọn phương án {i + 1}")
+                    return True
+        except Exception:
+            return False
+        return False
+
     async def _cloudflare_blocked(self, page) -> bool:
         """Trang đang là challenge của Cloudflare, không phải app đã tải xong."""
         try:
@@ -1998,6 +2044,82 @@ class BrowserRecipe(AccountBroker, Provider):
             ).count())
         except Exception:
             return False
+
+    def _count_chat_turn(self, ctx_key: str) -> None:
+        state = self._chat_state.get(ctx_key)
+        if state is not None:
+            self._chat_state[ctx_key] = (state[0], state[1], state[2] + 1)
+
+    def _end_chat(self, ctx_key: str) -> None:
+        """Hội thoại hiện tại trên tab coi như đã đủ lượt: lần sau mở chat mới."""
+        state = self._chat_state.get(ctx_key)
+        if state is not None:
+            self._chat_state[ctx_key] = (state[0], state[1], self._turns_per_chat)
+
+    async def _box_ready(self, box, timeout_ms: int = 1500) -> bool:
+        try:
+            await box.wait_for(state="visible", timeout=timeout_ms)
+            return True
+        except Exception:
+            return False
+
+    async def _open_chat(self, page, box, ctx_key: str, timeout_ms: int, *,
+                         target_url: str | None = None, owner: str = "",
+                         fresh: bool = False) -> bool:
+        """Đưa tab về đúng hội thoại cần gửi, hạn chế tải lại trang tối đa.
+
+        - `target_url` (resume / project): đang đứng đúng URL đó thì dùng luôn,
+          không thì goto.
+        - Còn lại: tab đang ở site và ô input sẵn sàng thì nối tiếp hội thoại
+          hiện tại khi chưa đủ `_turns_per_chat` lượt; đủ lượt (hoặc `fresh`)
+          thì bấm nút New Chat. Chỉ goto khi tab chưa mở site, lạc trang, hoặc
+          recipe không có `new_chat.selector`.
+
+        Trả về True khi nối tiếp một hội thoại đã có câu trả lời trước đó — người
+        gọi phải đếm reply cũ để không đọc nhầm câu trả lời của lượt trước.
+        """
+        nav_timeout = min(timeout_ms, 60000)
+        state = self._chat_state.get(ctx_key)
+        if state is not None and state[0] != id(page):
+            state = None  # tab đã bị thay (đóng tay / evict): hội thoại cũ mất
+        on_site = (accounts.domain_of(_page_url(page) or "") == self.domain
+                   and await self._box_ready(box))
+
+        if target_url:
+            if on_site and _same_conversation_url(target_url, _page_url(page)):
+                await _sleep_ms(self._ready_delay_ms)
+            else:
+                await page.goto(target_url, wait_until="domcontentloaded", timeout=nav_timeout)
+                await self._wait_chat_ready(page, box, new_chat=False)
+            self._chat_state[ctx_key] = (id(page), owner, 0)
+            return False
+
+        same_owner = state is not None and state[1] == owner
+        if on_site and not fresh and same_owner and 0 < state[2] < self._turns_per_chat:
+            await _sleep_ms(self._ready_delay_ms)
+            return True
+        if on_site and not fresh and same_owner and state[2] == 0:
+            # Chat mới tinh chưa gửi gì (vd lượt trước lỗi trước khi gửi): dùng luôn.
+            await _sleep_ms(self._ready_delay_ms)
+            return False
+
+        if on_site and self._new_chat_selector:
+            try:
+                await _resolve_locator(page, self._new_chat_selector).first.click(
+                    timeout=min(self._ready_timeout_ms, 10000))
+                await box.wait_for(state="visible", timeout=self._ready_timeout_ms)
+                await _sleep_ms(self._ready_delay_ms)
+                self._chat_state[ctx_key] = (id(page), owner, 0)
+                return False
+            except Exception as error:
+                applog.log(f"recipe: '{self.slug}' bấm New Chat thất bại ({error}), "
+                           "tải lại trang", level="warn")
+
+        await page.goto(self._new_chat_url or self.url, wait_until="domcontentloaded",
+                        timeout=nav_timeout)
+        await self._wait_chat_ready(page, box)
+        self._chat_state[ctx_key] = (id(page), owner, 0)
+        return False
 
     async def _wait_chat_ready(self, page, box, new_chat: bool = True) -> None:
         """Chờ trang chat sẵn sàng nhận prompt, rồi mở phiên chat mới nếu cần.
@@ -2185,6 +2307,10 @@ class BrowserRecipe(AccountBroker, Provider):
         # nhận đủ. Nên vẫn giữ đường lùi: text đứng yên đủ lâu thì chốt và ghi
         # log cảnh báo. Đặt `fallback_quiet_ms: 0` để tắt hẳn.
         copy_fallback_ms = int(ds.get("fallback_quiet_ms", 15000))
+        # Site đôi khi trả HAI câu trả lời song song bắt người dùng chọn (Qwen:
+        # "I prefer this response"). Chưa chọn thì không có nút Copy, request
+        # treo tới timeout — nên bấm chọn phương án đầu ngay khi nút bật.
+        choice_sel = str(resp_cfg.get("choice_selector") or "")
         _limit_compiled, _limit_cfg = self._compiled_limit(flow)
         _via_fallback = False
         # Page dùng chung cho mỗi ctx_key nên hai request cùng account phải nối
@@ -2202,11 +2328,14 @@ class BrowserRecipe(AccountBroker, Provider):
             # chặn...) khiến log chỉ thấy lỗi biến cục bộ.
             captured_html: str | None = None
             try:
-                await page.goto(resume_url or (turn.project_url if turn else None) or self._new_chat_url or self.url, wait_until="domcontentloaded",
-                                timeout=min(timeout_ms, 60000))
                 box = _resolve_locator(page, prompt_cfg["input_selector"]).first
-                await self._wait_chat_ready(
-                    page, box, new_chat=not (resume_url or (turn is not None and turn.project_url)))
+                target_url = resume_url or (turn.project_url if turn else None)
+                # Session bền vững mới (chưa có URL hội thoại) luôn mở chat mới;
+                # request API thường nối tiếp hội thoại trên tab tới đủ N lượt.
+                continued = await self._open_chat(
+                    page, box, ctx_key, timeout_ms, target_url=target_url,
+                    owner=turn.session_id if turn else "",
+                    fresh=turn is not None and not target_url)
                 if resume_url:
                     # SPA sites (Qwen) paint the composer on "/" first, then
                     # replace history with the conversation route after loading
@@ -2253,7 +2382,7 @@ class BrowserRecipe(AccountBroker, Provider):
                         await adapter.thinking(page, turn.thinking)
                 reply_selector = resp_cfg.get("last_message_selector")
                 prior_count = (await _resolve_locator(page, reply_selector).count()
-                               if resume_url and reply_selector else 0)
+                               if (resume_url or continued) and reply_selector else 0)
                 # File trước, chữ sau: nhiều site khóa nút gửi tới khi upload xong.
                 await self._attach_files(page, prompt_cfg, files or [])
                 if prompt_cfg.get("input_mode", "fill") == "type":
@@ -2271,6 +2400,7 @@ class BrowserRecipe(AccountBroker, Provider):
                     await _resolve_locator(page, submit.split(":", 1)[1]).first.click(timeout=10000)
                 else:
                     await box.press("Enter")
+                self._count_chat_turn(ctx_key)
 
                 stable_since = None
                 # Lần đầu thấy nút copy của câu trả lời cuối (copy_button).
@@ -2282,6 +2412,10 @@ class BrowserRecipe(AccountBroker, Provider):
                 while True:
                     if time.monotonic() > deadline:
                         raise TimeoutError(f"recipe '{self.slug}' timeout sau {timeout_ms}ms")
+                    if choice_sel and await self._pick_choice(page, choice_sel):
+                        copy_since = None
+                        await asyncio.sleep(0.5)
+                        continue
                     text, reply_html = await self._reply(page, flow)
                     if prior_count and await _resolve_locator(page, reply_selector).count() <= prior_count:
                         if _limit_compiled:
@@ -2407,6 +2541,10 @@ class BrowserRecipe(AccountBroker, Provider):
                         return
                     await asyncio.sleep(0.5)
             finally:
+                if sys.exc_info()[0] is not None:
+                    # Lỗi giữa chừng: trang có thể đang ở trạng thái dở. Lượt
+                    # sau mở chat mới (bấm New Chat, không tải lại nếu được).
+                    self._end_chat(ctx_key)
                 if turn is not None and submitted:
                     turn.conversation_url = _page_url(page)
                     await asyncio.to_thread(journal.bind, turn.session_id, assignment.account_id,
