@@ -1973,6 +1973,10 @@ export interface GoogleSiteResult {
   status: string;
   detail: string;
   account?: ProfileAccount;
+  /** popup | redirect | silent */
+  flow?: string;
+  /** Account Google đã dùng khi bật firstAccount. */
+  google_account?: string;
 }
 
 function googleUrl(base: string, ident: string | number, suffix = ""): string {
@@ -2030,7 +2034,7 @@ export async function loginSitesWithGoogle(
   key: string,
   ident: string | number,
   targets: string[],
-  opts: { headed?: boolean; addAccount?: boolean; label?: string } = {},
+  opts: { headed?: boolean; addAccount?: boolean; label?: string; clearData?: boolean; firstAccount?: boolean } = {},
 ): Promise<{ results: GoogleSiteResult[] }> {
   const base = await apiBase();
   return asJson(await fetch(googleUrl(base, ident, "/sites"), {
@@ -2041,6 +2045,8 @@ export async function loginSitesWithGoogle(
       headed: opts.headed ?? false,
       add_account: opts.addAccount ?? true,
       label: opts.label ?? "",
+      clear_data: opts.clearData ?? false,
+      first_account: opts.firstAccount ?? false,
     }),
   }));
 }

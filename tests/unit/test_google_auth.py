@@ -83,3 +83,35 @@ def test_record_status_and_list(db, tmp_path):
 
 def test_label_from_email():
     assert google_auth._label_from_email("Foo.Bar+1@gmail.com") == "foo-bar-1"
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://accounts.google.com/signin", True),
+    ("https://site.test/?redirect=https://accounts.google.com/x", False),
+    ("https://accounts.google.com.evil.test/", False),
+    ("about:blank", False),
+    ("", False),
+])
+def test_is_google_login_compares_hostname(url, expected):
+    assert google_auth._is_google_login(url) is expected
+
+
+@pytest.mark.parametrize("domain,expected", [
+    ("example.com", True),
+    ("app.example.com", True),
+    ("notexample.com", False),
+    ("example.com.evil.test", False),
+    ("exampleXcom", False),
+])
+def test_cookie_domain_matches_host_and_subdomains(domain, expected):
+    assert bool(google_auth._cookie_domain_re("example.com").search(domain)) is expected
+
+
+@pytest.mark.parametrize("host,expected", [
+    ("google.com", True),
+    ("gemini.google.com", True),
+    ("notgoogle.com", False),
+    ("google.com.evil.test", False),
+])
+def test_shares_google_session(host, expected):
+    assert google_auth._shares_google_session(host) is expected

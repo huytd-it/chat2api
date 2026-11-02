@@ -2,7 +2,7 @@ slug: minimax-agent
 url: https://agent.minimax.io/
 prompt:
   input_selector: '[data-testid="message-textarea"]'
-  input_mode: type
+  input_mode: fill
   submit: click:[data-testid="send-button"]
 response:
   last_message_selector: '[data-testid="message-item"][data-role="assistant"]'

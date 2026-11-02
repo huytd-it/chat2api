@@ -10,21 +10,29 @@ response:
     type: copy_button
     scope: after
     use_copy_result: true
+# Trace 7b758c49aa02: nút mở menu là [aria-label="Select a model"] (id đổi theo
+# model đang chọn: #model-selector-input-<model>-button nên không bám id).
+# Option model: [aria-label="model-item"][data-value=...] — data-value của
+# GLM-5.3-Flash là "x-preview-l". Chọn model xong menu tự ĐÓNG; thanh Effort nằm
+# trong cùng menu nên phải mở lại rồi mới chỉnh. Thumb là
+# [role="slider"][aria-label="Effort"], giá trị 0..2 (0 = Low): click để focus
+# rồi Home/ArrowRight/End để đặt mức, Escape để đóng menu.
 models:
 - id: default
 - id: glm-5.3-flash
-  action: 'click:[aria-label="Select a model"];click:[aria-label="model-item"][data-value="x-preview-l"]'
+  action: click:[aria-label="model-item"][data-value="x-preview-l"]
 - id: glm-5.3
-  action: 'click:[aria-label="Select a model"];click:[aria-label="model-item"][data-value="glm-5.3"]'
+  action: click:[aria-label="model-item"][data-value="glm-5.3"]
 - id: glm-5.2
-  action: 'click:[aria-label="Select a model"];click:[aria-label="model-item"][data-value="glm-5.2"]'
+  action: click:[aria-label="model-item"][data-value="glm-5.2"]
 - id: glm-5.2-high
-  action: 'click:[aria-label="Select a model"];click:[aria-label="model-item"][data-value="glm-5.2"];click:[aria-label="Select a model"];click:[role="slider"][aria-label="Effort"];press:Home;press:Escape'
+  action: click:[aria-label="model-item"][data-value="glm-5.2"];click:[aria-label="Select a model"];click:[role="slider"][aria-label="Effort"];press:Home;press:ArrowRight;press:Escape
 - id: glm-5.2-max
-  action: 'click:[aria-label="Select a model"];click:[aria-label="model-item"][data-value="glm-5.2"];click:[aria-label="Select a model"];click:[role="slider"][aria-label="Effort"];press:End;press:Escape'
+  action: click:[aria-label="model-item"][data-value="glm-5.2"];click:[aria-label="Select a model"];click:[role="slider"][aria-label="Effort"];press:End;press:Escape
 flows:
   select_model:
     selector: '[aria-label="Select a model"]'
+    action: click:[aria-label="Select a model"]
 login:
   strategy: round_robin
   quota: 50

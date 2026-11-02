@@ -330,7 +330,7 @@ def format_trace_as_markdown(
     metadata: dict[str, Any] | None = None,
     snapshot: str | None = None,
 ) -> str:
-    """Markdown giàu cho file persisted ``data/traces/<jobId>-<slug>.md`` (Phase2 spec).
+    """Markdown giàu cho file persisted ``data/traces/<domain>/<YYYY-MM-DD_HH-MM-SS>-<slug>.md`` (Phase2 spec).
 
     Gồm: Metadata bảng + Tóm tắt theo flow + Events (bảng selectors/attrs/bbox + code outerHTML + snapshotDiff) + Snapshot cuối + Gợi ý recipe + PII banner.
     """

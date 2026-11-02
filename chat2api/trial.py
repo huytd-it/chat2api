@@ -101,13 +101,21 @@ async def _check(page, label: str, selector: str, *, required: bool = True) -> d
 async def _run_action_step(page, label: str, verb: str, selector: str,
                            value: str | None) -> dict[str, Any]:
     """Đếm khớp RỒI thực thi bước đó, để bước sau có DOM đúng mà soi."""
+    from .selectors import resolve_locator as _resolve2
     n = await _count(page, selector)
+    if n == 0:
+        # Như `_check`: SPA hydrate chậm / dropdown mở có animation — chờ gắn vào DOM
+        # rồi mới kết luận (runtime `_exec_action_steps` cũng chờ 10s).
+        try:
+            await _resolve2(page, selector).first.wait_for(state="attached", timeout=10000)
+            n = await _count(page, selector)
+        except Exception:
+            pass
     if n < 0:
         return _step(label, selector, FAIL, None, "selector sai cú pháp")
     if n == 0:
         return _step(label, selector, FAIL, 0,
                      "không khớp element nào — các bước sau không soi được")
-    from .selectors import resolve_locator as _resolve2
     loc = _resolve2(page, selector).first
     try:
         await loc.wait_for(state="visible", timeout=10000)

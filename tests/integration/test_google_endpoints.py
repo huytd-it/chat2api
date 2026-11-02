@@ -73,3 +73,31 @@ async def test_check_and_sites_go_through_service(client, monkeypatch):
     assert r.json()["results"][0]["host"] == "chat.qwen.ai"
     r = await c.post(f"/admin/profiles/{pid}/google/sites", json={"targets": []})
     assert r.status_code == 400
+
+
+async def test_sites_passes_options_to_service(client, monkeypatch):
+    c, app = client
+    pid = (await c.post("/admin/profiles", json={"name": "main"})).json()["id"]
+    seen = {}
+
+    async def fake_sites(row, targets, **kw):
+        seen.update(kw)
+        return []
+
+    monkeypatch.setattr(app.state.google, "sites", fake_sites)
+    await c.post(f"/admin/profiles/{pid}/google/sites",
+                 json={"targets": ["a.test"], "clear_data": True, "first_account": True})
+    assert seen["clear_data"] is True and seen["first_account"] is True
+
+    await c.post(f"/admin/profiles/{pid}/google/sites", json={"targets": ["a.test"]})
+    assert seen["clear_data"] is False and seen["first_account"] is False
+
+
+async def test_clear_data_on_busy_profile_is_409(client):
+    c, app = client
+    pid = (await c.post("/admin/profiles", json={"name": "main"})).json()["id"]
+    async with app.state.pool.hold("main"):
+        r = await c.post(f"/admin/profiles/{pid}/google/sites",
+                         json={"targets": ["a.test"], "clear_data": True})
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "profile_busy"

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { apiKey, showToast } from "$lib/stores";
-  import { addProfileAccount, loginSitesWithGoogle, removeDomainProfile, type ProfileInfo } from "$lib/api";
+  import { addProfileAccount, checkGoogle, fetchGoogleIdentity, loginGoogle, loginSitesWithGoogle, removeDomainProfile, type GoogleSiteResult, type ProfileInfo } from "$lib/api";
   import { refreshDomains, refreshProfiles, refreshRecipes } from "$lib/sync";
   import { Badge } from "$lib/components/ui/badge";
   import { Button } from "$lib/components/ui/button";
@@ -35,6 +35,8 @@
   let pickedHosts = $state<Set<string>>(new Set());
   let pickedProfiles = $state<Set<number>>(new Set());
   let extra = $state(""); let label = $state("main"); let headed = $state(false); let labelError = $state("");
+  let firstAccount = $state(true); let verifyFirst = $state(true); let clearData = $state(false);
+  let waitingFor = $state(""); let canSkipWait = $state(false); let skipWait = $state(false);
   let running = $state(false); let finished = $state(false); let stopRequested = $state(false);
   let results = $state<ResultRow[]>([]); let doneCount = $state(0); let runTotal = $state(0);
 
@@ -43,6 +45,7 @@
     untrack(() => {
       pickedHosts = new Set(); pickedProfiles = new Set();
       extra = ""; label = "main"; headed = false; labelError = "";
+      firstAccount = true; verifyFirst = true; clearData = false; waitingFor = ""; canSkipWait = false; skipWait = false;
       running = false; finished = false; stopRequested = false;
       results = []; doneCount = 0; runTotal = 0;
     });
@@ -78,7 +81,7 @@
   const skipped = $derived(pairs.length - runnable.length);
   const skipReasons = $derived([...new Set(pairs.map((x) => x.skip).filter(Boolean))].join(", "));
   const notSignedIn = $derived(
-    action === "google"
+    action === "google" && !verifyFirst
       ? [...new Set(runnable.map((x) => x.profile))].filter((p) => google[p.id]?.identity?.status !== "signed_in").map((p) => p.name)
       : [],
   );
@@ -101,12 +104,54 @@
     for (const { profile, hosts } of byProfile.values()) {
       if (stopRequested) return;
       try {
-        const res = await loginSitesWithGoogle($apiKey, profile.id, hosts, { headed });
-        for (const r of res.results) push({ profile: profile.name, host: r.host, ok: r.ok, warn: r.status === "verify_required" || r.status === "unsure", label: GOOGLE_SITE_RESULT[r.status] ?? r.status, detail: r.detail });
+        if (verifyFirst && !(await ensureGoogle(profile))) {
+          if (stopRequested) return;
+          for (const host of hosts) push({ profile: profile.name, host, ok: false, warn: true, label: "Chưa xác minh", detail: "Profile chưa đăng nhập Google nên chưa chạy web này" });
+          doneCount += hosts.length;
+          continue;
+        }
+        let rows = (await loginSitesWithGoogle($apiKey, profile.id, hosts, { headed, clearData, firstAccount })).results;
+        // Chạy ẩn bị Google đòi xác minh: mở cửa sổ làm lại các web đó. Dữ liệu đã xoá ở lần đầu.
+        const blocked = verifyFirst && !headed ? rows.filter((r) => r.status === "verify_required").map((r) => r.host) : [];
+        if (blocked.length) {
+          waitingFor = profile.name; canSkipWait = false;
+          const retried = (await loginSitesWithGoogle($apiKey, profile.id, blocked, { headed: true, firstAccount })).results;
+          waitingFor = "";
+          rows = mergeRetry(rows, retried);
+        }
+        for (const r of rows) push({ profile: profile.name, host: r.host, ok: r.ok, warn: r.status === "verify_required" || r.status === "unsure", label: GOOGLE_SITE_RESULT[r.status] ?? r.status, detail: r.detail });
       } catch (e) {
+        waitingFor = "";
         for (const host of hosts) push({ profile: profile.name, host, ok: false, label: "Lỗi", detail: (e as Error).message });
       }
       doneCount += hosts.length;
+    }
+  }
+
+  function mergeRetry(rows: GoogleSiteResult[], retried: GoogleSiteResult[]): GoogleSiteResult[] {
+    const latest = new Map(retried.map((r) => [r.host, r]));
+    return rows.map((r) => latest.get(r.host) ?? r);
+  }
+
+  /** Google đã đăng nhập chưa; chưa thì mở cửa sổ profile và chờ người dùng làm xong. */
+  async function ensureGoogle(profile: ProfileInfo): Promise<boolean> {
+    if ((await checkGoogle($apiKey, profile.id)).identity.status === "signed_in") return true;
+    const identity = (await loginGoogle($apiKey, profile.id, true)).identity;
+    if (!identity.waiting) return identity.status === "signed_in";
+    waitingFor = profile.name; canSkipWait = true; skipWait = false;
+    try {
+      let elapsed = 0;
+      while (!stopRequested && !skipWait) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        elapsed += 500;
+        if (elapsed < 4000) continue;
+        elapsed = 0;
+        const res = await fetchGoogleIdentity($apiKey, profile.id);
+        if (!res.waiting) return res.identity?.status === "signed_in";
+      }
+      return false;
+    } finally {
+      waitingFor = "";
     }
   }
 
@@ -189,7 +234,15 @@
         {:else if action === "detach"}
           <p class="text-xs leading-5 text-muted-foreground">Gỡ mọi account của domain khỏi từng profile đã chọn. Server từ chối cặp nào làm recipe mất account cuối cùng và báo lý do trong kết quả.</p>
         {:else}
-          <label class="flex items-center gap-2 text-sm"><Switch bind:checked={headed} aria-label="Hiện cửa sổ khi đăng nhập" /> Hiện cửa sổ</label>
+          <div class="grid gap-2">
+            <label class="flex items-center gap-2 text-sm"><Switch bind:checked={firstAccount} aria-label="Dùng Google account đầu tiên" /> Dùng Google account đầu tiên</label>
+            <label class="flex items-center gap-2 text-sm"><Switch bind:checked={verifyFirst} aria-label="Kiểm tra Google trước, chưa đăng nhập thì mở cửa sổ" /> Kiểm tra Google trước, chưa đăng nhập thì mở cửa sổ</label>
+            <label class="flex items-center gap-2 text-sm"><Switch bind:checked={clearData} aria-label="Xoá cookie và dữ liệu của domain trước khi đăng nhập" /> Xoá cookie và dữ liệu của domain trước khi đăng nhập</label>
+            <label class="flex items-center gap-2 text-sm"><Switch bind:checked={headed} aria-label="Hiện cửa sổ khi đăng nhập" /> Hiện cửa sổ</label>
+          </div>
+          {#if clearData}
+            <p class="flex items-start gap-2 text-xs leading-5 text-warning"><WarningCircle size={14} class="mt-0.5 shrink-0" /><span>Các domain đã chọn sẽ bị đăng xuất khỏi từng profile rồi mới đăng nhập lại. Phiên Google và các web khác được giữ nguyên.</span></p>
+          {/if}
           <p class="text-xs leading-5 text-muted-foreground">Chạy lần lượt từng profile: mở web, bấm “Continue with Google” rồi gắn site vào profile. Có thể mất vài phút.</p>
           {#if notSignedIn.length}
             <p class="flex items-start gap-2 text-xs leading-5 text-warning"><WarningCircle size={14} class="mt-0.5 shrink-0" /><span>Chưa ghi nhận đăng nhập Google: <span class="font-data">{notSignedIn.join(", ")}</span>. Các profile này có thể không đăng nhập được web.</span></p>
@@ -210,6 +263,12 @@
           {#if running}<CircleNotch class="animate-spin" /> Đã xong {doneCount}/{runTotal}{#if stopRequested} · dừng sau cặp đang chạy{/if}
           {:else}Thành công {okCount}/{results.length}{#if results.length < runTotal} · {runTotal - results.length} cặp chưa chạy vì đã dừng{/if}{/if}
         </p>
+        {#if waitingFor}
+          <div class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-warning/50 p-3 text-sm" role="status">
+            <span>Đang chờ đăng nhập Google trong cửa sổ của <span class="font-data">{waitingFor}</span>…</span>
+            {#if canSkipWait}<Button variant="outline" size="sm" disabled={skipWait} onclick={() => (skipWait = true)}>Bỏ qua profile này</Button>{/if}
+          </div>
+        {/if}
         {#if results.length}
           <ul class="max-h-72 divide-y overflow-y-auto rounded-lg border">
             {#each results as r (r.key)}

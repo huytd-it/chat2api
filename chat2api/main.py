@@ -1271,7 +1271,10 @@ def register_admin(app: FastAPI, admin) -> None:
                         return Response(content=pp.read_bytes(), media_type=mt)
                 except Exception:
                     pass
-        for f in traces_dir.glob(f"{job_id}-*.{fmt}"):
+        from .agents.trace_writer import find_trace
+
+        f = find_trace(traces_dir, job_id, fmt)
+        if f is not None:
             mt = "application/json" if fmt == "json" else "text/markdown; charset=utf-8"
             return Response(content=f.read_bytes(), media_type=mt)
         raise OpenAIError(404, "not_found", "Trace không tồn tại")
@@ -1290,16 +1293,20 @@ def register_admin(app: FastAPI, admin) -> None:
         traces_dir = _traces_dir_for_request(request)
         if not traces_dir.exists():
             return {"traces": [], "count": 0}
-        files = sorted(traces_dir.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True)
+        # Duyệt cả thư mục con theo domain; name = đường dẫn tương đối (vd chat.z.ai/2026-11-02_14-30-05-x.md)
+        files = sorted(
+            (p for p in traces_dir.rglob("*") if p.is_file() and p.suffix in (".json", ".md")
+             and not p.name.startswith(".")),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
         out = []
         for f in files:
-            if f.suffix not in (".json", ".md"):
-                continue
+            name = f.relative_to(traces_dir).as_posix()
             try:
                 st = f.stat()
-                out.append({"name": f.name, "size": st.st_size, "mtime": int(st.st_mtime * 1000)})
+                out.append({"name": name, "size": st.st_size, "mtime": int(st.st_mtime * 1000)})
             except Exception:
-                out.append({"name": f.name})
+                out.append({"name": name})
         return {"traces": out, "count": len(out)}
 
     @admin.get("/automation-jobs/integrate/{job_id}")
@@ -1866,7 +1873,8 @@ def register_admin(app: FastAPI, admin) -> None:
                               "Nhãn account chỉ được gồm chữ thường, số và dấu -")
         try:
             results = await request.app.state.google.sites(
-                row, targets, headed=body.headed, register=body.add_account, label=label)
+                row, targets, headed=body.headed, register=body.add_account, label=label,
+                clear_data=body.clear_data, first_account=body.first_account)
         except Exception as error:
             raise _google_error(error)
         return {"profile": row["name"], "results": results}

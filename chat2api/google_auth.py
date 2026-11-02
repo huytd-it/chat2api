@@ -304,24 +304,38 @@ async def check_session(ctx, page) -> dict:
             "url": url, "detail": ""}
 
 
-async def _click_account(page, email: str) -> bool:
-    """Account chooser của Google: bấm đúng tài khoản (hoặc tài khoản duy nhất)."""
-    if email:
+async def _account_email(locator) -> str:
+    for attr in ("data-identifier", "data-email"):
+        with contextlib.suppress(Exception):
+            value = await locator.get_attribute(attr, timeout=500)
+            if value:
+                return value.strip().lower()
+    return ""
+
+
+async def _click_account(page, email: str, first: bool = False) -> str | None:
+    """Account chooser của Google: bấm đúng tài khoản (hoặc tài khoản duy nhất).
+
+    `first` luôn bấm dòng đầu, bỏ qua `email`. Trả về email vừa bấm ("" nếu trang
+    không ghi), None nếu không bấm gì.
+    """
+    if email and not first:
         for sel in (f'[data-identifier="{email}"]', f'[data-email="{email}"]'):
             loc = page.locator(sel)
             if await _visible(loc):
                 await loc.first.click()
-                return True
-    loc = page.locator("[data-identifier], [data-email]")
+                return email
+    loc = page.locator("[data-identifier]:visible, [data-email]:visible" if first
+                       else "[data-identifier], [data-email]")
     try:
         count = await loc.count()
     except Exception:
         count = 0
-    if count == 1 or (count and not email):
-        if await _visible(loc):
-            await loc.first.click()
-            return True
-    return False
+    if count and (first or count == 1 or not email) and await _visible(loc):
+        picked = await _account_email(loc.first)
+        await loc.first.click()
+        return picked
+    return None
 
 
 async def _submit(page, field) -> None:
@@ -340,13 +354,17 @@ async def _error_text(page) -> str:
     return ""
 
 
-async def google_step(page, ident: dict, done: set[str]) -> str:
+async def google_step(page, ident: dict, done: set[str], first_account: bool = False) -> str:
     """Một bước trên accounts.google.com. Trả về:
 
     'acted'   — đã điền/bấm gì đó, gọi lại sau khi trang đổi;
     'verify'  — Google đòi việc chỉ người làm được;
     'error:…' — dừng hẳn (sai mật khẩu, thiếu dữ liệu, lặp bước);
     'idle'    — không nhận ra trang, chờ thêm.
+
+    `first_account` bấm account đầu trong chooser. Nếu đó không phải email đã khai
+    báo thì secret đã lưu thuộc account khác: không điền, để người dùng làm tay
+    (nhập sai lặp lại dễ bị Google khoá).
     """
     url = page.url
     path = urlparse(url).path.lower()
@@ -367,14 +385,24 @@ async def google_step(page, ident: dict, done: set[str]) -> str:
         await _submit(page, email_input.first)
         return "acted"
 
-    if await _click_account(page, email):
-        if "chooser" in done:
-            return "idle"
-        done.add("chooser")
-        return "acted"
+    # Trang challenge cũng có thể ghi data-email ở phần đầu trang — đó không phải chooser.
+    if not kind and "chooser" not in done:
+        picked = await _click_account(page, email, first=first_account)
+        if picked is not None:
+            done.add("chooser")
+            if picked:
+                done.add(f"picked:{picked}")
+            if picked != email:
+                done.add("other-account")
+            return "acted"
+
+    if "other-account" in done and kind in ("selection", "totp", "kpe"):
+        return "verify"
 
     pwd_input = page.locator('input[type="password"][name="Passwd"]:visible, input[type="password"]:visible')
     if kind in ("pwd", "") and await _visible(pwd_input):
+        if "other-account" in done:
+            return "verify"
         if not ident.get("password"):
             return "error:Phiên Google cần mật khẩu nhưng profile chưa lưu mật khẩu"
         if "password" in done:
@@ -445,8 +473,12 @@ async def google_step(page, ident: dict, done: set[str]) -> str:
     return "idle"
 
 
-async def login_google(ctx, page, ident: dict, timeout: float = 90) -> dict:
-    """Chạy cả luồng đăng nhập Google trong `page`. Trả về dạng như check_session."""
+async def login_google(ctx, page, ident: dict, timeout: float = 90, manual: bool = False) -> dict:
+    """Chạy cả luồng đăng nhập Google trong `page`. Trả về dạng như check_session.
+
+    `manual`: có người ngồi ở cửa sổ, nên thiếu dữ liệu hay sai mật khẩu chuyển
+    thành verify_required để họ làm tiếp thay vì đóng cửa sổ.
+    """
     try:
         await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
     except Exception as error:
@@ -470,7 +502,8 @@ async def login_google(ctx, page, ident: dict, timeout: float = 90) -> dict:
             return {"status": "verify_required", "email": "", "url": url,
                     "detail": _verify_detail(url)}
         if result.startswith("error:"):
-            return {"status": "error", "email": "", "url": url, "detail": result[6:]}
+            return {"status": "verify_required" if manual else "error", "email": "", "url": url,
+                    "detail": result[6:]}
         idle_rounds = idle_rounds + 1 if result == "idle" else 0
         if idle_rounds >= 6:
             return {"status": "verify_required", "email": "", "url": url,
@@ -548,25 +581,109 @@ async def _find_google_button(page):
     return None
 
 
-async def _google_page(ctx, page, before: set[int], wait: float = 8):
-    """Trang Google xuất hiện sau khi bấm nút: popup mới hoặc chính tab hiện tại."""
+def _is_google_login(url: str) -> bool:
+    """So đúng hostname: URL của site có thể chứa accounts.google.com trong tham số."""
+    try:
+        return (urlparse(url or "").hostname or "").lower() == "accounts.google.com"
+    except ValueError:
+        return False
+
+
+async def _google_page(ctx, page, before: set[int], wait: float = 15):
+    """Trang Google xuất hiện sau khi bấm nút: popup mới hoặc chính tab hiện tại.
+
+    Chờ đủ lâu cho popup rời about:blank và cho site đi qua trang auth trung gian.
+    """
     deadline = time.monotonic() + wait
     while time.monotonic() < deadline:
         for p in ctx.pages:
             if id(p) in before or p.is_closed():
                 continue
-            # Popup mở ra ở about:blank rồi mới chuyển sang Google — chờ nó chuyển.
-            if "accounts.google.com" in (p.url or ""):
+            if _is_google_login(p.url):
                 return p
-        if "accounts.google.com" in (page.url or ""):
+        if _is_google_login(page.url):
             return page
         await asyncio.sleep(0.4)
     return None
 
 
-async def site_login(ctx, page, url: str, ident: dict, timeout: float = 90) -> dict:
-    """Đăng nhập `url` bằng Google. {ok, host, url, detail, status}."""
-    host = accounts.domain_of(url)
+async def _wait_left_google(gpage, timeout: float) -> bool:
+    """Chờ người dùng làm xong trong cửa sổ. False nếu hết giờ vẫn ở trang Google."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if gpage.is_closed() or not _is_google_login(gpage.url):
+            return True
+        await asyncio.sleep(2)
+    return False
+
+
+def _shares_google_session(host: str) -> bool:
+    """Cookie của *.google.com là chính phiên Google, không được xoá theo domain."""
+    return host == "google.com" or host.endswith(".google.com")
+
+
+def _cookie_domain_re(host: str) -> re.Pattern:
+    return re.compile(rf"(^|\.){re.escape(host)}$", re.I)
+
+
+async def clear_site_data(ctx, page, host: str) -> None:
+    """Xoá cookie và dữ liệu lưu của `host` cùng subdomain, giữ phiên Google và web khác.
+
+    Cookie khớp theo domain nên gồm cả subdomain. Storage xoá theo origin, chỉ biết
+    được origin nào qua cookie, nên subdomain chỉ có localStorage mà không có cookie
+    sẽ không bị xoá. Cookie của domain cha (.example.com khi host là chat.example.com)
+    cũng được giữ vì nằm ngoài phạm vi.
+    """
+    pattern = _cookie_domain_re(host)
+    hosts = {host, f"www.{host}"}
+    for cookie in await ctx.cookies():
+        domain = str(cookie.get("domain") or "").lstrip(".").lower()
+        if pattern.search(domain):
+            hosts.add(domain)
+    # JS của tab đang mở site này có thể ghi lại dữ liệu vừa xoá.
+    for other in list(ctx.pages):
+        if other is not page and not other.is_closed() and pattern.search(urlparse(other.url).hostname or ""):
+            await other.close()
+    await page.goto("about:blank")
+    await ctx.clear_cookies(domain=pattern)
+    # Không dùng "all": nhóm cookie của Chromium xoá theo URL, có thể đụng cookie domain cha.
+    types = ("appcache,cache_storage,file_systems,indexeddb,local_storage,"
+             "service_workers,shared_storage,storage_buckets,websql")
+    cdp = await ctx.new_cdp_session(page)
+    try:
+        for name in sorted(hosts):
+            await cdp.send("Storage.clearDataForOrigin",
+                           {"origin": f"https://{name}", "storageTypes": types})
+    finally:
+        with contextlib.suppress(Exception):
+            await cdp.detach()
+
+
+async def _site_outcome(ctx, page, host: str, ident: dict, done: set[str], first_account: bool,
+                        flow: str, detail: str) -> dict:
+    """Kết quả cuối: `ok` chỉ khi còn ở đúng domain VÀ không còn nút Google."""
+    if page.is_closed():
+        out = {"ok": False, "host": host, "url": page.url, "status": "unsure",
+               "detail": "Cửa sổ đã bị đóng trước khi kiểm tra được kết quả"}
+    else:
+        ok = accounts.domain_of(page.url) == host and await _find_google_button(page) is None
+        out = {"ok": ok, "host": host, "url": page.url, "status": "done" if ok else "unsure",
+               "detail": "" if ok else detail}
+    out["flow"] = flow
+    if first_account:
+        picked = next((d[7:] for d in done if d.startswith("picked:")), "")
+        if not picked and not page.is_closed():
+            picked = next(iter(await _signed_in_emails(ctx)), "")
+        if picked:
+            out["google_account"] = picked
+            declared = (ident.get("email") or "").lower()
+            if out["ok"] and declared and picked != declared:
+                out["detail"] = f"Đã dùng account {picked}, khác email đã khai báo {declared}"
+    return out
+
+
+async def _site_flow(ctx, page, url: str, host: str, ident: dict, timeout: float,
+                     cleared: bool, first_account: bool, headed: bool) -> dict:
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
     except Exception as error:
@@ -578,6 +695,10 @@ async def site_login(ctx, page, url: str, ident: dict, timeout: float = 90) -> d
     if button is None:
         entry = await _first_visible(page, LOGIN_ENTRY_TEXTS)
         if entry is None:
+            if cleared:
+                # Vừa xoá dữ liệu thì không thể đang đăng nhập sẵn.
+                return {"ok": False, "host": host, "url": page.url, "status": "no_button",
+                        "detail": "Không tìm thấy nút đăng nhập bằng Google"}
             return {"ok": True, "host": host, "url": page.url, "status": "already",
                     "detail": "Không thấy nút đăng nhập — có thể đã đăng nhập sẵn"}
         with contextlib.suppress(Exception):
@@ -592,39 +713,66 @@ async def site_login(ctx, page, url: str, ident: dict, timeout: float = 90) -> d
     with contextlib.suppress(Exception):
         await button.click()
     gpage = await _google_page(ctx, page, before)
+    done: set[str] = set()
     if gpage is None:
         await _settle(page, 2000)
-        ok = accounts.domain_of(page.url) == host
-        return {"ok": ok, "host": host, "url": page.url, "status": "done" if ok else "error",
-                "detail": "" if ok else "Bấm nút Google nhưng không thấy trang Google"}
+        return await _site_outcome(ctx, page, host, ident, done, first_account, "silent",
+                                   "Bấm nút Google nhưng không thấy trang Google")
+    flow = "redirect" if gpage is page else "popup"
 
-    done: set[str] = set()
     deadline = time.monotonic() + timeout
     idle_rounds = 0
     while time.monotonic() < deadline:
         await _settle(gpage, 1200)
-        if gpage.is_closed() or "accounts.google.com" not in (gpage.url or ""):
+        if gpage.is_closed() or not _is_google_login(gpage.url):
             break
-        result = await google_step(gpage, ident, done)
-        if result == "verify":
-            return {"ok": False, "host": host, "url": gpage.url, "status": "verify_required",
-                    "detail": _verify_detail(gpage.url)}
+        result = await google_step(gpage, ident, done, first_account=first_account)
         if result.startswith("error:"):
             return {"ok": False, "host": host, "url": gpage.url, "status": "error",
-                    "detail": result[6:]}
+                    "detail": result[6:], "flow": flow}
         idle_rounds = idle_rounds + 1 if result == "idle" else 0
-        if idle_rounds >= 6:
+        if result == "verify" or idle_rounds >= 6:
+            detail = _verify_detail(gpage.url) if result == "verify" else "Trang Google lạ, cần thao tác tay"
+            if headed:
+                applog.log(f"google-sso: {host} chờ thao tác tay tối đa {verify_wait_seconds()}s", "warn")
+                if await _wait_left_google(gpage, verify_wait_seconds()):
+                    break
+                detail = "Chưa xác minh xong trong thời gian chờ"
             return {"ok": False, "host": host, "url": gpage.url, "status": "verify_required",
-                    "detail": "Trang Google lạ, cần thao tác tay"}
+                    "detail": detail, "flow": flow}
     else:
         return {"ok": False, "host": host, "url": page.url, "status": "error",
-                "detail": "Hết thời gian chờ Google"}
+                "detail": "Hết thời gian chờ Google", "flow": flow}
 
     await _settle(page, 3000)
-    still_button = await _find_google_button(page)
-    ok = accounts.domain_of(page.url) == host and still_button is None
-    return {"ok": ok, "host": host, "url": page.url, "status": "done" if ok else "unsure",
-            "detail": "" if ok else "Đã qua Google nhưng web vẫn hiện nút đăng nhập — kiểm tra tay"}
+    return await _site_outcome(ctx, page, host, ident, done, first_account, flow,
+                               "Đã qua Google nhưng web vẫn hiện nút đăng nhập — kiểm tra tay")
+
+
+async def site_login(ctx, page, url: str, ident: dict, timeout: float = 90, *,
+                     clear_data: bool = False, first_account: bool = False,
+                     headed: bool = False) -> dict:
+    """Đăng nhập `url` bằng Google. {ok, host, url, detail, status, flow?, google_account?}.
+
+    `headed`: gặp bước chỉ người làm được thì chờ ngay trong lời gọi này.
+    """
+    host = accounts.domain_of(url)
+    cleared = False
+    note = ""
+    if clear_data:
+        if _shares_google_session(host):
+            note = "Không xoá dữ liệu: domain của Google dùng chung phiên Google"
+        else:
+            try:
+                await clear_site_data(ctx, page, host)
+            except Exception as error:
+                return {"ok": False, "host": host, "url": url, "status": "error",
+                        "detail": f"Không xoá được dữ liệu của {host}: {error}"}
+            cleared = True
+    out = await _site_flow(ctx, page, url, host, ident, timeout, cleared, first_account, headed)
+    if note:
+        out["detail"] = f"{note}. {out['detail']}" if out.get("detail") else note
+    return out
 
 
 # --------------------------------------------------------------------- service
@@ -712,7 +860,7 @@ class GoogleAuthService:
                 result = await check_session(ctx, page)
                 if result["status"] != "signed_in":
                     applog.log(f"google: profile '{row['name']}' {result['status']} — tự đăng nhập")
-                    result = await login_google(ctx, page, ident)
+                    result = await login_google(ctx, page, ident, manual=headed and wait_verify)
                 if result["status"] == "verify_required" and headed and wait_verify:
                     keep = True
                     self._waiters[pid] = asyncio.create_task(
@@ -738,23 +886,31 @@ class GoogleAuthService:
                 await self.pool.close_tab(name, TAB_SLUG)
 
     async def sites(self, row: dict, targets: list[str], *, headed: bool = False,
-                    register: bool = True, label: str = "") -> list[dict]:
+                    register: bool = True, label: str = "", clear_data: bool = False,
+                    first_account: bool = False) -> list[dict]:
         pid = int(row["id"])
         ident = await asyncio.to_thread(secrets_of, pid) or {}
+        explicit_label = label
         label = label or _label_from_email(ident.get("email") or "") or "google"
         results = []
         async with self._lock(pid):
+            if clear_data and self.pool.profile_busy(row["name"]):
+                raise GoogleBusy(f"Profile '{row['name']}' đang chạy request — xoá dữ liệu lúc này "
+                                 "sẽ làm request đó mất đăng nhập. Chờ xong rồi thử lại.")
             async with self._profile_page(row, SSO_SLUG, headed=headed) as (ctx, page, opened):
                 before = {id(p) for p in ctx.pages}
                 for target in targets:
                     url = self.resolve_url(target)
                     try:
-                        res = await site_login(ctx, page, url, ident)
+                        res = await site_login(ctx, page, url, ident, clear_data=clear_data,
+                                               first_account=first_account, headed=headed)
                     except Exception as error:
                         res = {"ok": False, "host": accounts.domain_of(url), "url": url,
                                "status": "error", "detail": str(error)}
                     if res["ok"] and register and res["host"]:
-                        acc = await asyncio.to_thread(profiles.add_account, pid, res["host"], label)
+                        acc_label = (explicit_label
+                                     or _label_from_email(res.get("google_account") or "") or label)
+                        acc = await asyncio.to_thread(profiles.add_account, pid, res["host"], acc_label)
                         res["account"] = acc
                     applog.log(f"google-sso: '{row['name']}' {res['host']} → {res['status']}"
                                + (f" ({res['detail']})" if res.get("detail") else ""),
@@ -765,8 +921,7 @@ class GoogleAuthService:
                     if id(p) not in before and not p.is_closed():
                         with contextlib.suppress(Exception):
                             await p.close()
-            keep = headed and any(r["status"] == "verify_required" for r in results)
-            await self._cleanup(row, SSO_SLUG, opened, keep=keep)
+            await self._cleanup(row, SSO_SLUG, opened, keep=False)
         return results
 
     def resolve_url(self, target: str) -> str:

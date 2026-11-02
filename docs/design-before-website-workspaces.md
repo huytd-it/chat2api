@@ -138,12 +138,12 @@ Mục tiêu: selector mỏng ban đầu (1c) được bổ sung thành trace gi�
 
 ```
 page JS --enriched RECORDER_JS--> __c2aRecord --> trace_sink --> job["trace"]
-  --> trace_writer.py (atomic write) --> data/traces/<jobId>-<slug>.{json,md}
+  --> trace_writer.py (atomic write) --> data/traces/<domain>/<YYYY-MM-DD_HH-MM-SS>-<slug>.{json,md}
   --> analyzer vẫn dùng RAM như cũ  +  GET /admin/record/{id}/trace(.json/.md)  +  GET /admin/traces
   --> CLI đọc filesystem nếu cùng máy hoặc qua API nếu remote; desktop nút Tải trace
 ```
 
-- `data/traces/<jobId>-<slug>.{json,md}` giữ **vĩnh viễn** (không TTL), theo `CHAT2API_DATA_DIR` (`config.py:traces_dir`).
+- `data/traces/<domain>/<YYYY-MM-DD_HH-MM-SS>-<slug>.{json,md}` giữ **vĩnh viễn** (không TTL), theo `CHAT2API_DATA_DIR` (`config.py:traces_dir`).
 - `.json`: `{metadata:{jobId,slug,url,profile,startedAt,finishedAt,flows}, events:[{kind,selector,selectors:{primary,parent,grandparent,cssPath,xpath},attributes:{id,class,data-testid,role,aria-*},bbox:{x,y,w,h},text:{innerText≤500,outerHTML≤2000},frame:{url,chain},shadow:{hostSelector,depth},snapshotDiff≤10000, value≤8000, flow, ts, url, tag, label}], snapshot?:string}`.
 - `.md`: Metadata bảng + Tóm tắt theo flow + Events (bảng selectors/attrs/bbox + code `outerHTML` + `snapshotDiff`) + Snapshot cuối + Gợi ý recipe + banner PII. Do `recorder.py:format_trace_as_markdown` sinh.
 - Persist trước `login_manager.complete()` và cả trên `cancel`/`record_timeout` để không mất trace khi người dùng huỷ. Ghi atomic (temp + rename).

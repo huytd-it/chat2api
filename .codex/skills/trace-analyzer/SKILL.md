@@ -10,7 +10,7 @@ allowed-tools: [read, bash, edit, write, grep, glob]
 
 ## Khi nào dùng
 
-- Desktop/server vừa ghi thao tác xong (`data/traces/<jobId>-<slug>.{json,md}`).
+- Desktop/server vừa ghi thao tác xong (`data/traces/<domain>/<YYYY-MM-DD_HH-MM-SS>-<slug>.{json,md}`).
 - Recipe chạy lỗi / selector gãy — cần đọc trace để sửa `recipe.yaml`.
 - Muốn sinh recipe mới hoàn toàn từ trace thay vì analyzer tự động.
 
@@ -18,7 +18,7 @@ allowed-tools: [read, bash, edit, write, grep, glob]
 
 ```
 page JS  —enriched RECORDER_JS→  __c2aRecord  →  trace_sink  →  job["trace"]
-  → trace_writer.py (atomic)  →  data/traces/<jobId>-<slug>.{json,md}
+  → trace_writer.py (atomic)  →  data/traces/<domain>/<YYYY-MM-DD_HH-MM-SS>-<slug>.{json,md}
   → GET /admin/record/{id}/trace(.json/.md)  +  GET /admin/traces
 ```
 
@@ -37,8 +37,8 @@ page JS  —enriched RECORDER_JS→  __c2aRecord  →  trace_sink  →  job["tra
 
 ```bash
 # Cùng máy (nhanh, không cần server chạy)
-ls data/traces/
-cat "data/traces/<jobId>-<slug>.md"
+ls -R data/traces/
+cat "data/traces/<domain>/<YYYY-MM-DD_HH-MM-SS>-<slug>.md"
 
 # Remote hoặc muốn JSON giàu
 curl -H "Authorization: Bearer $KEY" http://127.0.0.1:8100/admin/traces

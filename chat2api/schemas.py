@@ -414,6 +414,10 @@ class GoogleSitesRequest(BaseModel):
     # Đăng nhập xong thì khai báo luôn account profile × domain.
     add_account: bool = True
     label: str = ""
+    # Xoá cookie và dữ liệu của domain trước khi đăng nhập (giữ phiên Google).
+    clear_data: bool = False
+    # Luôn bấm account đầu tiên trong bảng chọn của Google.
+    first_account: bool = False
 
 
 class SettingsRequest(BaseModel):
