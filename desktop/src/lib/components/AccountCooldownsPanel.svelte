@@ -155,7 +155,7 @@
             </span>
           {/if}
           {#if c.conversation_url}
-            <a class="text-xs text-sky-600 underline" href={c.conversation_url} target="_blank" rel="noreferrer" title={c.conversation_url}>
+            <a class="text-xs text-primary underline" href={c.conversation_url} target="_blank" rel="noreferrer" title={c.conversation_url}>
               Mở lại hội thoại
             </a>
           {/if}

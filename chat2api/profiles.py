@@ -763,6 +763,32 @@ def remove_account(account_id: int) -> bool:
     return True
 
 
+def domain_recipes(host: str) -> list[str]:
+    """Recipe trong DB trỏ vào domain, kể cả recipe đang lỗi nên router chưa nạp."""
+    db = store.default()
+    if db is None:
+        return []
+    rows = db.query(
+        "SELECT r.slug FROM recipe r JOIN domain d ON d.id = r.domain_id WHERE d.host = ?",
+        (host,))
+    return sorted(row["slug"] for row in rows)
+
+
+def delete_domain(host: str) -> bool:
+    """Xoá hàng domain cùng mọi account của nó. False khi DB không có domain này."""
+    db = store.default()
+    if db is None:
+        return False
+    conn = db.connection()
+    with conn:
+        # Xoá account tường minh để không phụ thuộc vào cascade của kết nối.
+        conn.execute(
+            "DELETE FROM account WHERE domain_id IN (SELECT id FROM domain WHERE host = ?)",
+            (host,))
+        cursor = conn.execute("DELETE FROM domain WHERE host = ?", (host,))
+    return cursor.rowcount > 0
+
+
 def known_hosts() -> list[str]:
     """Mọi domain DB từng thấy — nguồn cho dropdown gợi ý ở dialog thêm account."""
     db = store.default()

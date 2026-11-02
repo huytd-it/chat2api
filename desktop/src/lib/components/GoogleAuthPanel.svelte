@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import { apiKey, showToast } from "../stores";
   import { refreshProfiles } from "../sync";
   import {
@@ -16,22 +16,34 @@
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Switch } from "$lib/components/ui/switch";
-  import { Badge, type BadgeVariant } from "$lib/components/ui/badge";
+  import { Badge } from "$lib/components/ui/badge";
+  import { GOOGLE_SITE_RESULT, GOOGLE_STATUS } from "./profiles/profile-utils";
   import { Checkbox } from "$lib/components/ui/checkbox";
+  import * as AlertDialog from "$lib/components/ui/alert-dialog";
   import { ArrowsClockwise, Browser, CircleNotch, GoogleLogo, PencilSimple, ShieldWarning, SignIn, Trash } from "phosphor-svelte";
 
   interface Props {
     profile: ProfileInfo;
     /** Mọi site đã biết (domain có recipe/account) — để chọn nhanh khi SSO. */
     sites: string[];
+    /** Báo trạng thái lên cho danh sách profile. */
+    onstatus?: (state: { identity: GoogleIdentity | null; waiting: boolean }) => void;
   }
-  let { profile, sites }: Props = $props();
+  let { profile, sites, onstatus }: Props = $props();
 
   let identity = $state<GoogleIdentity | null>(null);
   let waiting = $state(false);
   let busy = $state<"" | "check" | "login" | "verify" | "save" | "sites">("");
   let editing = $state(false);
   let ssoOpen = $state(false);
+  let confirmRemove = $state(false);
+
+  // untrack: callback của cha đọc state của chính nó, không được thành dependency
+  // của effect này, nếu không ghi state xong effect sẽ tự chạy lại vô hạn.
+  $effect(() => {
+    const state = { identity, waiting };
+    untrack(() => onstatus?.(state));
+  });
 
   let email = $state("");
   let password = $state("");
@@ -46,13 +58,7 @@
 
   let poll: ReturnType<typeof setInterval> | null = null;
 
-  const STATUS: Record<string, { label: string; variant: BadgeVariant }> = {
-    signed_in: { label: "Đã đăng nhập", variant: "success" },
-    signed_out: { label: "Chưa đăng nhập", variant: "outline" },
-    verify_required: { label: "Cần xác minh", variant: "warning" },
-    error: { label: "Lỗi", variant: "destructive" },
-    unknown: { label: "Chưa kiểm tra", variant: "outline" },
-  };
+  const STATUS = GOOGLE_STATUS;
   const status = $derived(STATUS[identity?.status ?? "unknown"] ?? STATUS.unknown);
   // Site chưa gắn vào profile — thứ cần đăng nhập bằng Google nhất.
   const missingSites = $derived(sites.filter((h) => !profile.accounts.some((a) => a.host === h)));
@@ -181,13 +187,10 @@
     return new Date(ts).toLocaleString();
   }
 
-  const RESULT: Record<string, string> = {
-    done: "Đã đăng nhập", already: "Có vẻ đã đăng nhập sẵn", unsure: "Chưa chắc",
-    no_button: "Không thấy nút Google", verify_required: "Cần xác minh", error: "Lỗi",
-  };
+  const RESULT = GOOGLE_SITE_RESULT;
 </script>
 
-<section class="mt-3 grid gap-3 rounded-lg border bg-muted/10 p-3" aria-label={`Google của ${profile.name}`}>
+<section class="grid gap-3 border-t pt-5" aria-label={`Google của ${profile.name}`}>
   <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
     <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2 text-sm">
       <GoogleLogo size={16} class="shrink-0 text-muted-foreground" />
@@ -195,7 +198,7 @@
       <Badge variant={status.variant}>{waiting ? "Đang chờ xác minh…" : status.label}</Badge>
       {#if identity?.signed_in_as}<span class="truncate font-data text-xs text-muted-foreground">{identity.signed_in_as}</span>
       {:else if identity?.email}<span class="truncate font-data text-xs text-muted-foreground">{identity.email}</span>{/if}
-      <span class="text-xs text-muted-foreground">· {when(identity?.checked_at)}</span>
+      {#if identity?.checked_at}<span class="text-xs text-muted-foreground">· {when(identity.checked_at)}</span>{/if}
       {#if identity?.email && identity.auto_login}<span class="text-xs text-muted-foreground">· tự đăng nhập</span>{/if}
     </div>
     <div class="flex flex-wrap gap-1.5">
@@ -230,7 +233,7 @@
       <div class="flex flex-wrap gap-2 sm:col-span-2">
         <Button type="submit" size="sm" disabled={!!busy}>{#if busy === "save"}<CircleNotch class="animate-spin" />{/if} Lưu</Button>
         <Button type="button" variant="ghost" size="sm" onclick={() => (editing = false)}>Huỷ</Button>
-        {#if identity?.email}<Button type="button" variant="ghost" size="sm" class="ml-auto text-destructive" disabled={!!busy} onclick={remove}><Trash /> Xoá tài khoản Google</Button>{/if}
+        {#if identity?.email}<Button type="button" variant="ghost" size="sm" class="ml-auto text-destructive" disabled={!!busy} onclick={() => (confirmRemove = true)}><Trash /> Xoá tài khoản Google</Button>{/if}
       </div>
     </form>
   {/if}
@@ -268,3 +271,16 @@
     </div>
   {/if}
 </section>
+
+<AlertDialog.Root bind:open={confirmRemove}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Xoá tài khoản Google của {profile.name}?</AlertDialog.Title>
+      <AlertDialog.Description>Email, mật khẩu và TOTP đã lưu ở server sẽ bị xoá nên server không tự đăng nhập lại được nữa. Phải khai báo lại nếu cần dùng.</AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Hủy</AlertDialog.Cancel>
+      <AlertDialog.Action variant="destructive" onclick={() => { confirmRemove = false; remove(); }}>Xoá tài khoản</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>

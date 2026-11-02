@@ -305,6 +305,46 @@ async def test_domains_endpoint_merges_disk_and_recipes(client):
     assert domains["chat.qwen.ai"]["accounts"] == 1
 
 
+async def test_delete_domain_removes_accounts_and_saved_state(client):
+    c, app, db, cfg = client
+    created = (await _create(c, "main")).json()
+    await c.post(f"/admin/profiles/{created['id']}/accounts",
+                 json={"domain": "old.example", "label": "a"})
+    state_dir = cfg.recipes_dir / ".accounts" / "old.example"
+    state_dir.mkdir(parents=True)
+    (state_dir / "a.json").write_text('{"cookies": [], "origins": []}', encoding="utf-8")
+
+    assert (await c.delete("/admin/domains/old.example")).status_code == 200
+
+    hosts = [d["host"] for d in (await c.get("/admin/domains")).json()["domains"]]
+    assert "old.example" not in hosts
+    assert not state_dir.exists()
+    profile = (await c.get("/admin/profiles")).json()["profiles"][0]
+    assert profile["accounts"] == []
+
+
+async def test_delete_domain_refuses_when_a_recipe_uses_it(client):
+    c, app, db, cfg = client
+    _write_recipe(cfg.recipes_dir)
+    app.state.router.reload()
+    state_dir = cfg.recipes_dir / ".accounts" / "site.example"
+    state_dir.mkdir(parents=True)
+    (state_dir / "a.json").write_text('{"cookies": [], "origins": []}', encoding="utf-8")
+
+    response = await c.delete("/admin/domains/site.example")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "domain_in_use"
+    assert state_dir.exists()
+
+
+async def test_delete_domain_rejects_unknown_and_invalid_hosts(client):
+    c, *_ = client
+    assert (await c.delete("/admin/domains/missing.example")).status_code == 404
+    assert (await c.delete("/admin/domains/..")).status_code in (400, 404, 405)
+    assert (await c.delete("/admin/domains/bad..host")).status_code == 400
+
+
 async def test_clone_duplicates_logins_and_accounts_into_a_new_mode(client):
     """Đường "đổi sang stealthy mà vẫn giữ bản dynamic đang chạy tốt"."""
     c, app, db, cfg = client

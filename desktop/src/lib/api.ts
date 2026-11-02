@@ -1644,6 +1644,13 @@ export async function removeDomainProfile(key: string, host: string, ident: stri
   await asJson(r);
 }
 
+/** Xoá domain không có recipe, cùng account và state đăng nhập đã lưu của nó. */
+export async function deleteDomain(key: string, host: string): Promise<void> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/domains/" + encodeURIComponent(host), { method: "DELETE", headers: headers(key) });
+  await asJson(r);
+}
+
 /** Mọi domain đã biết (DB + đĩa + recipe) — gợi ý cho ô Domain của dialog. */
 export async function fetchDomains(key: string): Promise<DomainInfo[]> {
   const base = await apiBase();

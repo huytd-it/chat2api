@@ -2658,6 +2658,31 @@ def register_admin(app: FastAPI, admin) -> None:
              "recipes": sorted(usage.get(host, []))}
             for host in hosts]}
 
+    @admin.delete("/domains/{host}")
+    async def domain_delete(host: str, request: Request):
+        """Xoá domain không recipe nào dùng, cùng account và state đăng nhập đã lưu.
+
+        Cookie nằm trong thư mục Chromium của profile không bị đụng tới: đó là
+        dữ liệu của profile và không thể tách riêng theo domain một cách an toàn.
+        """
+        cfg = request.app.state.cfg
+        host = host.strip().lower()
+        if not accounts.valid_domain(host):
+            raise OpenAIError(400, "invalid_domain", "Domain không hợp lệ")
+        recipes = set(_domain_usage(request).get(host, []))
+        recipes.update(await asyncio.to_thread(profiles.domain_recipes, host))
+        if recipes:
+            raise OpenAIError(
+                409, "domain_in_use",
+                f"Domain '{host}' đang được recipe dùng: {', '.join(sorted(recipes))} — "
+                "xoá recipe trước.")
+        in_db = await asyncio.to_thread(profiles.delete_domain, host)
+        on_disk = await asyncio.to_thread(accounts.delete_domain_store, cfg.recipes_dir, host)
+        if not (in_db or on_disk):
+            raise OpenAIError(404, "not_found", f"Domain '{host}' không tồn tại")
+        applog.log(f"account: xóa domain '{host}'", "warn")
+        return {"ok": True}
+
     @admin.get("/accounts")
     async def list_all_accounts(request: Request):
         # Account thuộc về domain chứ không thuộc recipe: mọi recipe cùng domain

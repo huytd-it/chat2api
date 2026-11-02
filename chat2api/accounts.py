@@ -73,6 +73,17 @@ def delete_account(recipes_dir: Path, domain: str, name: str) -> bool:
     return True
 
 
+def delete_domain_store(recipes_dir: Path, domain: str) -> bool:
+    """Xoá cả thư mục state đăng nhập của domain. Còn sót thì domain sẽ hiện lại."""
+    if not valid_domain(domain):
+        return False
+    directory = domain_dir(recipes_dir, domain)
+    if not directory.is_dir():
+        return False
+    shutil.rmtree(directory)
+    return True
+
+
 def migrate_legacy(recipes_dir: Path) -> list[str]:
     """Chép account kiểu cũ (`<slug>/auth/*.json`) vào kho chung theo domain.
 

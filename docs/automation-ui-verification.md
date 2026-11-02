@@ -66,6 +66,15 @@ unique request IDs, model change opening a new session, unresolved errors not
   resending automatically, and keyboard containment/Escape for the narrow context
   drawer. These are client behavior tests, not website certification.
 
+Browser profiles page, also with fully intercepted API fixtures (needs only the
+frontend dev server; never opens a real profile):
+
+```powershell
+$env:UI_BASE_URL='http://localhost:5199'
+$env:CHAT2API_BROWSER_EXECUTABLE='<installed supported Chromium executable>'
+node desktop/scripts/test-profiles-ui.mjs
+```
+
 The actual native EXE was also launched and captured successfully after replacing
 the running build. Its final capture, with account counts loaded, is
 `%LOCALAPPDATA%/Temp/opencode/website-ui-native-final.png`.

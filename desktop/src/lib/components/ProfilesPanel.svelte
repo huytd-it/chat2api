@@ -1,36 +1,66 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { goto } from "$app/navigation";
+  import { page } from "$app/state";
   import { apiKey, showToast } from "../stores";
-  import { cooldowns, ensureProfiles, profiles, profilesError, profilesLoading, profilesMeta, refreshCooldowns, refreshProfiles, domains, ensureDomains, refreshDomains, isAccountLocked } from "../sync";
-  import { cloneProfile, closeProfile, createProfile, deleteProfile, detectProfileDomains, exportProfile, fetchGoogleIdentity, fetchRemoteProfiles, importProfile, loginGoogle, openProfile, removeProfileAccount, saveGoogleIdentity, updateProfile, type ProfileBundle, type ProfileInfo, type RemoteProfile } from "../api";
+  import { cooldowns, ensureProfiles, profiles, profilesError, profilesLoading, profilesMeta, refreshCooldowns, refreshProfiles, domains, ensureDomains, refreshDomains } from "../sync";
+  import { closeProfile, deleteDomain, deleteProfile, detectProfileDomains, exportProfile, openProfile, removeProfileAccount, type ProfileAccount, type ProfileInfo } from "../api";
   import AccountDialog from "./AccountDialog.svelte";
   import AccountCooldownsPanel from "./AccountCooldownsPanel.svelte";
   import GoogleAuthPanel from "./GoogleAuthPanel.svelte";
-  import { Button } from "$lib/components/ui/button";
-  import { Input } from "$lib/components/ui/input";
-  import { Switch } from "$lib/components/ui/switch";
+  import ProfilesTable from "./profiles/ProfilesTable.svelte";
+  import DomainsTable from "./profiles/DomainsTable.svelte";
+  import ProfilesBulkBar from "./profiles/ProfilesBulkBar.svelte";
+  import ProfilesBulkDialog, { type BulkRequest } from "./profiles/ProfilesBulkDialog.svelte";
+  import ProfileDetail from "./profiles/ProfileDetail.svelte";
+  import ProfileSites from "./profiles/ProfileSites.svelte";
+  import ProfileCreateDialog from "./profiles/ProfileCreateDialog.svelte";
+  import ProfileImportDialog from "./profiles/ProfileImportDialog.svelte";
+  import ProfileCloneDialog from "./profiles/ProfileCloneDialog.svelte";
+  import ProfileSettingsSheet from "./profiles/ProfileSettingsSheet.svelte";
+  import { isDomainDeletable, type BulkAction, type GoogleState } from "./profiles/profile-utils";
   import { Badge } from "$lib/components/ui/badge";
+  import { Button } from "$lib/components/ui/button";
+  import * as Tabs from "$lib/components/ui/tabs";
   import { Checkbox } from "$lib/components/ui/checkbox";
   import * as Card from "$lib/components/ui/card";
-  import * as Select from "$lib/components/ui/select";
+  import * as Collapsible from "$lib/components/ui/collapsible";
   import * as AlertDialog from "$lib/components/ui/alert-dialog";
-  import { Browser, Check, CircleNotch, Copy, DownloadSimple, FolderOpen, LockKey, MagnifyingGlass, PencilSimple, Plus, Star, Trash, UploadSimple, UserCircle, WarningCircle, X } from "phosphor-svelte";
+  import { Browser, CaretDown, CircleNotch, FolderOpen, Plus, UploadSimple, UserCircle, WarningCircle, X } from "phosphor-svelte";
 
-  let creating = $state(false); let newName = $state(""); let newMaxTabs = $state(4); let newHeadless = $state(true); let newMode = $state("dynamic"); let creatingBusy = $state(false);
-  let busyIds = $state<Set<number>>(new Set());
-  // Gmail + mật khẩu gắn với profile: server dùng để tự điền khi đăng nhập Google.
-  let newGmail = $state(""); let newGmailPass = $state(""); let newGoogleNow = $state(true);
-  let editGmail = $state(""); let editGmailPass = $state(""); let editHasPass = $state(false); let editGoogleNow = $state(false);
+  // Tab nằm trên URL để link "?tab=locks" từ bảng và nút Back đều đúng.
+  const TABS = ["profiles", "domains", "locks"];
+  // Primitive style theo data-active nhưng Bits UI phát data-state="active".
+  const TAB_ACTIVE = "px-2.5 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm dark:data-[state=active]:border-input dark:data-[state=active]:bg-input/30 dark:data-[state=active]:text-foreground";
+  const tab = $derived(TABS.includes(page.url.searchParams.get("tab") ?? "") ? page.url.searchParams.get("tab")! : "profiles");
+  function setTab(value: string) { goto(`?tab=${value}`, { replaceState: true, noScroll: true, keepFocus: true }); }
+
+  let checkedProfiles = $state<Set<number>>(new Set());
+  let checkedDomains = $state<Set<string>>(new Set());
+  let bulkRequest = $state<BulkRequest | null>(null);
+  let selectedId = $state<number | null>(null);
+  let detailEl = $state<HTMLElement | null>(null);
+  // Hành động đang chạy theo từng profile, để nút đúng chỗ hiện spinner.
+  let busyActions = $state<Record<number, string>>({});
+  let googleStates = $state<Record<number, GoogleState>>({});
   // Tăng lên để GoogleAuthPanel của profile đó nạp lại trạng thái.
   let googleRev = $state<Record<number, number>>({});
-  let editingId = $state<number | null>(null); let editMaxTabs = $state(4); let editHeadless = $state(true); let editMode = $state("dynamic"); let editNotes = $state("");
-  let cloningId = $state<number | null>(null); let cloneName = $state(""); let cloneMode = $state("dynamic");
   let watchProfiles = $state<Set<string>>(new Set());
-  let suggestions = $state<Record<number, string[]>>({}); let dialogProfile = $state<string | null>(null); let dialogDomain = $state("");
-  let deleteTarget = $state<ProfileInfo | null>(null); let purgeChecked = $state(false); let panelError = $state("");
-  let importing = $state(false); let importSource = $state<"file" | "remote">("file"); let importBusy = $state(false); let importName = $state("");
-  let importBundle = $state<ProfileBundle | null>(null);
-  let remoteUrl = $state(""); let remoteKey = $state(""); let remoteList = $state<RemoteProfile[] | null>(null); let remotePick = $state(""); let remoteLoading = $state(false);
+  let suggestions = $state<Record<number, string[]>>({});
+  let panelError = $state("");
+  let creating = $state(false);
+  let importing = $state(false);
+  let settingsId = $state<number | null>(null);
+  let cloningId = $state<number | null>(null);
+  let dialogProfile = $state<string | null>(null);
+  let dialogDomain = $state("");
+  let deleteTarget = $state<ProfileInfo | null>(null);
+  let purgeChecked = $state(false);
+  let removeTarget = $state<{ profile: ProfileInfo; account: ProfileAccount } | null>(null);
+
+  const selected = $derived($profiles.find((p) => p.id === selectedId) ?? $profiles[0] ?? null);
+  const settingsProfile = $derived($profiles.find((p) => p.id === settingsId) ?? null);
+  const cloningProfile = $derived($profiles.find((p) => p.id === cloningId) ?? null);
 
   const allSites = $derived(
     [...new Set([
@@ -40,197 +70,329 @@
     ])].sort((a, b) => a.localeCompare(b)),
   );
 
-  const liveSuggestions = $derived(
-    Object.fromEntries(
-      Object.entries(suggestions).map(([id, hosts]) => [
-        id,
-        hosts.filter((h) => !$profiles.find((p) => p.id === Number(id))?.accounts.some((a) => a.host === h)),
-      ]),
-    ),
+  const selectedSuggestions = $derived(
+    selected ? (suggestions[selected.id] ?? []).filter((h) => !selected.accounts.some((a) => a.host === h)) : [],
   );
 
-  // Panel này chạy ở hai chỗ: tab Profiles của /integrations (trang đó có
-  // bootstrap riêng) và route /profiles đứng một mình (không có bootstrap nào).
-  // Trước đây nó chỉ nạp lại sau mỗi thao tác, nên mở thẳng /profiles là thấy
-  // danh sách rỗng dù kho vẫn còn profile. ensureProfiles() lo cả hai đường mà
-  // không gọi API hai lần. Kèm ensureDomains() để có đủ toàn bộ site cho ma
-  // trận profile × site bên dưới.
+  // Panel này chạy ở route /profiles đứng một mình (không có bootstrap nào).
+  // ensureProfiles() lo nạp danh sách mà không gọi API hai lần; ensureDomains()
+  // cho đủ toàn bộ site để gợi ý gắn vào profile.
   onMount(() => { ensureProfiles(); ensureDomains(); refreshCooldowns(); });
 
-  function openAddAccount(p: ProfileInfo, host: string) { dialogProfile = p.name; dialogDomain = host; }
-  function closeAccountDialog() { dialogProfile = null; dialogDomain = ""; }
-
-  function setBusy(id: number, on: boolean) {
-    const next = new Set(busyIds);
-    if (on) next.add(id); else next.delete(id);
-    busyIds = next;
-  }
+  function fail(e: unknown) { panelError = (e as Error).message; showToast(panelError); }
+  function bumpGoogle(id: number) { googleRev = { ...googleRev, [id]: (googleRev[id] ?? 0) + 1 }; }
   function watchOpen(name: string) { watchProfiles = new Set(watchProfiles).add(name); }
   function watchClose(name: string) { const next = new Set(watchProfiles); next.delete(name); watchProfiles = next; }
 
-  // Ba chế độ fetcher của Scrapling; fetcher chỉ gửi HTTP nên không mở được cửa sổ.
-  function modeLabel(mode: string): string { return mode === "stealthy" ? "Stealthy" : mode === "fetcher" ? "Fetcher" : "Dynamic"; }
-  function statusOf(p: ProfileInfo): { label: string; cls: string } { if (p.locked && !p.open) return { label: "Bị khoá", cls: "bg-destructive" }; if (p.open) return { label: `Đang chạy · ${p.tabs} tab`, cls: "bg-success" }; return { label: "Rảnh", cls: "bg-muted-foreground" }; }
-  function fail(e: unknown) { panelError = (e as Error).message; showToast(panelError); }
-  function bumpGoogle(id: number) { googleRev = { ...googleRev, [id]: (googleRev[id] ?? 0) + 1 }; }
-  const GMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  /** Lưu Gmail/mật khẩu cho profile; `loginNow` mở cửa sổ và tự điền ngay (chạy nền). */
-  async function saveGmail(id: number, name: string, gmail: string, pass: string, loginNow: boolean) {
-    await saveGoogleIdentity($apiKey, id, { email: gmail, password: pass || undefined, auto_login: true });
-    bumpGoogle(id);
-    if (!loginNow) return;
-    showToast(`${name}: đang mở cửa sổ và tự điền Gmail — Google đòi xác minh thì làm tiếp trong cửa sổ đó`);
-    loginGoogle($apiKey, id, true)
-      .then((res) => { bumpGoogle(id); if (!res.identity.waiting) showToast(`${name}: Google ${res.identity.status === "signed_in" ? "đã đăng nhập" : res.identity.detail || res.identity.status}`); })
-      .catch(fail);
+  // Selection chỉ giữ những gì còn tồn tại: profile/domain có thể biến mất sau khi refresh.
+  const liveProfileIds = $derived($profiles.filter((p) => checkedProfiles.has(p.id)).map((p) => p.id));
+  const liveHosts = $derived(allSites.filter((h) => checkedDomains.has(h)));
+  function bulkFromProfiles(action: BulkAction) { bulkRequest = { action, profileIds: liveProfileIds }; }
+  function bulkFromDomains(action: BulkAction) { bulkRequest = { action, hosts: liveHosts }; }
+
+  let deleteHosts = $state<string[]>([]);
+  let deletingDomains = $state(false);
+  const deletableHosts = $derived(liveHosts.filter((h) => isDomainDeletable($domains, h)));
+  // Nói rõ trước khi xoá: đây là phần không lấy lại được.
+  const deleteImpact = $derived({
+    attached: $profiles.flatMap((p) => p.accounts).filter((a) => deleteHosts.includes(a.host)).length,
+    saved: $domains.filter((d) => deleteHosts.includes(d.host)).reduce((sum, d) => sum + d.accounts, 0),
+  });
+
+  async function confirmDeleteDomains() {
+    const hosts = deleteHosts;
+    deleteHosts = [];
+    deletingDomains = true;
+    panelError = "";
+    const failures: string[] = [];
+    for (const host of hosts) {
+      try {
+        await deleteDomain($apiKey, host);
+      } catch (e) {
+        failures.push(`${host}: ${(e as Error).message}`);
+      }
+    }
+    // Xoá khỏi kết quả dò, nếu không host vẫn hiện lại trong bảng.
+    const gone = new Set(hosts.filter((h) => !failures.some((f) => f.startsWith(`${h}:`))));
+    suggestions = Object.fromEntries(Object.entries(suggestions).map(([id, list]) => [id, list.filter((h) => !gone.has(h))]));
+    await Promise.all([refreshDomains(), refreshProfiles()]);
+    deletingDomains = false;
+    if (failures.length) panelError = `Không xóa được ${failures.length}/${hosts.length} domain — ${failures.join("; ")}`;
+    if (gone.size) showToast(`Đã xóa ${gone.size} domain`);
   }
-  async function onCreate() { const name = newName.trim().toLowerCase(); if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) { panelError = "Tên profile chỉ gồm chữ thường, số và dấu -"; showToast(panelError); return; } const gmail = newGmail.trim().toLowerCase(); if (gmail && !GMAIL_RE.test(gmail)) { panelError = "Gmail không hợp lệ"; showToast(panelError); return; } creatingBusy = true; panelError = ""; try { const created = await createProfile($apiKey, name, { scrapling_mode: newMode, max_tabs: newMaxTabs, headless: newHeadless }); showToast(`Đã tạo profile ${name} (${modeLabel(newMode)})`); if (gmail) await saveGmail(created.id, name, gmail, newGmailPass, newGoogleNow && !!newGmailPass); newName = ""; newGmail = ""; newGmailPass = ""; creating = false; await refreshProfiles(); } catch (e) { fail(e); } finally { creatingBusy = false; } }
-  function startEdit(p: ProfileInfo) { editingId = p.id; editMaxTabs = p.max_tabs; editHeadless = p.headless === 1; editMode = p.scrapling_mode || "dynamic"; editNotes = p.notes ?? ""; editGmail = ""; editGmailPass = ""; editHasPass = false; editGoogleNow = false; fetchGoogleIdentity($apiKey, p.id).then((res) => { if (editingId !== p.id) return; editGmail = res.identity?.email ?? ""; editHasPass = !!res.identity?.has_password; }).catch(() => {}); }
-  // Đổi chế độ KHÔNG đụng tới thư mục Chromium của profile: session mới nhận
-  // đúng `user_data_dir` cũ nên cookie/localStorage đã đăng nhập đi theo. Chỉ
-  // cần nói rõ điều đó, vì "đổi chế độ" nghe như phải đăng nhập lại từ đầu.
-  async function saveEdit(p: ProfileInfo) { const modeChanged = editMode !== (p.scrapling_mode || "dynamic"); const wasOpen = p.open; setBusy(p.id, true); panelError = ""; const gmail = editGmail.trim().toLowerCase(); if (gmail && !GMAIL_RE.test(gmail)) { panelError = "Gmail không hợp lệ"; showToast(panelError); setBusy(p.id, false); return; } try { await updateProfile($apiKey, p.id, { scrapling_mode: editMode, max_tabs: editMaxTabs, headless: editHeadless, notes: editNotes }); if (gmail) await saveGmail(p.id, p.name, gmail, editGmailPass, editGoogleNow && (!!editGmailPass || editHasPass)); editingId = null; await refreshProfiles(); if (modeChanged) showToast(`${p.name} đã chuyển sang ${modeLabel(editMode)} — vẫn dùng lại profile cũ nên toàn bộ đăng nhập giữ nguyên.` + (wasOpen ? " Cửa sổ đang chạy sẽ được mở lại bằng chế độ mới." : "")); } catch (e) { fail(e); } finally { setBusy(p.id, false); } }
-  async function makeDefault(p: ProfileInfo) { setBusy(p.id, true); panelError = ""; try { await updateProfile($apiKey, p.id, { is_default: true }); await refreshProfiles(); } catch (e) { fail(e); } finally { setBusy(p.id, false); } }
-  async function onOpen(p: ProfileInfo) { setBusy(p.id, true); panelError = ""; try { const res = await openProfile($apiKey, p.id); watchOpen(p.name); showToast(res.headless ? `${p.name} đang chạy nền nên không có cửa sổ mới — bấm Đóng rồi Mở lại.` : `Đã mở cửa sổ ${p.name}. Đăng nhập rồi bấm “Dò domain”.`); await refreshProfiles(); } catch (e) { fail(e); } finally { setBusy(p.id, false); } }
-  async function onDetect(p: ProfileInfo) { setBusy(p.id, true); panelError = ""; try { const res = await detectProfileDomains($apiKey, p.id); suggestions = { ...suggestions, [p.id]: res.suggested }; if (!res.suggested.length) showToast(`${p.name}: không có domain nào chưa khai báo.`); } catch (e) { fail(e); } finally { setBusy(p.id, false); } }
-  async function onClose(p: ProfileInfo) { setBusy(p.id, true); panelError = ""; try { await closeProfile($apiKey, p.name); watchClose(p.name); await refreshProfiles(); } catch (e) { fail(e); } finally { setBusy(p.id, false); } }
-  // Nhân bản = copy thư mục Chromium + account sang profile mới: giữ nguyên
-  // đăng nhập mà vẫn có đường lui khi đổi chế độ Scrapling.
-  function startClone(p: ProfileInfo) { cloningId = p.id; editingId = null; cloneName = `${p.name}-copy`; cloneMode = p.scrapling_mode || "dynamic"; }
-  async function onClone(p: ProfileInfo) { const name = cloneName.trim().toLowerCase(); if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) { panelError = "Tên profile chỉ gồm chữ thường, số và dấu -"; showToast(panelError); return; } setBusy(p.id, true); panelError = ""; try { await cloneProfile($apiKey, p.id, name, { scrapling_mode: cloneMode }); showToast(`Đã nhân bản ${p.name} → ${name} (${modeLabel(cloneMode)})`); cloningId = null; await refreshProfiles(); } catch (e) { fail(e); } finally { setBusy(p.id, false); } }
+
+  function select(p: ProfileInfo) {
+    selectedId = p.id;
+    // Chi tiết nằm dưới bảng: đưa người dùng tới phần vừa chọn.
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    detailEl?.scrollIntoView({ block: "nearest", behavior: reduce ? "auto" : "smooth" });
+  }
+
+  async function refreshAndSelect(name: string) {
+    await refreshProfiles();
+    const found = $profiles.find((p) => p.name === name);
+    if (found) selectedId = found.id;
+  }
+
+  /** Bọc một thao tác trên profile: đánh dấu bận, dọn lỗi cũ, báo lỗi mới. */
+  async function run(p: ProfileInfo, action: string, fn: () => Promise<void>) {
+    busyActions = { ...busyActions, [p.id]: action };
+    panelError = "";
+    try {
+      await fn();
+    } catch (e) {
+      fail(e);
+    } finally {
+      const { [p.id]: _done, ...rest } = busyActions;
+      busyActions = rest;
+    }
+  }
+
+  const onOpen = (p: ProfileInfo) => run(p, "open", async () => {
+    const res = await openProfile($apiKey, p.id);
+    watchOpen(p.name);
+    showToast(res.headless ? `${p.name} đang chạy nền nên không có cửa sổ mới — bấm Đóng rồi Mở lại.` : `Đã mở cửa sổ ${p.name}. Đăng nhập rồi bấm “Dò domain”.`);
+    await refreshProfiles();
+  });
+
+  const onDetect = (p: ProfileInfo) => run(p, "detect", async () => {
+    const res = await detectProfileDomains($apiKey, p.id);
+    suggestions = { ...suggestions, [p.id]: res.suggested };
+    if (!res.suggested.length) showToast(`${p.name}: không có domain nào chưa khai báo.`);
+  });
+
+  const onClose = (p: ProfileInfo) => run(p, "close", async () => {
+    await closeProfile($apiKey, p.name);
+    watchClose(p.name);
+    await refreshProfiles();
+  });
+
   // Mang profile sang máy khác. Copy thư mục Chromium không dùng được ở máy khác
   // (cookie bị mã hoá theo máy), nên server đọc đăng nhập qua chính browser rồi
   // gói thành một file JSON; máy đích nạp lại ở lần mở profile đầu tiên.
-  async function onExport(p: ProfileInfo) { setBusy(p.id, true); panelError = ""; try { const bundle = await exportProfile($apiKey, p.id); const url = URL.createObjectURL(new Blob([JSON.stringify(bundle)], { type: "application/json" })); const a = document.createElement("a"); a.href = url; a.download = `${p.name}.chat2api-profile.json`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); showToast(`Đã xuất ${p.name}: ${bundle.accounts.length} account, ${bundle.storage_state?.cookies?.length ?? 0} cookie. File chứa phiên đăng nhập — giữ kín như mật khẩu.`); await refreshProfiles(); } catch (e) { fail(e); } finally { setBusy(p.id, false); } }
-  async function onImportFile(e: Event) { const file = (e.currentTarget as HTMLInputElement).files?.[0]; importBundle = null; if (!file) return; try { const data = JSON.parse(await file.text()); if (data?.format !== "chat2api-profile") throw new Error("không phải file profile của chat2api"); importBundle = data; importName = data.profile?.name ?? ""; panelError = ""; } catch (err) { fail(new Error(`Không đọc được ${file.name}: ${(err as Error).message}`)); } }
-  async function loadRemote() { remoteLoading = true; panelError = ""; try { remoteList = await fetchRemoteProfiles($apiKey, remoteUrl.trim(), remoteKey.trim()); remotePick = remoteList[0]?.name ?? ""; importName = remotePick; } catch (e) { remoteList = null; fail(e); } finally { remoteLoading = false; } }
-  const importReady = $derived(importSource === "file" ? importBundle !== null : remotePick !== "");
-  async function onImport() { const name = importName.trim().toLowerCase(); if (name && !/^[a-z0-9][a-z0-9-]*$/.test(name)) { panelError = "Tên profile chỉ gồm chữ thường, số và dấu -"; showToast(panelError); return; } const source = importSource === "file" ? (importBundle ? { bundle: importBundle } : null) : (remotePick ? { remote: { url: remoteUrl.trim(), apiKey: remoteKey.trim(), profile: remotePick } } : null); if (!source) return; importBusy = true; panelError = ""; try { const res = await importProfile($apiKey, source, name); showToast(`Đã nhập profile ${res.name}: ${res.imported.accounts} account, ${res.imported.cookies} cookie — đăng nhập được nạp vào browser ở lần mở đầu tiên.`); importing = false; importBundle = null; remoteList = null; remotePick = ""; importName = ""; await Promise.all([refreshProfiles(), refreshDomains()]); } catch (e) { fail(e); } finally { importBusy = false; } }
+  const onExport = (p: ProfileInfo) => run(p, "export", async () => {
+    const bundle = await exportProfile($apiKey, p.id);
+    const url = URL.createObjectURL(new Blob([JSON.stringify(bundle)], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${p.name}.chat2api-profile.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Đã xuất ${p.name}: ${bundle.accounts.length} account, ${bundle.storage_state?.cookies?.length ?? 0} cookie. File chứa phiên đăng nhập — giữ kín như mật khẩu.`);
+    await refreshProfiles();
+  });
+
   function requestDelete(p: ProfileInfo) { deleteTarget = p; purgeChecked = false; }
-  async function confirmDelete() { const p = deleteTarget; if (!p) return; const purge = purgeChecked; deleteTarget = null; setBusy(p.id, true); panelError = ""; try { await deleteProfile($apiKey, p.id, purge); showToast(`Đã xóa profile ${p.name}`); await refreshProfiles(); } catch (e) { fail(e); } finally { setBusy(p.id, false); } }
-  async function onRemoveAccount(p: ProfileInfo, accountId: number) { setBusy(p.id, true); panelError = ""; try { await removeProfileAccount($apiKey, p.id, accountId); showToast("Đã gỡ site khỏi profile"); await refreshProfiles(); } catch (e) { fail(e); } finally { setBusy(p.id, false); } }
+  function confirmDelete() {
+    const p = deleteTarget;
+    if (!p) return;
+    const purge = purgeChecked;
+    deleteTarget = null;
+    run(p, "delete", async () => {
+      await deleteProfile($apiKey, p.id, purge);
+      showToast(`Đã xóa profile ${p.name}`);
+      await refreshProfiles();
+    });
+  }
+
+  function confirmRemoveAccount() {
+    const target = removeTarget;
+    if (!target) return;
+    removeTarget = null;
+    run(target.profile, "remove-account", async () => {
+      await removeProfileAccount($apiKey, target.profile.id, target.account.id);
+      showToast("Đã gỡ site khỏi profile");
+      await refreshProfiles();
+    });
+  }
+
+  function openAddAccount(p: ProfileInfo, host: string) { dialogProfile = p.name; dialogDomain = host; }
+  function closeAccountDialog() { dialogProfile = null; dialogDomain = ""; }
 </script>
 
-<Card.Root class="overflow-hidden" aria-labelledby="profiles-title">
-  <Card.Header class="flex-row items-center justify-between gap-4 border-b"><div class="flex items-start gap-3"><div class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><FolderOpen size={19} /></div><div><Card.Title id="profiles-title">Browser profiles</Card.Title><Card.Description>Hạ tầng Chromium dùng chung đăng nhập cho nhiều domain.</Card.Description></div></div><div class="flex shrink-0 flex-wrap justify-end gap-2"><Button variant={importing ? "ghost" : "outline"} size="sm" onclick={() => { importing = !importing; creating = false; }}>{#if importing}<X /> Hủy{:else}<UploadSimple /> Nhập từ máy khác{/if}</Button><Button variant={creating ? "ghost" : "outline"} size="sm" onclick={() => { creating = !creating; importing = false; }}>{#if creating}<X /> Hủy{:else}<Plus /> Profile mới{/if}</Button></div></Card.Header>
-  <Card.Content class="grid gap-4 p-4 sm:p-6">
-    {#if $cooldowns.length}
-      <AccountCooldownsPanel />
-    {/if}
-    {#if panelError}<div class="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive" role="alert"><WarningCircle class="mt-0.5 shrink-0" />{panelError}</div>{/if}
-    {#if $profilesError}<div class="flex flex-col gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive sm:flex-row sm:items-center" role="alert"><span class="flex min-w-0 flex-1 items-start gap-2"><WarningCircle class="mt-0.5 shrink-0" />Không nạp được danh sách profile: {$profilesError}</span><Button variant="outline" size="sm" disabled={$profilesLoading} onclick={() => refreshProfiles()}>Thử lại</Button></div>{/if}
-    {#if $profilesMeta && !$profilesMeta.persisted}<div class="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning"><WarningCircle class="mt-0.5 shrink-0" />Kho SQLite chưa mở nên chưa quản lý được profile. Xem log khởi động để biết vì sao.</div>
-    {:else if $profilesMeta}<div class="rounded-lg border bg-muted/20 p-3 text-xs leading-5 text-muted-foreground"><p>Chế độ <strong class="font-data text-foreground">{$profilesMeta.mode}</strong> · tối đa <strong class="font-data text-foreground">{$profilesMeta.max_profiles}</strong> profile · <span class="break-all font-data">{$profilesMeta.profiles_dir}</span></p><p class="mt-1">Recipe browser có account ở đây được gán profile cho <strong class="text-foreground">từng request</strong>, bất kể chế độ trên — đổi ở Settings → API (<code class="font-data text-foreground">API_ACCOUNT_STRATEGY</code>). Chế độ <code class="font-data text-foreground">{$profilesMeta.mode}</code> chỉ còn quyết định đường chạy cho domain chưa có account nào.</p></div>{/if}
+{#snippet notice(text: string)}
+  <div class="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning"><WarningCircle class="mt-0.5 shrink-0" />{text}</div>
+{/snippet}
 
-    {#if creating}<form class="grid gap-3 rounded-lg border bg-muted/20 p-4 sm:grid-cols-[minmax(0,1fr)_11rem_8rem_auto_auto] sm:items-end" onsubmit={(e) => { e.preventDefault(); onCreate(); }}><div class="grid gap-1.5"><label for="profile-name" class="text-sm font-medium">Tên profile</label><Input id="profile-name" class="font-data" placeholder="main" bind:value={newName} /></div><div class="grid gap-1.5"><label for="profile-mode" class="text-sm font-medium">Chế độ Scrapling</label><Select.Root type="single" bind:value={newMode}><Select.Trigger id="profile-mode" class="h-9 w-full">{modeLabel(newMode)}</Select.Trigger><Select.Content><Select.Item value="dynamic" label="Dynamic">Dynamic · Chromium thường</Select.Item><Select.Item value="stealthy" label="Stealthy">Stealthy · chống bot</Select.Item><Select.Item value="fetcher" label="Fetcher">Fetcher · chỉ HTTP, không mở browser</Select.Item></Select.Content></Select.Root></div><div class="grid gap-1.5"><label for="profile-tabs" class="text-sm font-medium">Tab tối đa</label><Input id="profile-tabs" type="number" min="1" max="32" bind:value={newMaxTabs} /></div><label class="flex h-9 items-center gap-2 text-sm"><Switch bind:checked={newHeadless} aria-label="Chạy profile ẩn" /> Chạy ẩn</label><Button type="submit" disabled={creatingBusy}>{#if creatingBusy}<CircleNotch class="animate-spin" />{:else}<Plus />{/if} Tạo</Button>
-      <div class="grid gap-3 border-t pt-3 sm:col-span-5 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
-        <div class="grid gap-1.5"><label for="profile-gmail" class="text-sm font-medium">Gmail <span class="font-normal text-muted-foreground">(tuỳ chọn)</span></label><Input id="profile-gmail" type="email" autocomplete="off" class="font-data" placeholder="ban@gmail.com" bind:value={newGmail} /></div>
-        <div class="grid gap-1.5"><label for="profile-gmail-pass" class="text-sm font-medium">Mật khẩu Gmail</label><Input id="profile-gmail-pass" type="password" autocomplete="new-password" placeholder="để server tự điền khi đăng nhập" bind:value={newGmailPass} /></div>
-        <label class="flex h-9 items-center gap-2 text-sm"><Switch bind:checked={newGoogleNow} aria-label="Đăng nhập Google ngay sau khi tạo" /> Đăng nhập ngay</label>
-        <p class="text-xs text-muted-foreground sm:col-span-3">Gmail và mật khẩu lưu ở server, không hiện lại. Server tự điền khi đăng nhập Google, khi phiên Google rớt, và khi đăng nhập web bằng nút “Continue with Google”.</p>
-      </div></form>{/if}
-
-    {#if importing}
-      <form class="grid gap-3 rounded-lg border bg-muted/20 p-4" onsubmit={(e) => { e.preventDefault(); onImport(); }}>
-        <div class="flex flex-wrap items-center gap-2"><span class="text-sm font-medium">Nguồn</span><Button type="button" size="sm" variant={importSource === "file" ? "secondary" : "ghost"} aria-pressed={importSource === "file"} onclick={() => (importSource = "file")}>File đã xuất</Button><Button type="button" size="sm" variant={importSource === "remote" ? "secondary" : "ghost"} aria-pressed={importSource === "remote"} onclick={() => (importSource = "remote")}>Kéo qua mạng</Button></div>
-        {#if importSource === "file"}
-          <div class="grid gap-1.5"><label for="import-file" class="text-sm font-medium">File profile</label><Input id="import-file" type="file" accept=".json,application/json" onchange={onImportFile} />{#if importBundle}<p class="text-xs text-muted-foreground">Profile <strong class="font-data text-foreground">{importBundle.profile.name}</strong> · {importBundle.accounts.length} account ({importBundle.accounts.map((a) => a.host).join(", ") || "chưa khai báo site"}) · {importBundle.storage_state?.cookies?.length ?? 0} cookie</p>{:else}<p class="text-xs text-muted-foreground">Ở máy nguồn, bấm nút <DownloadSimple class="inline" /> trên profile để lấy file <span class="font-data">.chat2api-profile.json</span>.</p>{/if}</div>
-        {:else}
-          <div class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end"><div class="grid gap-1.5"><label for="import-url" class="text-sm font-medium">Địa chỉ chat2api máy nguồn</label><Input id="import-url" class="font-data" placeholder="192.168.1.5:8100" bind:value={remoteUrl} /></div><div class="grid gap-1.5"><label for="import-key" class="text-sm font-medium">API key của máy nguồn</label><Input id="import-key" type="password" class="font-data" autocomplete="off" bind:value={remoteKey} /></div><Button type="button" variant="outline" disabled={remoteLoading || !remoteUrl.trim()} onclick={loadRemote}>{#if remoteLoading}<CircleNotch class="animate-spin" />{:else}<MagnifyingGlass />{/if} Xem profile</Button></div>
-          {#if remoteList && !remoteList.length}<p class="text-xs text-muted-foreground">Máy nguồn chưa có profile nào.</p>
-          {:else if remoteList}<div class="grid gap-1.5"><label for="import-pick" class="text-sm font-medium">Profile cần kéo về</label><Select.Root type="single" bind:value={remotePick} onValueChange={(v) => (importName = v)}><Select.Trigger id="import-pick" class="h-9 w-full font-data">{remotePick || "Chọn profile"}</Select.Trigger><Select.Content>{#each remoteList as r (r.name)}<Select.Item value={r.name} label={r.name}>{r.name} · {r.accounts.length ? r.accounts.map((a) => a.host).join(", ") : "chưa khai báo site"}</Select.Item>{/each}</Select.Content></Select.Root></div>{/if}
-        {/if}
-        <div class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end"><div class="grid gap-1.5"><label for="import-name" class="text-sm font-medium">Tên profile ở máy này</label><Input id="import-name" class="font-data" placeholder="giữ tên gốc" bind:value={importName} /></div><Button type="submit" disabled={importBusy || !importReady}>{#if importBusy}<CircleNotch class="animate-spin" />{:else}<UploadSimple />{/if} Nhập</Button></div>
-        <p class="text-xs leading-5 text-muted-foreground">Mang theo cấu hình profile, danh sách account và phiên đăng nhập (cookie, localStorage, IndexedDB). Đăng nhập được nạp vào browser ở lần mở profile đầu tiên. Recipe không đi kèm — máy này cần có recipe cho các site đó. Một số site buộc đăng nhập lại khi thấy IP hoặc thiết bị mới.</p>
-      </form>
-    {/if}
-
-    {#if $profilesLoading && !$profiles.length}<div class="flex min-h-32 flex-col items-center justify-center gap-2 text-muted-foreground" role="status" aria-live="polite"><CircleNotch class="animate-spin" size={24} /><p class="text-sm">Đang tải profiles…</p></div>
-    {:else if !$profiles.length && !$profilesError && $profilesMeta?.persisted}<div class="flex min-h-32 flex-col items-center justify-center text-center"><UserCircle class="mb-2 text-muted-foreground" size={28} /><p class="font-medium">Chưa có profile</p><p class="mt-1 text-sm text-muted-foreground">Tạo profile để gom đăng nhập nhiều domain.</p></div>{/if}
-
-    <div class="grid gap-3">
-      {#each $profiles as p (p.id)}{@const status = statusOf(p)}
-        <article class="rounded-lg border bg-card p-4">
-          <div class="flex flex-col gap-3 lg:flex-row lg:items-start"><div class="flex min-w-0 flex-1 items-start gap-3"><span class={`mt-1.5 size-2.5 shrink-0 rounded-full ${status.cls}`}></span><div class="min-w-0"><div class="flex flex-wrap items-center gap-2"><h3 class="font-data font-semibold">{p.name}</h3><Badge variant="outline" class="font-data text-[11px]">{modeLabel(p.scrapling_mode)}</Badge>{#if p.is_default}<Badge variant="secondary"><Star weight="fill" /> Mặc định</Badge>{/if}</div><p class="mt-1 text-xs text-muted-foreground">{p.domains} domain · {p.max_tabs} tab tối đa · {status.label}</p></div></div>
-            <div class="flex flex-wrap gap-1.5"><Button variant="outline" size="sm" disabled={busyIds.has(p.id)} onclick={() => onOpen(p)}><Browser /> Mở</Button><Button variant="outline" size="sm" disabled={busyIds.has(p.id) || !p.open} onclick={() => onDetect(p)}><MagnifyingGlass /> Dò domain</Button><Button variant="outline" size="sm" disabled={busyIds.has(p.id)} onclick={() => openAddAccount(p, "")}><Plus /> Account</Button><Button variant="ghost" size="icon-sm" aria-label={`Xuất profile ${p.name} để mang sang máy khác`} title="Xuất để mang sang máy khác" disabled={busyIds.has(p.id)} onclick={() => onExport(p)}><DownloadSimple /></Button><Button variant="ghost" size="icon-sm" aria-label={`Nhân bản profile ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => (cloningId === p.id ? (cloningId = null) : startClone(p))}><Copy /></Button><Button variant="ghost" size="icon-sm" aria-label={`Sửa profile ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => (editingId === p.id ? (editingId = null) : startEdit(p))}><PencilSimple /></Button>{#if p.open}<Button variant="ghost" size="icon-sm" aria-label={`Đóng profile ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => onClose(p)}><X /></Button>{/if}<Button variant="destructive" size="icon-sm" aria-label={`Xóa profile ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => requestDelete(p)}><Trash /></Button></div></div>
-          <div class="mt-3 grid gap-2">
-            <p class="text-xs text-muted-foreground">
-              {#if allSites.length}
-                {p.accounts.length}/{allSites.length} site đã gắn ·
-                <span class="inline-flex items-center gap-1 align-middle"><span class="size-2 rounded-full bg-success"></span> đã có</span> ·
-                <span class="inline-flex items-center gap-1 align-middle"><Plus size={11} class="text-primary" /> chưa có — bấm để thêm</span>
-              {:else}
-                Chưa biết site nào — bấm “Dò domain” khi profile đang mở, hoặc “Account” để thêm tay.
-              {/if}
-            </p>
-            {#if allSites.length}
-              <div class="flex flex-wrap gap-1.5">
-                {#each allSites as host (host)}
-                  {@const matched = p.accounts.filter((a) => a.host === host)}
-                  {@const suggested = liveSuggestions[p.id]?.includes(host) ?? false}
-                  {#if matched.length}
-                    {#each matched as account (account.id)}
-                      {@const locked = isAccountLocked($cooldowns, account.id)}
-                      <span class={locked
-                        ? "inline-flex items-center gap-1 rounded-full border border-warning/50 bg-warning/10 px-2.5 py-0.5 text-xs font-data text-warning"
-                        : "inline-flex items-center gap-1 rounded-full border border-success/40 bg-success/10 px-2.5 py-0.5 text-xs font-data text-success"} title={locked ? `${account.host} / ${account.label} — đang bị khóa limit, mở khóa ở bảng trên` : `${account.host} / ${account.label} — đã đăng nhập`}>
-                        {#if locked}<LockKey size={12} class="shrink-0" />{:else}<Check size={12} class="shrink-0" />{/if}
-                        <span>{account.host} / {account.label}</span>
-                        {#if locked}<span class="font-sans font-medium">bị khóa</span>{/if}
-                        <button class="ml-1 rounded-full p-0.5 text-success/70 transition-colors hover:bg-destructive/15 hover:text-destructive" aria-label={`Gỡ ${account.host} khỏi ${p.name}`} title={`Gỡ ${account.host} khỏi ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => onRemoveAccount(p, account.id)}>
-                          <X size={12} />
-                        </button>
-                      </span>
-                    {/each}
-                  {:else}
-                    <button
-                      class={suggested
-                        ? "inline-flex items-center gap-1 rounded-full border border-dashed border-warning/50 bg-warning/10 px-2.5 py-0.5 text-xs font-data text-warning transition-colors hover:border-warning hover:bg-warning/20 disabled:opacity-50"
-                        : "inline-flex items-center gap-1 rounded-full border border-dashed border-muted-foreground/30 bg-muted/20 px-2.5 py-0.5 text-xs font-data text-muted-foreground transition-colors hover:border-primary/60 hover:bg-primary/10 hover:text-primary disabled:opacity-50"}
-                      title={suggested ? `${host} đang đăng nhập trong profile này — bấm để khai báo` : `Thêm ${host} vào ${p.name}`}
-                      disabled={busyIds.has(p.id)}
-                      onclick={() => openAddAccount(p, host)}
-                    >
-                      <Plus size={12} class="shrink-0" />
-                      <span>{host}</span>
-                    </button>
-                  {/if}
-                {/each}
-              </div>
-            {:else if p.accounts.length}
-              <div class="flex flex-wrap gap-1.5">
-                {#each p.accounts as account (account.id)}
-                  {@const lockedElse = isAccountLocked($cooldowns, account.id)}
-                  <span class={lockedElse
-                    ? "inline-flex items-center gap-1 rounded-full border border-warning/50 bg-warning/10 px-2.5 py-0.5 text-xs font-data text-warning"
-                    : "inline-flex items-center gap-1 rounded-full border border-success/40 bg-success/10 px-2.5 py-0.5 text-xs font-data text-success"} title={lockedElse ? "Đang bị khóa limit" : "Đã đăng nhập"}>
-                    {#if lockedElse}<LockKey size={12} class="shrink-0" />{:else}<Check size={12} class="shrink-0" />{/if}
-                    <span>{account.host} / {account.label}</span>
-                    {#if lockedElse}<span class="font-sans font-medium">bị khóa</span>{/if}
-                    <button class="ml-1 rounded-full p-0.5 text-success/70 transition-colors hover:bg-destructive/15 hover:text-destructive" aria-label={`Gỡ ${account.host} khỏi ${p.name}`} disabled={busyIds.has(p.id)} onclick={() => onRemoveAccount(p, account.id)}>
-                      <X size={12} />
-                    </button>
-                  </span>
-                {/each}
-              </div>
-            {/if}
-          </div>
-          {#key googleRev[p.id] ?? 0}<GoogleAuthPanel profile={p} sites={allSites} />{/key}
-          {#if liveSuggestions[p.id]?.length}<div class="mt-3 flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/5 p-3 text-sm text-warning"><WarningCircle class="mt-0.5 shrink-0" />Còn đăng nhập chưa khai báo: {liveSuggestions[p.id].join(", ")} — bấm “Account” để thêm.</div>{/if}
-          {#if editingId === p.id}<form class="mt-4 grid gap-3 border-t pt-4 sm:grid-cols-[11rem_8rem_minmax(0,1fr)_auto] sm:items-end" onsubmit={(e) => { e.preventDefault(); saveEdit(p); }}><div class="grid gap-1.5"><label for="edit-mode-{p.id}" class="text-sm font-medium">Chế độ Scrapling</label><Select.Root type="single" bind:value={editMode}><Select.Trigger id="edit-mode-{p.id}" class="h-8 w-full">{modeLabel(editMode)}</Select.Trigger><Select.Content><Select.Item value="dynamic" label="Dynamic">Dynamic · Chromium thường</Select.Item><Select.Item value="stealthy" label="Stealthy">Stealthy · chống bot</Select.Item><Select.Item value="fetcher" label="Fetcher">Fetcher · chỉ HTTP, không mở browser</Select.Item></Select.Content></Select.Root></div><div class="grid gap-1.5"><label for="edit-tabs-{p.id}" class="text-sm font-medium">Tab tối đa</label><Input id="edit-tabs-{p.id}" type="number" min="1" max="32" bind:value={editMaxTabs} /></div><div class="grid gap-1.5"><label for="edit-notes-{p.id}" class="text-sm font-medium">Ghi chú</label><Input id="edit-notes-{p.id}" bind:value={editNotes} /></div><div class="flex flex-wrap items-center gap-2"><label class="flex h-8 items-center gap-2 text-sm"><Switch bind:checked={editHeadless} aria-label={`Chạy ẩn profile ${p.name}`} /> Chạy ẩn</label><Button type="submit" size="sm" disabled={busyIds.has(p.id)}>Lưu</Button>{#if !p.is_default}<Button type="button" variant="outline" size="sm" disabled={busyIds.has(p.id)} onclick={() => makeDefault(p)}><Star /> Mặc định</Button>{/if}</div><div class="grid gap-3 sm:col-span-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
-              <div class="grid gap-1.5"><label for="edit-gmail-{p.id}" class="text-sm font-medium">Gmail</label><Input id="edit-gmail-{p.id}" type="email" autocomplete="off" class="font-data" placeholder="ban@gmail.com" bind:value={editGmail} /></div>
-              <div class="grid gap-1.5"><label for="edit-gmail-pass-{p.id}" class="text-sm font-medium">Mật khẩu Gmail</label><Input id="edit-gmail-pass-{p.id}" type="password" autocomplete="new-password" placeholder={editHasPass ? "đã lưu — bỏ trống để giữ" : "để server tự điền"} bind:value={editGmailPass} /></div>
-              <label class="flex h-8 items-center gap-2 text-sm"><Switch bind:checked={editGoogleNow} aria-label={`Đăng nhập Google ngay cho ${p.name}`} /> Đăng nhập ngay</label>
-            </div>{#if editMode !== (p.scrapling_mode || "dynamic")}<p class="text-xs text-muted-foreground sm:col-span-4">Đổi sang <strong class="text-foreground">{modeLabel(editMode)}</strong> dùng lại chính thư mục profile này ({p.domains} domain đã đăng nhập) — không phải đăng nhập lại. {#if p.open}Cửa sổ đang chạy sẽ được đóng và mở lại bằng chế độ mới; nếu profile đang phục vụ request thì việc mở lại đợi tới lúc rảnh.{/if}</p>{/if}</form>{/if}
-          {#if cloningId === p.id}<form class="mt-4 grid gap-3 border-t pt-4 sm:grid-cols-[minmax(0,1fr)_11rem_auto] sm:items-end" onsubmit={(e) => { e.preventDefault(); onClone(p); }}><div class="grid gap-1.5"><label for="clone-name-{p.id}" class="text-sm font-medium">Tên bản sao</label><Input id="clone-name-{p.id}" class="font-data" bind:value={cloneName} /></div><div class="grid gap-1.5"><label for="clone-mode-{p.id}" class="text-sm font-medium">Chế độ Scrapling</label><Select.Root type="single" bind:value={cloneMode}><Select.Trigger id="clone-mode-{p.id}" class="h-8 w-full">{modeLabel(cloneMode)}</Select.Trigger><Select.Content><Select.Item value="dynamic" label="Dynamic">Dynamic · Chromium thường</Select.Item><Select.Item value="stealthy" label="Stealthy">Stealthy · chống bot</Select.Item><Select.Item value="fetcher" label="Fetcher">Fetcher · chỉ HTTP, không mở browser</Select.Item></Select.Content></Select.Root></div><Button type="submit" size="sm" disabled={busyIds.has(p.id) || p.open}><Copy /> Nhân bản</Button><p class="text-xs text-muted-foreground sm:col-span-3">Copy cả thư mục Chromium ({p.domains} domain đã đăng nhập) sang profile mới — bản gốc không đổi. {#if p.open}<span class="text-warning">Đang chạy: bấm ✕ để đóng trước đã, copy lúc Chromium còn ghi sẽ ra bản sao hỏng.</span>{:else}Cache không được copy nên bản sao nhẹ hơn.{/if}</p></form>{/if}
-          {#if watchProfiles.has(p.name)}<div class="mt-3 flex flex-col gap-3 rounded-lg border border-warning/20 bg-warning/5 p-3 sm:flex-row sm:items-center"><Browser class="shrink-0 text-warning" /><p class="min-w-0 flex-1 text-sm">Cửa sổ profile này đang mở — đăng nhập rồi bấm “Dò domain”.</p><Button variant="ghost" size="sm" onclick={() => watchClose(p.name)}>Ẩn nhắc này</Button></div>{/if}
-        </article>
-      {/each}
+<Card.Root class="gap-0 overflow-hidden py-0" aria-labelledby="profiles-title">
+  <Card.Header class="flex flex-col gap-3 border-b py-4 sm:flex-row sm:items-center sm:justify-between">
+    <div class="flex items-start gap-3">
+      <div class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><FolderOpen size={19} /></div>
+      <div>
+        <Card.Title id="profiles-title">Browser profiles</Card.Title>
+        <Card.Description>Hạ tầng Chromium dùng chung đăng nhập cho nhiều domain.</Card.Description>
+      </div>
     </div>
+    <div class="flex shrink-0 flex-wrap gap-2">
+      <Button variant="outline" onclick={() => (importing = true)}><UploadSimple /> Nhập từ máy khác</Button>
+      <Button onclick={() => (creating = true)}><Plus /> Profile mới</Button>
+    </div>
+  </Card.Header>
+
+  <Card.Content class="p-0">
+    <div class="grid gap-3 p-4 empty:hidden sm:px-6">
+      {#if panelError}
+        <div class="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive" role="alert">
+          <WarningCircle class="mt-0.5 shrink-0" />
+          <span class="min-w-0 flex-1">{panelError}</span>
+          <Button variant="ghost" size="icon-xs" aria-label="Ẩn thông báo lỗi" onclick={() => (panelError = "")}><X /></Button>
+        </div>
+      {/if}
+      {#if $profilesError}
+        <div class="flex flex-col gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive sm:flex-row sm:items-center" role="alert">
+          <span class="flex min-w-0 flex-1 items-start gap-2"><WarningCircle class="mt-0.5 shrink-0" />Không nạp được danh sách profile: {$profilesError}</span>
+          <Button variant="outline" size="sm" disabled={$profilesLoading} onclick={() => refreshProfiles()}>Thử lại</Button>
+        </div>
+      {/if}
+      {#if $profilesMeta && !$profilesMeta.persisted}
+        {@render notice("Kho SQLite chưa mở nên chưa quản lý được profile. Xem log khởi động để biết vì sao.")}
+      {:else if $profilesMeta}
+        <Collapsible.Root class="text-xs leading-5 text-muted-foreground">
+          <Collapsible.Trigger class="group flex w-full items-center gap-1.5 rounded-md text-left hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none">
+            <CaretDown size={13} class="shrink-0 transition-transform group-data-[state=closed]:-rotate-90" />
+            <span class="min-w-0">Chế độ <strong class="font-data text-foreground">{$profilesMeta.mode}</strong> · {$profiles.length}/<span class="font-data">{$profilesMeta.max_profiles}</span> profile · <span class="break-all font-data">{$profilesMeta.profiles_dir}</span></span>
+          </Collapsible.Trigger>
+          <Collapsible.Content>
+            <p class="mt-1 pl-5">Recipe browser có account ở đây được gán profile cho <strong class="text-foreground">từng request</strong>, bất kể chế độ trên — đổi ở Settings → API (<code class="font-data text-foreground">API_ACCOUNT_STRATEGY</code>). Chế độ <code class="font-data text-foreground">{$profilesMeta.mode}</code> chỉ còn quyết định đường chạy cho domain chưa có account nào.</p>
+          </Collapsible.Content>
+        </Collapsible.Root>
+      {/if}
+    </div>
+
+    <!-- Tabs.Content giữ nội dung trong DOM khi ẩn: GoogleAuthPanel vẫn poll được
+         lúc người dùng đang ở tab khác. -->
+    <Tabs.Root value={tab} onValueChange={setTab}>
+      <div class="overflow-x-auto border-t px-4 py-2 sm:px-6">
+        <Tabs.List>
+          <Tabs.Trigger class={TAB_ACTIVE} value="profiles">Profiles</Tabs.Trigger>
+          <Tabs.Trigger class={TAB_ACTIVE} value="domains">Domain</Tabs.Trigger>
+          <Tabs.Trigger class={TAB_ACTIVE} value="locks">Account bị khóa{#if $cooldowns.length}<Badge variant="warning" class="ml-1">{$cooldowns.length}</Badge>{/if}</Tabs.Trigger>
+        </Tabs.List>
+      </div>
+
+      <Tabs.Content value="profiles">
+    {#if $profilesLoading && !$profiles.length}
+      <div class="flex min-h-48 flex-col items-center justify-center gap-2 border-t text-muted-foreground" role="status" aria-live="polite"><CircleNotch class="animate-spin" size={24} /><p class="text-sm">Đang tải profiles…</p></div>
+    {:else if !$profiles.length && !$profilesError && $profilesMeta?.persisted}
+      <div class="flex min-h-48 flex-col items-center justify-center border-t p-6 text-center">
+        <UserCircle class="mb-2 text-muted-foreground" size={28} />
+        <p class="font-medium">Chưa có profile</p>
+        <p class="mt-1 text-sm text-muted-foreground">Tạo profile để gom đăng nhập nhiều domain.</p>
+        <Button class="mt-4" onclick={() => (creating = true)}><Plus /> Tạo profile đầu tiên</Button>
+      </div>
+    {/if}
+
+    {#if selected}
+      <div class="grid">
+        <ProfilesBulkBar count={liveProfileIds.length} noun="profile" target="domain" onaction={bulkFromProfiles} onclear={() => (checkedProfiles = new Set())} />
+        <ProfilesTable profiles={$profiles} activeId={selected.id} bind:checked={checkedProfiles} google={googleStates} onselect={select} />
+
+        <div class="grid min-w-0 scroll-mt-2 content-start gap-5 border-t p-4 sm:p-6" bind:this={detailEl}>
+          <ProfileDetail
+            profile={selected}
+            busyAction={busyActions[selected.id] ?? ""}
+            onopen={() => onOpen(selected)}
+            onclose={() => onClose(selected)}
+            ondetect={() => onDetect(selected)}
+            onaddaccount={() => openAddAccount(selected, "")}
+            onsettings={() => (settingsId = selected.id)}
+            onexport={() => onExport(selected)}
+            onclone={() => (cloningId = selected.id)}
+            ondelete={() => requestDelete(selected)}
+          />
+          {#if watchProfiles.has(selected.name) && selected.open}
+            <div class="flex flex-col gap-3 rounded-lg border border-warning/20 bg-warning/5 p-3 sm:flex-row sm:items-center">
+              <Browser class="shrink-0 text-warning" />
+              <p class="min-w-0 flex-1 text-sm">Cửa sổ profile này đang mở — đăng nhập rồi bấm “Dò domain”.</p>
+              <Button variant="ghost" size="sm" onclick={() => watchClose(selected.name)}>Ẩn nhắc này</Button>
+            </div>
+          {/if}
+          <ProfileSites
+            profile={selected}
+            sites={allSites}
+            suggested={selectedSuggestions}
+            busy={!!busyActions[selected.id]}
+            onadd={(host) => openAddAccount(selected, host)}
+            onremove={(account) => (removeTarget = { profile: selected, account })}
+          />
+          <!-- Mount cho mọi profile rồi ẩn: panel tự giữ vòng poll chờ xác minh và
+               báo trạng thái cho danh sách, đổi profile không được làm mất các việc đó. -->
+          {#each $profiles as p (p.id)}
+            <div hidden={p.id !== selected.id}>
+              {#key googleRev[p.id] ?? 0}
+                <GoogleAuthPanel profile={p} sites={allSites} onstatus={(state) => (googleStates = { ...googleStates, [p.id]: state })} />
+              {/key}
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
+      </Tabs.Content>
+
+      <Tabs.Content value="domains">
+        <ProfilesBulkBar count={liveHosts.length} noun="domain" target="profile" onaction={bulkFromDomains} onclear={() => (checkedDomains = new Set())} deletable={deletableHosts.length} ondelete={() => (deleteHosts = deletableHosts)} />
+        <DomainsTable hosts={allSites} profiles={$profiles} bind:checked={checkedDomains} ondelete={(host) => (deleteHosts = [host])} />
+      </Tabs.Content>
+
+      <Tabs.Content value="locks" class="border-t p-4 sm:p-6">
+        <AccountCooldownsPanel />
+      </Tabs.Content>
+    </Tabs.Root>
   </Card.Content>
 </Card.Root>
 
+<ProfileCreateDialog bind:open={creating} oncreated={refreshAndSelect} ongooglechanged={bumpGoogle} />
+<ProfileImportDialog bind:open={importing} onimported={async (name) => { await Promise.all([refreshAndSelect(name), refreshDomains()]); }} />
+<ProfileCloneDialog
+  profile={cloningProfile}
+  closing={cloningProfile ? busyActions[cloningProfile.id] === "close" : false}
+  oncancel={() => (cloningId = null)}
+  oncloseprofile={onClose}
+  oncloned={refreshAndSelect}
+/>
+<ProfileSettingsSheet profile={settingsProfile} oncancel={() => (settingsId = null)} />
+<ProfilesBulkDialog
+  request={bulkRequest}
+  profiles={$profiles}
+  sites={allSites}
+  google={googleStates}
+  onclose={() => (bulkRequest = null)}
+  ongooglechanged={(ids) => ids.forEach(bumpGoogle)}
+/>
+
 {#if dialogProfile !== null}{#key dialogProfile + "|" + dialogDomain}<AccountDialog profile={dialogProfile} domain={dialogDomain} onclose={closeAccountDialog} />{/key}{/if}
+
+<AlertDialog.Root open={deleteHosts.length > 0} onOpenChange={(open) => { if (!open) deleteHosts = []; }}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Xóa {deleteHosts.length} domain?</AlertDialog.Title>
+      <AlertDialog.Description>
+        <span class="block break-all font-data">{deleteHosts.join(", ")}</span>
+        <span class="mt-2 block">Sẽ gỡ {deleteImpact.attached} account khỏi các profile và xóa vĩnh viễn {deleteImpact.saved} file đăng nhập đã lưu. Cookie trong thư mục Chromium của profile vẫn còn. Không hoàn tác được.</span>
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Hủy</AlertDialog.Cancel>
+      <AlertDialog.Action variant="destructive" disabled={deletingDomains} onclick={confirmDeleteDomains}>Xóa domain</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
+
+<AlertDialog.Root open={removeTarget !== null} onOpenChange={(open) => { if (!open) removeTarget = null; }}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Gỡ {removeTarget?.account.host} khỏi {removeTarget?.profile.name}?</AlertDialog.Title>
+      <AlertDialog.Description>Account <span class="font-data">{removeTarget?.account.label}</span> không còn được dùng để phục vụ site này qua profile đó. Bạn có thể khai báo lại sau.</AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Hủy</AlertDialog.Cancel>
+      <AlertDialog.Action variant="destructive" onclick={confirmRemoveAccount}>Gỡ site</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
+
 <AlertDialog.Root open={deleteTarget !== null} onOpenChange={(open) => { if (!open) deleteTarget = null; }}>
   <AlertDialog.Content>
     <AlertDialog.Header>
