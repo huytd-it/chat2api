@@ -16,5 +16,7 @@ data/traces/*
 !data/traces/README.md
 data-*/
 .superpowers/
+# Binary tải về lúc chạy (vd. lightpanda), không commit.
+.local/
 *.log
 chat2api-desktop.exe

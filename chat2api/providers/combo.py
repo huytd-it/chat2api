@@ -58,6 +58,7 @@ class ComboProvider(Provider):
                 "members": members,
                 "display_name": c.get("display_name", ""),
                 "description": c.get("description", ""),
+                "save_history": c.get("save_history", True),
                 "id": c["id"],
             }
         self._combos = new

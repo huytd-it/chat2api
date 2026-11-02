@@ -1719,6 +1719,7 @@ export interface ComboInfo {
   strategy: string;
   description: string;
   enabled: boolean;
+  save_history: boolean;
   created_at: number;
   updated_at: number;
   members: ComboMember[];
@@ -1738,7 +1739,7 @@ export async function fetchCombo(key: string, slug: string): Promise<ComboInfo> 
 
 export async function createCombo(
   key: string,
-  data: { slug: string; display_name?: string; strategy: string; description?: string; enabled?: boolean; members: ComboMember[] },
+  data: { slug: string; display_name?: string; strategy: string; description?: string; enabled?: boolean; save_history?: boolean; members: ComboMember[] },
 ): Promise<ComboInfo> {
   const base = await apiBase();
   const r = await fetch(base + "/admin/combos", {
@@ -1752,7 +1753,7 @@ export async function createCombo(
 export async function updateCombo(
   key: string,
   slug: string,
-  data: Partial<{ display_name: string; strategy: string; description: string; enabled: boolean; members: ComboMember[] }>,
+  data: Partial<{ display_name: string; strategy: string; description: string; enabled: boolean; save_history: boolean; members: ComboMember[] }>,
 ): Promise<ComboInfo> {
   const base = await apiBase();
   const r = await fetch(base + "/admin/combos/" + encodeURIComponent(slug), {

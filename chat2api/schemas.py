@@ -453,6 +453,7 @@ class ComboCreateRequest(BaseModel):
     strategy: str = "round_robin"
     description: str | None = None
     enabled: bool = True
+    save_history: bool = True
     members: list[ComboMemberSpec]
 
 
@@ -461,6 +462,7 @@ class ComboUpdateRequest(BaseModel):
     strategy: str | None = None
     description: str | None = None
     enabled: bool | None = None
+    save_history: bool | None = None
     members: list[ComboMemberSpec] | None = None
 
 

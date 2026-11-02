@@ -9,7 +9,7 @@
             "command": "[ ! -f 'C:\\Users\\tdhuy\\.agents\\skills\\impeccable\\scripts\\hook.mjs' ] || node 'C:\\Users\\tdhuy\\.agents\\skills\\impeccable\\scripts\\hook.mjs'",
             "timeout": 5,
             "statusMessage": "Checking UI changes",
-            "commandWindows": "if exist \"C:\\\\Users\\\\tdhuy\\\\.agents\\\\skills\\\\impeccable\\\\scripts\\\\hook.mjs\" (node \"C:\\\\Users\\\\tdhuy\\\\.agents\\\\skills\\\\impeccable\\\\scripts\\\\hook.mjs\" & exit /b)"
+            "commandWindows": "if (Test-Path -LiteralPath \"$env:USERPROFILE/.agents/skills/impeccable/scripts/hook.mjs\") { & node \"$env:USERPROFILE/.agents/skills/impeccable/scripts/hook.mjs\"; exit $LASTEXITCODE }"
           }
         ]
       }
@@ -22,7 +22,7 @@
             "command": "[ ! -f 'C:\\Users\\tdhuy\\.agents\\skills\\impeccable\\scripts\\hook.mjs' ] || node 'C:\\Users\\tdhuy\\.agents\\skills\\impeccable\\scripts\\hook.mjs'",
             "timeout": 30,
             "statusMessage": "Design deep pass",
-            "commandWindows": "if exist \"C:\\\\Users\\\\tdhuy\\\\.agents\\\\skills\\\\impeccable\\\\scripts\\\\hook.mjs\" (node \"C:\\\\Users\\\\tdhuy\\\\.agents\\\\skills\\\\impeccable\\\\scripts\\\\hook.mjs\" & exit /b)"
+            "commandWindows": "if (Test-Path -LiteralPath \"$env:USERPROFILE/.agents/skills/impeccable/scripts/hook.mjs\") { & node \"$env:USERPROFILE/.agents/skills/impeccable/scripts/hook.mjs\"; exit $LASTEXITCODE }"
           }
         ]
       }

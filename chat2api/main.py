@@ -480,17 +480,23 @@ def create_app(cfg: Config) -> FastAPI:
         recipe_slug_for_session_img = provider.slug if not isinstance(original_combo_provider_img, ComboPImg) else (
             provider.slug if combo_strategy_img != "failover" else "combo")
         try:
-            recording = await asyncio.to_thread(
-                sessions.begin,
-                requested_session, body.model, recipe_slug_for_session_img,
-                [{"role": "user", "content": body.prompt}], False,
-                request.headers.get("authorization", ""),
-                request.headers.get("user-agent", ""),
-                getattr(request.state, "api_key_id", None),
-                assignment.account_id if assignment else None,
-                assignment.profile_id if assignment else None,
-                settings.current("API_SESSION_MODE"),
-            )
+            if combo_info_img is not None and not combo_info_img.get("save_history", True):
+                recording = sessions.unrecorded(
+                    requested_session,
+                    assignment.account_id if assignment else None,
+                    assignment.profile_id if assignment else None)
+            else:
+                recording = await asyncio.to_thread(
+                    sessions.begin,
+                    requested_session, body.model, recipe_slug_for_session_img,
+                    [{"role": "user", "content": body.prompt}], False,
+                    request.headers.get("authorization", ""),
+                    request.headers.get("user-agent", ""),
+                    getattr(request.state, "api_key_id", None),
+                    assignment.account_id if assignment else None,
+                    assignment.profile_id if assignment else None,
+                    settings.current("API_SESSION_MODE"),
+                )
         except Exception:
             if assignment is not None:
                 assignment.release()
@@ -784,16 +790,22 @@ def create_app(cfg: Config) -> FastAPI:
         recipe_slug_for_session = provider.slug if not isinstance(original_combo_provider, ComboP) else (
             provider.slug if combo_strategy != "failover" else "combo")
         try:
-            recording = await asyncio.to_thread(
-                sessions.begin,
-                requested_session, body.model, recipe_slug_for_session,
-                msgs, body.stream, request.headers.get("authorization", ""),
-                request.headers.get("user-agent", ""),
-                getattr(request.state, "api_key_id", None),
-                assignment.account_id if assignment else None,
-                assignment.profile_id if assignment else None,
-                settings.current("API_SESSION_MODE"),
-            )
+            if combo_info is not None and not combo_info.get("save_history", True):
+                recording = sessions.unrecorded(
+                    requested_session,
+                    assignment.account_id if assignment else None,
+                    assignment.profile_id if assignment else None)
+            else:
+                recording = await asyncio.to_thread(
+                    sessions.begin,
+                    requested_session, body.model, recipe_slug_for_session,
+                    msgs, body.stream, request.headers.get("authorization", ""),
+                    request.headers.get("user-agent", ""),
+                    getattr(request.state, "api_key_id", None),
+                    assignment.account_id if assignment else None,
+                    assignment.profile_id if assignment else None,
+                    settings.current("API_SESSION_MODE"),
+                )
         except Exception:
             # Chỗ đã giữ ở `assign()` chỉ được nhả trong đường đi qua stream;
             # hỏng trước đó mà không nhả thì account đó bận vĩnh viễn.
@@ -933,9 +945,12 @@ def create_app(cfg: Config) -> FastAPI:
                 cancelled = False
                 try:
                     async for d in upstream():
-                        if not parts:
-                            sessions.first_delta(recording)
-                        parts.append(d)
+                        # Tắt lịch sử thì không ai đọc lại text: khỏi giữ cả
+                        # reply trong RAM, delta đi thẳng ra client.
+                        if recording.enabled:
+                            if not parts:
+                                sessions.first_delta(recording)
+                            parts.append(d)
                         yield _sse(cid, body.model, d)
                 except OpenAIError as error:
                     final_error = error
@@ -952,7 +967,9 @@ def create_app(cfg: Config) -> FastAPI:
                 finally:
                     text = "".join(parts)
                     html, url = _reply_extras(provider, assignment, BR)
-                    if cancelled:
+                    if not recording.enabled:
+                        pass
+                    elif cancelled:
                         await asyncio.to_thread(
                             sessions.finish, recording, text,
                             status="cancelled", error_code="client_cancelled",

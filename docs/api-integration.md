@@ -492,6 +492,13 @@ curl -X POST http://127.0.0.1:8100/admin/picker/$PID/stop \
 Model ảo `combo/<slug>` gộp nhiều model thật theo strategy.
 Tạo xong gọi như model thường; server trả thêm `X-Chat2api-Combo*`.
 
+Trường `save_history` (mặc định `true`) nhận khi tạo/sửa combo. Đặt `false` thì
+kết quả đi thẳng tới client, không ghi `session`/`message`/`request_log`: request
+không hiện trong Sessions và thống kê. `X-Chat2api-Session-Id` trong response vẫn
+có nhưng không tra lại được. Ảnh `response_format=url` trả link gốc hoặc `data:`
+thay vì `/v1/images/...`, và không có `image_id`. Màn chat của desktop ẩn các combo
+này vì nó hiển thị lại hội thoại từ session đã lưu.
+
 Strategy:
 
 | Strategy | Hành vi |

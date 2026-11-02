@@ -40,6 +40,7 @@ def _row_to_combo(row: sqlite3.Row) -> dict:
         "strategy": row["strategy"],
         "description": row["description"] or "",
         "enabled": bool(row["enabled"]),
+        "save_history": bool(row["save_history"]),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -169,6 +170,11 @@ def validate_combo(data: dict, is_update: bool = False) -> tuple[dict, list[str]
         clean["enabled"] = 1 if val in (True, 1, "1", "true", "True") else 0
     elif not is_update:
         clean["enabled"] = 1
+    if "save_history" in data:
+        val = data.get("save_history")
+        clean["save_history"] = 1 if val in (True, 1, "1", "true", "True") else 0
+    elif not is_update:
+        clean["save_history"] = 1
     if "members" in data:
         members, m_errors = _validate_members(data.get("members") or [])
         errors.extend(m_errors)
@@ -192,10 +198,10 @@ def create_combo(data: dict) -> dict:
         raise ValueError(f"combo '{clean['slug']}' đã tồn tại")
     with conn:
         conn.execute(
-            "INSERT INTO combo(slug, display_name, strategy, description, enabled, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO combo(slug, display_name, strategy, description, enabled, save_history, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (clean["slug"], clean.get("display_name", ""), clean.get("strategy", "round_robin"),
-             clean.get("description", ""), clean.get("enabled", 1), now, now),
+             clean.get("description", ""), clean.get("enabled", 1), clean.get("save_history", 1), now, now),
         )
         row = conn.execute("SELECT id FROM combo WHERE slug = ?", (clean["slug"],)).fetchone()
         combo_id = int(row["id"])
@@ -227,7 +233,7 @@ def update_combo(slug: str, data: dict) -> dict | None:
         if conn.execute("SELECT 1 FROM combo WHERE slug = ?", (new_slug,)).fetchone():
             raise ValueError(f"combo '{new_slug}' đã tồn tại")
     fields: dict = {}
-    for k in ("display_name", "strategy", "description", "enabled"):
+    for k in ("display_name", "strategy", "description", "enabled", "save_history"):
         if k in clean:
             fields[k] = clean[k]
     if new_slug:

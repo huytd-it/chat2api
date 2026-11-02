@@ -240,6 +240,17 @@ def begin(
                          account_id=account_id, profile_id=profile_id)
 
 
+def unrecorded(requested_id: str | None, account_id: int | None = None,
+               profile_id: int | None = None) -> Recording:
+    """Recording không chạm DB, cho request đã tắt lịch sử (`finish` thành no-op).
+
+    Id vẫn dùng được cho header và sticky routing, nhưng không có bản ghi nào
+    trong `session` để tra lại.
+    """
+    return Recording(requested_id or uuid.uuid4().hex, None, store.now_ms(), 0, enabled=False,
+                     account_id=account_id, profile_id=profile_id)
+
+
 def first_delta(recording: Recording) -> None:
     if recording.ttfb_ms is None:
         recording.ttfb_ms = max(0, store.now_ms() - recording.started_at)

@@ -3,7 +3,7 @@
   import { page } from "$app/state";
   import { Broadcast, List, X } from "phosphor-svelte";
   import { apiKey, headedBrowser, serverStatus, showToast } from "../stores";
-  import { models, selectedModel, refreshModels } from "../sync";
+  import { combos, models, selectedModel, refreshCombos, refreshModels } from "../sync";
   import { websites, refreshWebsites } from "$lib/websites";
   import {
     deleteSessions,
@@ -51,7 +51,10 @@
   let requestError = $state("");
   let listError = $state("");
   let listTicket = 0;
-  const chatModels = $derived($models.filter((model) => model.capability !== "image" && model.capability !== "video"));
+  // Màn này hiển thị lại mọi lượt chat từ session đã lưu, nên combo tắt lịch sử
+  // (chỉ dành cho API client) không có gì để nạp lại và không được chọn ở đây.
+  const unrecordedModels = $derived(new Set($combos.filter((combo) => !combo.save_history).map((combo) => combo.model_id)));
+  const chatModels = $derived($models.filter((model) => model.capability !== "image" && model.capability !== "video" && !unrecordedModels.has(model.id)));
   const imageModels = $derived($models.filter((model) => model.capability === "image" || model.capability === "both"));
   const selectedSite = $derived($websites.find(site => site.history_slugs.includes($selectedModel.split("/")[0])));
   let requestedModelApplied = $state(false);
@@ -59,6 +62,7 @@
   $effect(() => {
     if ($serverStatus.state === "ok" && !initialized) {
       initialized = true;
+      void refreshCombos();
       void loadTargets();
       void loadList(false).then(() => {
         const requested = page.url.searchParams.get("open");

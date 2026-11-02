@@ -16,6 +16,12 @@
   import ArrowUpIcon from "phosphor-svelte/lib/ArrowUpIcon";
   import ArrowDownIcon from "phosphor-svelte/lib/ArrowDownIcon";
   import WarningIcon from "phosphor-svelte/lib/WarningIcon";
+  import DotsSixVerticalIcon from "phosphor-svelte/lib/DotsSixVerticalIcon";
+
+  // `key` ổn định cho {#each}: model_id đổi được và có thể tạm trùng khi đang sửa.
+  type FormMember = ComboMember & { key: number };
+  let nextMemberKey = 0;
+  const toFormMember = (m: ComboMember): FormMember => ({ ...m, key: nextMemberKey++ });
 
   let showCreate = $state(false);
   let editing: ComboInfo | null = $state(null);
@@ -28,7 +34,10 @@
   let formStrategy = $state("round_robin");
   let formDesc = $state("");
   let formEnabled = $state(true);
-  let formMembers: ComboMember[] = $state([]);
+  let formSaveHistory = $state(true);
+  let formMembers: FormMember[] = $state([]);
+  let memberRows: HTMLElement | undefined = $state();
+  let draggingKey: number | null = $state(null);
 
   const strategies = [
     { value: "round_robin", label: "Xoay vòng đều", desc: "Mỗi request luân phiên sang model kế tiếp" },
@@ -52,7 +61,8 @@
     formStrategy = "round_robin";
     formDesc = "";
     formEnabled = true;
-    formMembers = [{ model_id: "", weight: 1, priority: 0 }];
+    formSaveHistory = true;
+    formMembers = [toFormMember({ model_id: "", weight: 1, priority: 0 })];
     error = "";
   }
 
@@ -70,13 +80,14 @@
     formStrategy = c.strategy;
     formDesc = c.description;
     formEnabled = c.enabled;
-    formMembers = c.members.length ? c.members.map(m => ({ ...m })) : [{ model_id: $models[0]?.id ?? "", weight: 1, priority: 0 }];
+    formSaveHistory = c.save_history;
+    formMembers = (c.members.length ? c.members : [{ model_id: $models[0]?.id ?? "", weight: 1, priority: 0 }]).map(toFormMember);
     showCreate = true;
   }
 
   function addMember() {
     const fallback = $models.find(m => !formMembers.some(f => f.model_id === m.id))?.id ?? $models[0]?.id ?? "";
-    formMembers = [...formMembers, { model_id: fallback, weight: 1, priority: formMembers.length }];
+    formMembers = [...formMembers, toFormMember({ model_id: fallback, weight: 1, priority: formMembers.length })];
   }
 
   function removeMember(idx: number) {
@@ -89,6 +100,38 @@
     const copy = [...formMembers];
     [copy[idx], copy[n]] = [copy[n], copy[idx]];
     formMembers = copy.map((m, i) => ({ ...m, priority: i }));
+  }
+
+  // Kéo thả bằng pointer events, không dùng HTML5 drag: WebView của Tauri mặc
+  // định chặn HTML5 drag (dragDropEnabled). Listener gắn lên window vì Svelte
+  // di chuyển node của hàng khi đổi thứ tự, làm mất pointer capture trên tay nắm.
+  function startMemberDrag(event: PointerEvent, key: number) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    draggingKey = key;
+    const move = (e: PointerEvent) => dragMemberTo(e.clientY);
+    const stop = () => {
+      draggingKey = null;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+  }
+
+  function dragMemberTo(y: number) {
+    const from = formMembers.findIndex(m => m.key === draggingKey);
+    if (from < 0 || !memberRows) return;
+    const rows = Array.from(memberRows.children);
+    const middle = (i: number) => {
+      const box = rows[i].getBoundingClientRect();
+      return box.top + box.height / 2;
+    };
+    // Chỉ đổi khi đã qua điểm giữa hàng kề bên, để hàng không nhảy qua lại.
+    if (from > 0 && y < middle(from - 1)) moveMember(from, -1);
+    else if (from < rows.length - 1 && y > middle(from + 1)) moveMember(from, 1);
   }
 
   async function submit() {
@@ -108,6 +151,7 @@
           strategy: formStrategy,
           description: formDesc.trim(),
           enabled: formEnabled,
+          save_history: formSaveHistory,
           members,
         });
         showToast(`Đã cập nhật combo '${editing.slug}'`);
@@ -118,6 +162,7 @@
           strategy: formStrategy,
           description: formDesc.trim(),
           enabled: formEnabled,
+          save_history: formSaveHistory,
           members,
         });
         showToast(`Đã tạo combo '${formSlug}'`);
@@ -196,7 +241,10 @@
                   </div>
                 </td>
                 <td class="px-3 py-2.5">
-                  {#if c.enabled}<Badge variant="success">Bật</Badge>{:else}<Badge variant="outline">Tắt</Badge>{/if}
+                  <div class="flex flex-wrap gap-1">
+                    {#if c.enabled}<Badge variant="success">Bật</Badge>{:else}<Badge variant="outline">Tắt</Badge>{/if}
+                    {#if !c.save_history}<Badge variant="outline">Không lưu lịch sử</Badge>{/if}
+                  </div>
                 </td>
                 <td class="px-3 py-2.5 text-right">
                   <div class="inline-flex gap-1">
@@ -265,6 +313,15 @@
         <input type="checkbox" bind:checked={formEnabled} class="rounded" /> Bật combo
       </label>
 
+      <div class="grid gap-1">
+        <label class="flex items-center gap-2 text-sm">
+          <input type="checkbox" bind:checked={formSaveHistory} class="rounded" /> Lưu lịch sử
+        </label>
+        <p class="text-[11px] text-muted-foreground">
+          Tắt để gửi thẳng kết quả cho client và giảm tải: request của combo này không xuất hiện trong Sessions và thống kê, không xem lại được. Combo cũng không chọn được trong màn chat của app, chỉ gọi qua API.
+        </p>
+      </div>
+
       <div class="space-y-2">
         <div class="flex items-center justify-between">
           <Label>Members ({formMembers.length}) *</Label>
@@ -273,8 +330,17 @@
         {#if !$models.length}
           <p class="text-xs text-destructive">Chưa có model nào — hãy tạo recipe trước.</p>
         {/if}
-        {#each formMembers as m, idx}
-          <div class="flex items-center gap-2 rounded-md border border-border p-2">
+        <div bind:this={memberRows} class="space-y-2">
+        {#each formMembers as m, idx (m.key)}
+          <div class="flex items-center gap-2 rounded-md border p-2 {draggingKey === m.key ? 'border-primary bg-muted/50' : 'border-border'}">
+            <button
+              type="button"
+              aria-label="Kéo để đổi thứ tự"
+              title="Kéo để đổi thứ tự"
+              disabled={formMembers.length <= 1}
+              class="touch-none select-none text-muted-foreground disabled:opacity-40 {draggingKey === m.key ? 'cursor-grabbing' : 'cursor-grab'}"
+              onpointerdown={(e) => startMemberDrag(e, m.key)}
+            ><DotsSixVerticalIcon size={16} /></button>
             <span class="font-mono text-xs text-muted-foreground">#{idx+1}</span>
             <select bind:value={m.model_id} class="flex-1 rounded-md border border-input bg-background px-2 py-1.5 font-mono text-xs">
               {#each $models as model}
@@ -291,7 +357,8 @@
             </div>
           </div>
         {/each}
-        <p class="text-[11px] text-muted-foreground">Thứ tự = priority. Kéo lên/xuống để đổi. Với <span class="font-mono">weighted</span> thì trọng số cao được chọn nhiều hơn.</p>
+        </div>
+        <p class="text-[11px] text-muted-foreground">Thứ tự = priority: <span class="font-mono">failover</span> thử từ trên xuống. Kéo tay nắm bên trái hoặc dùng nút mũi tên để đổi. Với <span class="font-mono">weighted</span> thì trọng số cao được chọn nhiều hơn.</p>
       </div>
     </div>
 
