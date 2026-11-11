@@ -294,18 +294,27 @@ def _action_errors(label: str, value) -> list[str]:
     if not value.strip():
         return []
     steps = [s.strip() for s in value.split(";") if s.strip()]
-    def _step_ok(s: str) -> bool:
-        if s.startswith("click:") or s.startswith("select:") or s.startswith("press:"):
-            return bool(s.split(":", 1)[1].strip())
-        if s.startswith("wait:"):
-            raw = s.split(":", 1)[1].strip()
-            try:
-                return int(raw) >= 0
-            except Exception:
-                return False
-        return False
-    ok = steps and all(_step_ok(s) for s in steps)
-    return [] if ok else [f"invalid field: {label} (click:<selector> | select:<selector> | press:<key> | wait:<ms>)"]
+    ok = steps and all(step_ok(s) for s in steps)
+    return [] if ok else [f"invalid field: {label} ({STEP_SYNTAX})"]
+
+
+STEP_SYNTAX = ("click:<selector> | click?:<selector> (bấm nếu có) | select:<selector> "
+               "| press:<key> | wait:<ms> | slider:<selector>=<nhãn mức>")
+
+
+def step_ok(s: str) -> bool:
+    """Một bước của chuỗi action (ngăn bằng `;`) có đúng cú pháp không."""
+    if s.startswith(("click:", "click?:", "select:", "press:")):
+        return bool(s.split(":", 1)[1].strip())
+    if s.startswith("wait:"):
+        try:
+            return int(s.split(":", 1)[1].strip()) >= 0
+        except ValueError:
+            return False
+    if s.startswith("slider:"):
+        selector, _, label = s.split(":", 1)[1].rpartition("=")
+        return bool(selector.strip() and label.strip())
+    return False
 
 
 def validate_flows(recipe: dict, done_signals, copy_scopes) -> list[str]:

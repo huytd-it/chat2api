@@ -14,21 +14,56 @@ response:
 # model đang chọn: #model-selector-input-<model>-button nên không bám id).
 # Option model: [aria-label="model-item"][data-value=...] — data-value của
 # GLM-5.3-Flash là "x-preview-l". Chọn model xong menu tự ĐÓNG; thanh Effort nằm
-# trong cùng menu nên phải mở lại rồi mới chỉnh. Thumb là
-# [role="slider"][aria-label="Effort"], giá trị 0..2 (0 = Low): click để focus
-# rồi Home/ArrowRight/End để đặt mức, Escape để đóng menu.
+# trong cùng menu nên phải mở lại rồi mới chỉnh.
 models:
 - id: default
+  variants: false
 - id: glm-5.3-flash
+  label: GLM-5.3-Flash
   action: click:[aria-label="model-item"][data-value="x-preview-l"]
 - id: glm-5.3
+  label: GLM-5.3
   action: click:[aria-label="model-item"][data-value="glm-5.3"]
 - id: glm-5.2
+  label: GLM-5.2
   action: click:[aria-label="model-item"][data-value="glm-5.2"]
-- id: glm-5.2-high
-  action: click:[aria-label="model-item"][data-value="glm-5.2"];click:[aria-label="Select a model"];click:[role="slider"][aria-label="Effort"];press:Home;press:ArrowRight;press:Escape
-- id: glm-5.2-max
-  action: click:[aria-label="model-item"][data-value="glm-5.2"];click:[aria-label="Select a model"];click:[role="slider"][aria-label="Effort"];press:End;press:Escape
+# Danh sách model lấy qua API (GET /api/models) thay vì mở dropdown và đọc DOM.
+# ID = slug tên hiển thị (GLM-5.3-Flash → glm-5.3-flash, khớp models: ở trên),
+# value = id thật của site (x-preview-l) — dùng trong action chọn model.
+model_list:
+  url: /api/models
+  headers:
+    Authorization: Bearer {{ls:token}}
+  items: data
+  id: name
+  label: name
+  value: id
+  filter:
+    path: info.is_active
+    equals: true
+  meta:
+    effort: info.meta.info.thinking_effort_level
+    think: info.meta.capabilities.think
+  action: click:[aria-label="model-item"][data-value="{{value}}"]
+# Mức Effort ghép với model thành ID mới: glm-5.3-low, glm-5.3-high, glm-5.3-max…
+# Kiểm chứng DOM 2026-11-11: thanh [role="slider"][aria-label="Effort"] có
+# aria-valuetext Low/High/Max với GLM-5.3 & GLM-5.3-Flash, nhưng GLM-5.2 chỉ
+# High/Max (0..1) — nên đặt theo NHÃN bằng bước slider:, không đếm phím.
+# Model gốc không hậu tố giữ nguyên mức Effort đang lưu trên account.
+# API: thinking_effort_level = [low, high, max] với GLM-5.3*, rỗng với GLM-5.2
+# (vẫn có High/Max trên UI) → chỉ `low` cần `when`.
+variants:
+  low:
+    label: Low
+    action: click:[aria-label="Select a model"];slider:[role="slider"][aria-label="Effort"]=Low;press:Escape
+    models: [glm-5.3, glm-5.3-flash]
+    when: {effort: low}
+  high:
+    label: High
+    action: click:[aria-label="Select a model"];slider:[role="slider"][aria-label="Effort"]=High;press:Escape
+  max:
+    label: Max
+    action: click:[aria-label="Select a model"];slider:[role="slider"][aria-label="Effort"]=Max;press:Escape
 flows:
   select_model:
     selector: '[aria-label="Select a model"]'

@@ -62,8 +62,70 @@ models:
   # giữ alias cũ nếu client đang dùng qwen-web/qwen-web
   - id: qwen-web
     capability: chat
+    variants: false
+# Danh sách model lấy qua API (GET /api/models) thay vì mở dropdown và đọc DOM.
+# ID = slug của tên hiển thị (Qwen4-Max-Preview → qwen4-max-preview), khớp
+# catalog cũ. 5/8 model nằm sau "Expand more models" → click? mở nếu đang gọn.
+model_list:
+  url: /api/models
+  headers:
+    Authorization: Bearer {{ls:token}}
+  items: data
+  id: name
+  label: name
+  value: id
+  filter:
+    path: info.is_active
+    equals: true
+  meta:
+    thinking: info.meta.capabilities.thinking
+    auto: info.meta.auto_thinking
+  action: 'click?:.wms-more-entry__text:text-is("Expand more models");click:[role="listbox"][aria-label="Models"] [role="option"]:has(.wms-list__name-text:text-is("{{label}}"))'
+# Chế độ suy nghĩ ghép với model: qwen3.8-max-thinking, qwen3.8-max-fast,
+# qwen3.7-plus-auto… Áp cả cho model lấy từ model_list (qwen4-max-preview…).
+# `when` đọc meta từ API: capabilities.thinking=false → không có Thinking/Fast
+# (Qwen3.5-Omni-Plus); auto_thinking rỗng → không có Auto (Qwen3.7-Max,
+# Qwen3.8-Omni-Flash) — khớp DOM kiểm chứng 2026-11-11. Glob `models` là chốt
+# dự phòng khi model chưa có meta (catalog cũ quét bằng DOM).
+variants:
+  thinking:
+    label: Thinking
+    action: 'click:.qwen-thinking-selector;click:.qwen-chat-v2-dropdown-menu-item:has(.qwen-chat-v2-dropdown-menu-item-label:text-is("Thinking"))'
+    models: ['qwen*', '!qwen3.5-omni-plus']
+    when: {thinking: true}
+  fast:
+    label: Fast
+    action: 'click:.qwen-thinking-selector;click:.qwen-chat-v2-dropdown-menu-item:has(.qwen-chat-v2-dropdown-menu-item-label:text-is("Fast"))'
+    models: ['qwen*', '!qwen3.5-omni-plus']
+    when: {thinking: true}
+  auto:
+    label: Auto
+    action: 'click:.qwen-thinking-selector;click:.qwen-chat-v2-dropdown-menu-item:has(.qwen-chat-v2-dropdown-menu-item-label:text-is("Auto"))'
+    models: ['qwen*', '!qwen3.5-omni-plus', '!qwen3.7-max', '!qwen3.8-omni-flash']
+    when: {auto: true}
 login:
   anon_trial_limit: 20
   strategy: round_robin
   quota: 50
 keep_context: true
+# Chat text: vẫn gõ prompt qua giao diện (POST tạo chat/gửi tin bị Aliyun WAF
+# chặn nếu fetch thô), nhưng câu trả lời đọc qua API lịch sử chat thay cho
+# DOM/nút Copy — nhận markdown gốc, không phụ thuộc clipboard. Flow ảnh vẫn
+# dùng khối `response` của flow image ở trên.
+api:
+  url_vars:
+    chat_id: '/c/([0-9a-fA-F-]{36})'
+  poll:
+    url: /api/v2/chats/{{chat_id}}?direction=up&limit=10
+    headers:
+      Authorization: Bearer {{ls:token}}
+    interval_ms: 1500
+    # id tin cuối phải khác lúc trước khi gửi: nối tiếp hội thoại thì tin cuối
+    # cũ đã done=true, không được nhận nhầm.
+    fresh: data.chat.messages.-1.id
+    done:
+      path: data.chat.messages.-1.done
+      equals: true
+  # Thinking: content_list có phase think trước answer — lấy đúng phase answer.
+  result: data.chat.messages.-1.content_list.[phase=answer].content
+  error: data.chat.messages.-1.error

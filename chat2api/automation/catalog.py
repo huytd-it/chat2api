@@ -47,35 +47,47 @@ async def refresh(provider, account_id, force=False, headed=None):
             return old
         async with account_page(provider, account_id, headed) as page:
             await page.goto(provider.url, wait_until="domcontentloaded")
+            model_list = getattr(provider, "_model_list_cfg", None)
             action = (provider.flows.get("select_model") or {}).get("action", "")
-            if action:
-                await provider._exec_action_steps(page, action)
-            if provider.domain == "chat.qwen.ai":
-                more = page.get_by_text("Expand more models", exact=True)
-                if await more.is_visible():
-                    await more.click()
-                await page.locator('[role="listbox"][aria-label="Models"] .wms-list__name-text').first.wait_for()
-                labels = await page.locator('[role="listbox"][aria-label="Models"] .wms-list__name-text').all_text_contents()
-                found = [{"id": re.sub(r"[^a-z0-9._-]+", "-", label.strip().lower()),
-                          "label": label.strip(),
-                          "action": 'click:[role="listbox"][aria-label="Models"] [role="option"]:has(.wms-list__name-text:text-is(' + json.dumps(label.strip()) + '))'}
-                         for label in labels]
-            elif provider.domain == "chatgpt.com":
-                # Giao diện web (kể cả Free) không mở dropdown model: nó luôn
-                # dùng model mặc định của tài khoản. Xác nhận composer đã đăng
-                # nhập rồi ghi nhận đúng một model thay vì bịa danh sách.
-                from ..providers.browser_recipe import _resolve_locator
-                selector = (provider.flow_prompt("text").get("input_selector")
-                            or 'div[contenteditable="true"][role="textbox"]')
-                await _resolve_locator(page, selector).first.wait_for(state="visible", timeout=20000)
-                found = [{"id": "default", "label": "ChatGPT (model mặc định của web)"}]
+            if model_list:
+                # Recipe khai `model_list`: hỏi thẳng API của site trong tab đã
+                # đăng nhập — không mở dropdown, có thêm metadata (thinking,
+                # effort...) cho `variants.*.when`.
+                from ..providers import api_mode
+                await page.wait_for_timeout(provider._ready_delay_ms)
+                try:
+                    found = await api_mode.list_models(page, model_list)
+                except api_mode.ApiCallError as error:
+                    raise OpenAIError(502, "model_list_failed", str(error))
             else:
-                found = await discover_models(page)
+                if action:
+                    await provider._exec_action_steps(page, action)
+                if provider.domain == "chat.qwen.ai":
+                    more = page.get_by_text("Expand more models", exact=True)
+                    if await more.is_visible():
+                        await more.click()
+                    await page.locator('[role="listbox"][aria-label="Models"] .wms-list__name-text').first.wait_for()
+                    labels = await page.locator('[role="listbox"][aria-label="Models"] .wms-list__name-text').all_text_contents()
+                    found = [{"id": re.sub(r"[^a-z0-9._-]+", "-", label.strip().lower()),
+                              "label": label.strip(),
+                              "action": 'click:[role="listbox"][aria-label="Models"] [role="option"]:has(.wms-list__name-text:text-is(' + json.dumps(label.strip()) + '))'}
+                             for label in labels]
+                elif provider.domain == "chatgpt.com":
+                    # Giao diện web (kể cả Free) không mở dropdown model: nó luôn
+                    # dùng model mặc định của tài khoản. Xác nhận composer đã đăng
+                    # nhập rồi ghi nhận đúng một model thay vì bịa danh sách.
+                    from ..providers.browser_recipe import _resolve_locator
+                    selector = (provider.flow_prompt("text").get("input_selector")
+                                or 'div[contenteditable="true"][role="textbox"]')
+                    await _resolve_locator(page, selector).first.wait_for(state="visible", timeout=20000)
+                    found = [{"id": "default", "label": "ChatGPT (model mặc định của web)"}]
+                else:
+                    found = await discover_models(page)
             if not found:
                 await asyncio.to_thread(save, provider.slug, account_id, "models", "unknown", [])
                 raise OpenAIError(422, "model_discovery_unknown", "Không đọc được danh sách model; chưa kết luận account không hỗ trợ")
             for item in found:
-                item["capability"] = "chat"
+                item.setdefault("capability", "chat")
                 # Stable recipe aliases stay in /v1/models. Only new IDs join it.
             await asyncio.to_thread(save, provider.slug, account_id, "models", "supported", found)
         return await asyncio.to_thread(cached, provider.slug, account_id)

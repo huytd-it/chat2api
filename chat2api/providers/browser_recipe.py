@@ -10,12 +10,13 @@ from typing import AsyncIterator
 from urllib.parse import urlsplit
 
 from .. import account_limits as limits
-from .. import accounts, applog, flows, settings, store
+from .. import accounts, applog, flows, model_variants, settings, store
 from .. import attachments as attach
 from ..browserpool import BrowserModeError
 from ..errors import OpenAIError
 from ..prompt import flatten_messages
 from .base import ModelInfo, Provider
+from . import api_mode
 from ..automation.account_broker import AccountBroker, AccountLease as Assignment, account_key_of
 from ..automation.account_errors import AccountLimitExceeded, TrialLimitExceeded
 from ..automation.account_source import StorageAccountSource as _AccountRotator
@@ -130,6 +131,13 @@ def validate_recipe(d: dict) -> list[str]:
     # và được phép vắng mặt.
     declared_flows = isinstance(d.get("flows"), dict) and bool(d.get("flows"))
     errs += flows.validate_flows(d, DONE_SIGNALS, COPY_SCOPES)
+    errs += api_mode.validate_api(d.get("api"))
+    errs += api_mode.validate_model_list(d.get("model_list"))
+    # Recipe có `api` không bắt buộc selector đọc câu trả lời; có `api.send`
+    # thì cũng không cần ô nhập — chỉ request có file hoặc session bền vững
+    # mới rơi về đường DOM.
+    api_result = isinstance(d.get("api"), dict)
+    api_only = api_result and d["api"].get("send") is not None
     resp = d.get("response") or {}
     ds = resp.get("done_signal") or {}
     prompt_block = d.get("prompt") if isinstance(d.get("prompt"), dict) else {}
@@ -140,10 +148,11 @@ def validate_recipe(d: dict) -> list[str]:
     if wait is not None and (isinstance(wait, bool) or not isinstance(wait, int) or wait < 0):
         errs.append("invalid field: prompt.attach_wait_ms (số nguyên >= 0)")
     if not declared_flows:
-        need("prompt.input_selector", bool((d.get("prompt") or {}).get("input_selector")))
+        if not api_only:
+            need("prompt.input_selector", bool((d.get("prompt") or {}).get("input_selector")))
         # image recipe có thể dùng image_selector thay vì last_message_selector
         has_image = bool(resp.get("image_selector"))
-        if not has_image:
+        if not has_image and not api_result:
             need("response.last_message_selector", bool(resp.get("last_message_selector")))
     # validate image_copy_selector nếu có
     img_copy_sel = resp.get("image_copy_selector")
@@ -158,7 +167,7 @@ def validate_recipe(d: dict) -> list[str]:
     from ..account_limits import validate_limit_fields as _validate_limits
 
     errs += _validate_limits(resp if isinstance(resp, dict) else {}, "response")
-    if not declared_flows or ds:
+    if (not declared_flows and not api_result) or ds:
         need("response.done_signal.type", ds.get("type") in DONE_SIGNALS)
     if ds.get("type") in {"selector_appear", "selector_disappear"}:
         need("response.done_signal.selector", bool(ds.get("selector")))
@@ -183,15 +192,8 @@ def validate_recipe(d: dict) -> list[str]:
                     errs.append(f"invalid field: mode.{key} (phải là string)")
                 if key.endswith("_action") and isinstance(v, str) and v:
                     steps = [s.strip() for s in v.split(";") if s.strip()]
-                    def _ok(s: str) -> bool:
-                        if s.startswith("click:") or s.startswith("select:") or s.startswith("press:"):
-                            return bool(s.split(":",1)[1].strip())
-                        if s.startswith("wait:"):
-                            try: return int(s.split(":",1)[1].strip()) >= 0
-                            except: return False
-                        return False
-                    if not (steps and all(_ok(s) for s in steps)):
-                        errs.append(f"invalid field: mode.{key} (click:<selector> | select:<selector> | press:<key> | wait:<ms>)")
+                    if not (steps and all(flows.step_ok(s) for s in steps)):
+                        errs.append(f"invalid field: mode.{key} ({flows.STEP_SYNTAX})")
 
     models = d.get("models")
     need("models", isinstance(models, list) and len(models) > 0
@@ -207,16 +209,11 @@ def validate_recipe(d: dict) -> list[str]:
                     f"({' | '.join(flows.CAPABILITIES)}; nhiều giá trị ngăn bằng dấu phẩy)")
             action = model.get("action")
             raw_steps = [s.strip() for s in action.split(";") if s.strip()] if isinstance(action, str) else []
-            def _aok(s: str) -> bool:
-                if s.startswith("click:") or s.startswith("select:") or s.startswith("press:"):
-                    return bool(s.split(":",1)[1].strip())
-                if s.startswith("wait:"):
-                    try: return int(s.split(":",1)[1].strip()) >= 0
-                    except: return False
-                return False
-            if action is not None and not (raw_steps and all(_aok(s) for s in raw_steps)):
+            if action is not None and not (raw_steps and all(flows.step_ok(s) for s in raw_steps)):
                 errs.append(
                     f"invalid field: models[{i}].action (click:<selector> | select:<selector> | press:<key> | wait:<ms>)")
+
+    errs += model_variants.validate(d)
 
     login = d.get("login") or {}
     if login.get("strategy", "round_robin") not in LOGIN_STRATEGIES:
@@ -321,7 +318,16 @@ async def discover_models(page, before_action: str = "") -> list[dict]:
 class BrowserRecipe(AccountBroker, Provider):
     def __init__(self, recipe: dict, base_dir: Path, pool, headed: bool = False,
                  accounts_root: Path | None = None):
-        self._recipe = recipe
+        # `models` đã bung biến thể (model × variants, xem model_variants.py):
+        # mọi chỗ tra model bên dưới thấy luôn qwen3.8-max-thinking... như
+        # model khai tay. Bản gốc không đổi nên YAML lưu lại vẫn gọn.
+        self._recipe = {**recipe, "models": model_variants.expand_recipe(recipe)}
+        self._variants = recipe.get("variants") if isinstance(recipe.get("variants"), dict) else {}
+        self._raw_models = [m for m in recipe.get("models") or [] if isinstance(m, dict) and m.get("id")]
+        # Lấy danh sách model qua API của site (api_mode.list_models) thay vì
+        # mở dropdown; catalog.refresh đọc thuộc tính này.
+        self._model_list_cfg = (recipe.get("model_list")
+                                if isinstance(recipe.get("model_list"), dict) else None)
         self.slug = recipe["slug"]
         self.base_dir = base_dir
         self.pool = pool
@@ -356,6 +362,9 @@ class BrowserRecipe(AccountBroker, Provider):
         # chat.qwen.ai) thì khai báo `new_chat` để mở phiên chat mới; đặt
         # `keep_context: false` nếu muốn dựng context sạch mỗi request.
         self._keep_context = bool(recipe.get("keep_context", True))
+        # Chế độ API trong trang (xem api_mode.py): có thì request text thường
+        # gọi thẳng API của site thay vì gõ prompt và đọc DOM.
+        self._api_cfg = recipe.get("api") if isinstance(recipe.get("api"), dict) else None
         new_chat = recipe.get("new_chat") or {}
         self._new_chat_url = new_chat.get("url")
         self._new_chat_selector = new_chat.get("selector")
@@ -576,6 +585,20 @@ class BrowserRecipe(AccountBroker, Provider):
                         pass
                 await asyncio.sleep(0.2)
                 continue
+            if action == "slider":
+                await self._set_slider(page, arg)
+                continue
+            if action == "click?":
+                # Bấm nếu có (vd "Expand more models" chỉ hiện khi danh sách
+                # đang thu gọn); không thấy trong 1.5s thì bỏ qua, không lỗi.
+                loc = _resolve_locator(page, arg).first
+                try:
+                    await loc.wait_for(state="visible", timeout=1500)
+                except Exception:
+                    continue
+                await loc.click(timeout=5000)
+                await asyncio.sleep(0.35)
+                continue
             selector = arg
             if not selector:
                 continue
@@ -595,6 +618,41 @@ class BrowserRecipe(AccountBroker, Provider):
             except Exception as e:
                 applog.log(f"recipe: '{self.slug}' action '{action}:{arg}' lỗi: {e}", level="warn")
                 raise
+
+    async def _set_slider(self, page, arg: str) -> None:
+        """`slider:<selector>=<nhãn>`: đưa thanh trượt ARIA tới mức có
+        `aria-valuetext` (hoặc `aria-valuenow`) bằng nhãn — theo TÊN mức chứ
+        không theo vị trí, vì mỗi model có thể có số mức khác nhau (z.ai:
+        GLM-5.3 có Low/High/Max, GLM-5.2 chỉ High/Max)."""
+        selector, _, label = arg.rpartition("=")
+        want = label.strip().lower()
+        loc = _resolve_locator(page, selector.strip()).first
+        await loc.wait_for(state="visible", timeout=10000)
+
+        async def current() -> tuple[str, str]:
+            return (str(await loc.get_attribute("aria-valuetext") or "").strip().lower(),
+                    str(await loc.get_attribute("aria-valuenow") or "").strip().lower())
+
+        await loc.focus()
+        await page.keyboard.press("Home")
+        await asyncio.sleep(0.15)
+        seen: list[str] = []
+        try:
+            steps = int(await loc.get_attribute("aria-valuemax") or 10) - int(
+                await loc.get_attribute("aria-valuemin") or 0)
+        except ValueError:
+            steps = 10
+        for _ in range(max(0, steps) + 1):
+            text, now = await current()
+            seen.append(text or now)
+            if want in (text, now):
+                await asyncio.sleep(0.2)
+                return
+            await page.keyboard.press("ArrowRight")
+            await asyncio.sleep(0.15)
+        raise OpenAIError(422, "variant_unavailable",
+                          f"Recipe '{self.slug}': thanh trượt {selector.strip()} không có mức "
+                          f"'{label.strip()}' (có: {', '.join(s for s in seen if s)})")
 
     # ------------------------------- flows -------------------------------
 
@@ -732,9 +790,7 @@ class BrowserRecipe(AccountBroker, Provider):
     def models(self) -> list[ModelInfo]:
         from ..automation.catalog import known_models
         out: list[ModelInfo] = []
-        catalog = {m["id"]: m for m in known_models(self.slug)}
-        catalog.update({m["id"]: m for m in self._recipe["models"]})
-        for m in catalog.values():
+        for m in self._catalog_models(known_models(self.slug)):
             caps = flows.capabilities_of(m)
             # ModelInfo.capability là một chuỗi: giữ "both" cho cặp chat+image
             # (nghĩa cũ, client đang đọc), còn lại nối bằng dấu phẩy.
@@ -770,14 +826,25 @@ class BrowserRecipe(AccountBroker, Provider):
         một model mới phát hiện sẽ không bấm gì và rơi về model mặc định.
         """
         wanted = model_id.split("/", 1)[1] if "/" in model_id else model_id
-        for m in self._recipe.get("models") or []:
-            if isinstance(m, dict) and m.get("id") == wanted:
-                return m
         from ..automation.catalog import known_models
-        for m in known_models(self.slug):
+        for m in self._catalog_models(known_models(self.slug)):
             if m.get("id") == wanted:
                 return m
         return {}
+
+    def _catalog_models(self, found: list) -> list[dict]:
+        """Model recipe + model quét theo account, rồi mới ghép biến thể.
+
+        Model khai trong recipe đè từng khóa lên bản quét cùng ID (recipe
+        thắng `action`/`label`...), nhưng vẫn nhận `meta` từ bản quét — nhờ đó
+        `variants.*.when` biết model nào có thinking/effort. Thứ tự: model
+        recipe trước, model chỉ có trong catalog sau.
+        """
+        scanned = {m["id"]: m for m in found or [] if isinstance(m, dict) and m.get("id")}
+        merged = [{**scanned.get(m["id"], {}), **m} for m in self._raw_models]
+        own = {m["id"] for m in self._raw_models}
+        merged += [m for mid, m in scanned.items() if mid not in own]
+        return model_variants.expand(merged, self._variants)
 
     def flow_for_model(self, model_id: str) -> str:
         """Flow mà model này chạy — chọn model chính là chọn flow.
@@ -2205,6 +2272,47 @@ class BrowserRecipe(AccountBroker, Provider):
         applog.log(f"recipe: '{self.slug}' đã đính kèm {len(files)} file "
                    f"({', '.join(item.name for item in files)})")
 
+    async def _run_api(self, page, prompt: str, model_id: str, assignment: "Assignment",
+                       flow: str = "text") -> str:
+        """Một lượt chat qua API nội bộ của site, fetch từ trong tab đã đăng nhập."""
+        # Fetch phải chạy trên đúng origin để mang cookie và qua được CORS.
+        if urlsplit(_page_url(page) or "").netloc != urlsplit(self.url).netloc:
+            await page.goto(self.url, wait_until="domcontentloaded")
+            await _sleep_ms(self._ready_delay_ms)
+        deadline = time.monotonic() + int(self._api_cfg.get("timeout_ms", 120000)) / 1000
+        text = await self._api_result(assignment, flow, api_mode.run(
+            page, self._api_cfg, self._api_vars(prompt, model_id), deadline))
+        assignment.conversation_url = _page_url(page)
+        return text
+
+    def _api_vars(self, prompt: str, model_id: str) -> dict:
+        import uuid
+
+        spec = self.model_spec(model_id)
+        wanted = model_id.split("/", 1)[1] if "/" in model_id else model_id
+        return {
+            "prompt": prompt,
+            "model": str(spec.get("api_model") or wanted),
+            "uuid": str(uuid.uuid4()),
+            "now": int(time.time() * 1000),
+        }
+
+    async def _api_result(self, assignment: "Assignment", flow: str, call) -> str:
+        """Chờ `call` (coroutine của api_mode) và soi limit trên kết quả/lỗi."""
+        compiled, _ = self._compiled_limit(flow)
+        try:
+            text = await call
+        except api_mode.ApiCallError as error:
+            matched = limits.match_limit(error.body or str(error), compiled) if compiled else None
+            if matched:
+                raise self._record_limit_hit(matched, assignment, flow) from error
+            raise
+        if compiled:
+            matched = limits.match_limit(text, compiled)
+            if matched:
+                raise self._record_limit_hit(matched, assignment, flow)
+        return text
+
     async def stream(self, messages: list[dict], model_id: str,
                      headed: bool | None = None,
                      target_account_id: int | None = None,
@@ -2328,6 +2436,18 @@ class BrowserRecipe(AccountBroker, Provider):
             # chặn...) khiến log chỉ thấy lỗi biến cục bộ.
             captured_html: str | None = None
             try:
+                api_send = self._api_cfg is not None and self._api_cfg.get("send") is not None
+                if api_send and flow == "text" and not files and turn is None:
+                    yield await self._run_api(page, prompt, model_id, assignment, flow)
+                    return
+                # Không có `send`: vẫn gõ prompt qua giao diện, chỉ đọc câu trả
+                # lời qua API (`poll`) thay cho DOM/nút Copy.
+                api_poll = (self._api_cfg if self._api_cfg is not None and not api_send
+                            and flow == "text" else None)
+                if not prompt_cfg.get("input_selector"):
+                    raise OpenAIError(400, "api_mode_unsupported",
+                                      f"Recipe '{self.slug}' chỉ có chế độ api — chưa hỗ trợ "
+                                      "file đính kèm, session bền vững hay flow ngoài text")
                 box = _resolve_locator(page, prompt_cfg["input_selector"]).first
                 target_url = resume_url or (turn.project_url if turn else None)
                 # Session bền vững mới (chưa có URL hội thoại) luôn mở chat mới;
@@ -2356,13 +2476,13 @@ class BrowserRecipe(AccountBroker, Provider):
                                               "Website không mở được hội thoại đã lưu")
                         await asyncio.sleep(0.25)
                 await _sleep_ms(self._input_delay_ms)
-                model = next((item for item in self._recipe["models"]
-                              if item["id"] == model_id), None)
+                model = self.model_spec(model_id) or None
                 if turn is not None:
                     from ..automation.catalog import cached
                     observed = await asyncio.to_thread(cached, self.slug, assignment.account_id)
                     if observed and observed["state"] == "supported":
-                        observed_model = next((m for m in observed["models"] if m["id"] == model_id), None)
+                        observed_model = next((m for m in self._catalog_models(observed["models"])
+                                               if m["id"] == model_id), None)
                         if observed_model:
                             model = observed_model
                         elif model and model.get("action"):
@@ -2383,6 +2503,12 @@ class BrowserRecipe(AccountBroker, Provider):
                 reply_selector = resp_cfg.get("last_message_selector")
                 prior_count = (await _resolve_locator(page, reply_selector).count()
                                if (resume_url or continued) and reply_selector else 0)
+                api_vars = baseline = None
+                if api_poll is not None:
+                    api_vars = self._api_vars(prompt, model_id)
+                    found = api_mode.url_vars(api_poll, _page_url(page))
+                    if found is not None:
+                        baseline = await api_mode.snapshot(page, api_poll, {**api_vars, **found})
                 # File trước, chữ sau: nhiều site khóa nút gửi tới khi upload xong.
                 await self._attach_files(page, prompt_cfg, files or [])
                 if prompt_cfg.get("input_mode", "fill") == "type":
@@ -2401,6 +2527,16 @@ class BrowserRecipe(AccountBroker, Provider):
                 else:
                     await box.press("Enter")
                 self._count_chat_turn(ctx_key)
+
+                if api_poll is not None:
+                    async def _tick(p):
+                        if choice_sel:
+                            await self._pick_choice(p, choice_sel)
+                    api_deadline = time.monotonic() + int(api_poll.get("timeout_ms", timeout_ms)) / 1000
+                    yield await self._api_result(
+                        assignment, flow, api_mode.poll_result(
+                            page, api_poll, api_vars, api_deadline, baseline, _tick))
+                    return
 
                 stable_since = None
                 # Lần đầu thấy nút copy của câu trả lời cuối (copy_button).

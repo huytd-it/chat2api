@@ -18,7 +18,7 @@ from pathlib import Path
 
 import yaml
 
-from .. import accounts
+from .. import accounts, model_variants
 from . import Store, now_ms
 
 # Hai thư mục này được router xử lý bằng loader riêng, không phải recipe browser.
@@ -140,7 +140,8 @@ def _scan_browser(directory: Path) -> list[ScannedRecipe]:
         domain=accounts.domain_of(cfg.get("url") or ""),
         yaml_text=path.read_text(encoding="utf-8"),
         config=cfg,
-        models=[str(m["id"]) for m in cfg.get("models") or [] if isinstance(m, dict) and m.get("id")],
+        # Bung biến thể (qwen3.8-max-thinking...) để bảng model khớp /v1/models.
+        models=[str(m["id"]) for m in model_variants.expand_recipe(cfg)],
         keep_context=bool(cfg.get("keep_context", True)),
         rotation=str(login.get("strategy") or "round_robin"),
         rotation_quota=_int(login.get("quota"), 50),

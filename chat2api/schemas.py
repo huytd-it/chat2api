@@ -183,6 +183,10 @@ class RecipeModelSpec(BaseModel):
     # Flow mà model này chạy — chọn model chính là chọn flow. Thắng `capability`
     # và là cách DUY NHẤT trỏ tới flow tên tự đặt (`flows.deep_research`…).
     flow: str | None = None
+    label: str | None = None
+    # Biến thể (xem model_variants.py): false = không ghép, list = chỉ các
+    # biến thể có tên trong list. Khai ở đây để Lưu từ biểu mẫu không làm rơi.
+    variants: bool | list[str] | None = None
 
 
 class RecipeAnalyzeRequest(BaseModel):
