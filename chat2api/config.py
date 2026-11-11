@@ -45,12 +45,19 @@ class Config:
         self.profiles_dir = self.data_dir / "profiles"
         # Flows đã xoá — thuộc tính giữ lại chỉ để code cũ đọc không vỡ.
         self.flows_dir = self.data_dir / "flows"
-        # Số profile (mỗi profile = 1 tiến trình Chromium) giữ mở cùng lúc.
-        # Bàn test Sessions mở nhiều profile/domain/account song song, nên trần
-        # 2 là quá chật — profile đang chạy sẽ bị đóng ngay giữa request.
-        self.pool_max_profiles = max(1, int(_env("POOL_MAX_PROFILES", "6")))
+        # Số profile (mỗi profile = 1 tiến trình Chromium, ~600–900 MB) giữ mở
+        # cùng lúc. Trần này chỉ đóng profile RẢNH — profile đang chạy request
+        # không bị cắt, pool tạm vượt trần thay vì vậy (xem browserpool).
+        self.pool_max_profiles = max(1, int(_env("POOL_MAX_PROFILES", "3")))
         # Trần số tab trong một profile; vượt thì đóng tab RẢNH ít dùng nhất.
-        self.profile_max_tabs = max(1, int(_env("PROFILE_MAX_TABS", "8")))
+        # Chỉ áp cho profile mặc định tạo mới; profile có sẵn đọc cột max_tabs.
+        self.profile_max_tabs = max(1, int(_env("PROFILE_MAX_TABS", "4")))
+        # Đóng Chromium headless rảnh quá N giây để trả RAM (0 = tắt). Đăng
+        # nhập giữ nguyên trong user_data_dir; request sau chờ thêm lúc mở lại.
+        self.pool_idle_timeout = max(0, int(_env("POOL_IDLE_TIMEOUT", "600")))
+        # Job đã kết thúc được giữ trong RAM bao lâu (giây) trước khi bỏ ra;
+        # log/trace vẫn còn trong DB.
+        self.job_retention = max(60, int(_env("JOB_RETENTION_SECONDS", "3600")))
         self.recipe_timeout_ms = int(_env("RECIPE_TIMEOUT_MS", "120000"))
         self.integrate_max_rounds = int(_env("INTEGRATE_MAX_ROUNDS", "5"))
         # Site không yêu cầu đăng nhập vẫn được publish, nhưng chỉ cho dùng thử

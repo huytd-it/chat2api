@@ -925,11 +925,26 @@ class GoogleAuthService:
         return results
 
     def resolve_url(self, target: str) -> str:
-        """host trần → URL recipe phục vụ host đó (rơi về https://host/)."""
+        """host trần → URL truy cập trực tiếp để đăng nhập Google cho host đó.
+
+        Ưu tiên URL đăng nhập tùy chỉnh đã lưu cho domain (trang có nút
+        "Continue with Google"), rồi tới URL recipe phục vụ host, cuối cùng
+        rơi về https://host/.
+        """
         target = (target or "").strip()
         if target.startswith(("http://", "https://")):
             return target
         host = target.lower().strip("/")
+        db = store.default()
+        if db is not None:
+            try:
+                row = db.connection().execute(
+                    "SELECT login_url FROM domain WHERE host = ?", (host,)).fetchone()
+                login_url = (row["login_url"] if row else "") or ""
+                if login_url:
+                    return login_url
+            except Exception:
+                pass
         for provider in (getattr(self.router, "providers", {}) or {}).values():
             url = getattr(provider, "url", "") or ""
             if url and accounts.domain_of(url) == host:

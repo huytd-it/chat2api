@@ -17,6 +17,33 @@ MAX_LOGIN_ATTEMPTS = 2
 TERMINAL_STATUSES = {"ok", "recorded", "failed", "cancelled", "login_timeout", "record_timeout"}
 CANCELLABLE_STATUSES = {"running", "waiting_login", "resuming", "recording", "resuming_record"}
 JOBS: dict[str, dict] = {}
+# Lúc (time.monotonic) mỗi job được thấy đã kết thúc — để `prune` bỏ job cũ khỏi RAM.
+_ENDED_AT: dict[str, float] = {}
+
+
+def prune(ttl_seconds: float) -> int:
+    """Bỏ khỏi RAM các job đã kết thúc quá `ttl_seconds` (log/trace vẫn nằm trong DB).
+
+    Không có bước này thì `JOBS` giữ log + trace của mọi job từ lúc server chạy.
+    Chỉ bỏ job đã ở trạng thái kết thúc và không còn task nào chạy.
+    """
+    import time
+
+    now = time.monotonic()
+    removed = 0
+    for job_id, job in list(JOBS.items()):
+        if job.get("status") not in TERMINAL_STATUSES:
+            _ENDED_AT.pop(job_id, None)
+            continue
+        if any(t is not None and not t.done()
+               for t in (job.get("task"), job.get("timeout_task"))):
+            continue
+        ended = _ENDED_AT.setdefault(job_id, now)
+        if now - ended >= ttl_seconds:
+            JOBS.pop(job_id, None)
+            _ENDED_AT.pop(job_id, None)
+            removed += 1
+    return removed
 
 
 class _JobLog(list):

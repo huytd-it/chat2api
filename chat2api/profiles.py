@@ -795,3 +795,61 @@ def known_hosts() -> list[str]:
     if db is None:
         return []
     return [row["host"] for row in db.query("SELECT host FROM domain ORDER BY host")]
+
+
+def domain_login_urls() -> dict[str, str]:
+    """{host: login_url} cho các domain đã lưu URL trang đăng nhập tùy chỉnh."""
+    db = store.default()
+    if db is None:
+        return {}
+    rows = db.query("SELECT host, login_url FROM domain")
+    return {row["host"]: (row["login_url"] or "") for row in rows}
+
+
+def get_domain(host: str) -> dict | None:
+    db = store.default()
+    if db is None:
+        return None
+    host = (host or "").strip().lower()
+    rows = db.query("SELECT id, host, title, login_url FROM domain WHERE host = ?", (host,))
+    return dict(rows[0]) if rows else None
+
+
+def ensure_domain(host: str) -> dict | None:
+    """Đảm bảo có hàng domain cho host, trả về thông tin domain."""
+    from . import accounts as accounts_mod
+
+    host = (host or "").strip().lower()
+    if not accounts_mod.valid_domain(host):
+        raise ValueError("Domain không hợp lệ")
+    db = store.default()
+    if db is None:
+        return None
+    conn = db.connection()
+    now = store.now_ms()
+    with conn:
+        conn.execute("INSERT OR IGNORE INTO domain(host, created_at) VALUES (?, ?)", (host, now))
+    return get_domain(host)
+
+
+def set_domain_login_url(host: str, login_url: str | None) -> dict | None:
+    """Lưu URL trang đăng nhập tùy chỉnh cho domain (dùng khi đăng nhập Google/site)."""
+    from . import accounts as accounts_mod
+
+    host = (host or "").strip().lower()
+    if not accounts_mod.valid_domain(host):
+        raise ValueError("Domain không hợp lệ")
+    raw = (login_url or "").strip()
+    if raw and not raw.startswith(("http://", "https://")):
+        raw = "https://" + raw
+    if raw:
+        if accounts_mod.domain_of(raw) != host:
+            raise ValueError("URL đăng nhập phải thuộc cùng domain")
+    db = store.default()
+    if db is None:
+        raise RuntimeError("kho dữ liệu chưa mở")
+    ensure_domain(host)
+    conn = db.connection()
+    with conn:
+        conn.execute("UPDATE domain SET login_url = ? WHERE host = ?", (raw, host))
+    return get_domain(host)

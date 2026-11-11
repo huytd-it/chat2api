@@ -3,6 +3,7 @@ import contextlib
 import json
 import logging
 import os
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +162,15 @@ class BrowserPool:
         # chạy lâu cũng bị cắt giữa chừng.
         self._busy_profiles: dict[str, int] = {}
         self._busy_tabs: dict[str, int] = {}
+        # Lần cuối mỗi context/profile được dùng (time.monotonic), cho vòng
+        # dọn RAM trong main.lifespan đóng Chromium rảnh lâu. Khoá: "ctx:<slug>" / "profile:<name>".
+        self._last_used: dict[str, float] = {}
+
+    def _touch(self, key: str) -> None:
+        self._last_used[key] = time.monotonic()
+
+    def _idle_for(self, key: str, now: float) -> float:
+        return now - self._last_used.get(key, now)
 
     @property
     def size(self) -> int:
@@ -185,9 +195,11 @@ class BrowserPool:
         if not self._profile_alive(ctx):
             del self._contexts[slug]
             self._context_headless.pop(slug, None)
+            self._last_used.pop(f"ctx:{slug}", None)
             logger.info("BrowserPool: browser của '%s' đã bị đóng tay, sẽ mở lại", slug)
             return None
         self._contexts.move_to_end(slug)
+        self._touch(f"ctx:{slug}")
         return ctx
 
     async def context_for(self, slug: str, storage_state: Path | None = None,
@@ -202,6 +214,7 @@ class BrowserPool:
             while len(self._contexts) >= self.max_contexts:
                 old_slug, old_ctx = self._contexts.popitem(last=False)
                 self._context_headless.pop(old_slug, None)
+                self._last_used.pop(f"ctx:{old_slug}", None)
                 await self._close_context(old_ctx)
                 logger.warning(
                     "BrowserPool context evicted for slug (max_contexts=%s)", self.max_contexts
@@ -211,6 +224,7 @@ class BrowserPool:
                 await seed_storage_state(ctx, storage_state)
             self._contexts[slug] = ctx
             self._context_headless[slug] = not headed
+            self._touch(f"ctx:{slug}")
             return ctx
 
     # ------------------------------------------------------- đường profile
@@ -226,6 +240,7 @@ class BrowserPool:
         ctx = self._profiles.get(profile.name)
         if ctx is not None and self._profile_alive(ctx) and not self._mode_changed(profile):
             self._profiles.move_to_end(profile.name)
+            self._touch(f"profile:{profile.name}")
             return ctx
         async with self._profile_lock:
             ctx = self._profiles.get(profile.name)
@@ -266,6 +281,7 @@ class BrowserPool:
             self._profile_headless[profile.name] = bool(profile.headless)
             self._profile_modes[profile.name] = self.profile_mode(profile)
             self._profile_ids[profile.name] = profile.id
+            self._touch(f"profile:{profile.name}")
             await self._seed_profile(profile, ctx)
             await asyncio.to_thread(profiles_mod.touch, profile.id)
             return ctx
@@ -282,11 +298,13 @@ class BrowserPool:
         chỉ là cái phao để vòng evict biết cái nào còn đang chạy.
         """
         self._busy_profiles[profile_name] = self._busy_profiles.get(profile_name, 0) + 1
+        self._touch(f"profile:{profile_name}")
         if tab_key:
             self._busy_tabs[tab_key] = self._busy_tabs.get(tab_key, 0) + 1
         try:
             yield
         finally:
+            self._touch(f"profile:{profile_name}")
             if self._busy_profiles.get(profile_name, 0) <= 1:
                 self._busy_profiles.pop(profile_name, None)
             else:
@@ -512,6 +530,7 @@ class BrowserPool:
         await self._close_context(ctx)
         profile_id = self._profile_ids.pop(name, None)
         self._profile_headless.pop(name, None)
+        self._last_used.pop(f"profile:{name}", None)
         self._profile_modes.pop(name, None)
         if profile_id is not None:
             await asyncio.to_thread(profiles_mod.release_lock, profile_id)
@@ -567,29 +586,43 @@ class BrowserPool:
         async with self._lock:
             context = self._contexts.pop(slug, None)
             self._context_headless.pop(slug, None)
+            self._last_used.pop(f"ctx:{slug}", None)
         if context:
             async def close() -> None:
                 await self._close_context(context)
 
             await _finish_cleanup(close())
 
-    async def close_background(self, router) -> int:
-        """Đóng Chromium headless đang rảnh do pool sở hữu, không cắt request đang chạy."""
+    async def close_background(self, router, idle_seconds: float = 0) -> int:
+        """Đóng Chromium headless đang rảnh do pool sở hữu, không cắt request đang chạy.
+
+        `idle_seconds > 0` chỉ đóng cái đã rảnh ít nhất chừng ấy giây (vòng dọn
+        RAM trong main.lifespan dùng). Cửa sổ có giao diện (headed) không bị đóng ở
+        đây — người dùng có thể đang thao tác trên đó. Đăng nhập không mất vì
+        profile giữ `user_data_dir`; request sau chỉ chờ thêm lúc mở lại.
+        """
         from .providers.browser_recipe import BrowserRecipe
 
         busy_keys = set()
         for provider in router.providers.values():
             if isinstance(provider, BrowserRecipe):
                 busy_keys.update(key for key, count in provider._inflight.items() if count)
+        now = time.monotonic()
         closed = 0
         for slug in list(self._contexts):
-            if self._context_headless.get(slug) and slug not in busy_keys:
-                await self.drop(slug)
-                closed += 1
+            if not self._context_headless.get(slug) or slug in busy_keys:
+                continue
+            if idle_seconds and self._idle_for(f"ctx:{slug}", now) < idle_seconds:
+                continue
+            await self.drop(slug)
+            closed += 1
         for name in list(self._profiles):
-            if self._profile_headless.get(name) and not self.profile_busy(name):
-                if await self.drop_profile(name):
-                    closed += 1
+            if not self._profile_headless.get(name) or self.profile_busy(name):
+                continue
+            if idle_seconds and self._idle_for(f"profile:{name}", now) < idle_seconds:
+                continue
+            if await self.drop_profile(name):
+                closed += 1
         return closed
 
     async def aclose(self):
@@ -601,3 +634,4 @@ class BrowserPool:
             await self._close_profile(name, ctx)
         self._profiles.clear()
         self._pages.clear()
+        self._last_used.clear()

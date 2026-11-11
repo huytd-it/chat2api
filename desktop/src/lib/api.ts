@@ -1454,6 +1454,7 @@ export interface DomainInfo {
   host: string;
   accounts: number;
   recipes: string[];
+  login_url?: string;
 }
 
 export async function fetchProfiles(key: string): Promise<ProfileList> {
@@ -1657,6 +1658,17 @@ export async function fetchDomains(key: string): Promise<DomainInfo[]> {
   const r = await fetch(base + "/admin/domains", { headers: headers(key) });
   const data = await asJson(r);
   return data.domains as DomainInfo[];
+}
+
+/** Đặt URL trang đăng nhập tùy chỉnh cho domain (truy cập trực tiếp khi login Google/site). */
+export async function updateDomain(key: string, host: string, loginUrl: string): Promise<void> {
+  const base = await apiBase();
+  const r = await fetch(base + "/admin/domains/" + encodeURIComponent(host), {
+    method: "PATCH",
+    headers: headers(key),
+    body: JSON.stringify({ login_url: loginUrl }),
+  });
+  await asJson(r);
 }
 
 /** Account đang bị khóa tạm vì dính limit của site (theo từng recipe).

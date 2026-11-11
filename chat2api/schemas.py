@@ -420,6 +420,11 @@ class GoogleSitesRequest(BaseModel):
     first_account: bool = False
 
 
+class DomainUpdateRequest(BaseModel):
+    # URL trang đăng nhập (nơi có nút "Continue with Google") để truy cập trực tiếp.
+    login_url: str | None = None
+
+
 class SettingsRequest(BaseModel):
     values: dict[str, str]
 

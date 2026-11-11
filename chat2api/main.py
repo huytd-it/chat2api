@@ -20,7 +20,8 @@ from .config import Config
 from .errors import OpenAIError
 from .automation.account_errors import AccountLimitExceeded, TrialLimitExceeded
 from .router import ModelNotFound, Router
-from .schemas import ChatRequest, ComboCreateRequest, ComboUpdateRequest, ImageGenerateRequest
+from .schemas import (ChatRequest, ComboCreateRequest, ComboUpdateRequest, DomainUpdateRequest,
+                       ImageGenerateRequest)
 
 
 def _sse(cid: str, model: str, delta: str) -> str:
@@ -323,10 +324,35 @@ def create_app(cfg: Config) -> FastAPI:
         # Watchdog Google: kiểm tra phiên Google của các profile theo chu kỳ
         # GOOGLE_CHECK_INTERVAL_MIN và tự đăng nhập lại khi rớt.
         google.start(router)
+        # Vòng dọn RAM: đóng Chromium headless rảnh quá POOL_IDLE_TIMEOUT (mỗi
+        # tiến trình ~600–900 MB) và bỏ job cũ khỏi JOBS (DB vẫn giữ).
+        async def housekeeping() -> None:
+            idle = cfg.pool_idle_timeout
+            interval = max(15.0, min(60.0, idle / 4)) if idle else 60.0
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    if idle:
+                        closed = await pool.close_background(router, idle_seconds=idle)
+                        if closed:
+                            applog.log(f"pool: đóng {closed} Chromium rảnh quá {idle}s "
+                                       "để trả RAM")
+                    jobs.prune(cfg.job_retention)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    applog.log(f"pool: vòng dọn RAM lỗi: {error}", "warn")
+
+        reaper = asyncio.create_task(housekeeping())
         try:
             yield
         finally:
             applog.log("Server đang tắt")
+            reaper.cancel()
+            try:
+                await reaper
+            except asyncio.CancelledError:
+                pass
             await google.stop()
             # Close login browsers first, then shutdown jobs; pool always last
             # (even when jobs.shutdown raises) so Chromium processes never leak.
@@ -2676,12 +2702,27 @@ def register_admin(app: FastAPI, admin) -> None:
         cfg = request.app.state.cfg
         usage = _domain_usage(request)
         known = await asyncio.to_thread(profiles.known_hosts)
+        login_urls = await asyncio.to_thread(profiles.domain_login_urls)
         hosts = sorted(set(known) | set(accounts.list_domains(cfg.recipes_dir)) | set(usage))
         return {"domains": [
             {"host": host,
              "accounts": len(accounts.list_accounts(cfg.recipes_dir, host)),
-             "recipes": sorted(usage.get(host, []))}
+             "recipes": sorted(usage.get(host, [])),
+             "login_url": login_urls.get(host, "")}
             for host in hosts]}
+
+    @admin.patch("/domains/{host}")
+    async def domain_update(host: str, body: DomainUpdateRequest):
+        host = (host or "").strip().lower()
+        if not accounts.valid_domain(host):
+            raise OpenAIError(400, "invalid_domain", "Domain không hợp lệ")
+        try:
+            item = await asyncio.to_thread(profiles.set_domain_login_url, host, body.login_url)
+        except ValueError as error:
+            raise OpenAIError(400, "invalid_domain", str(error))
+        except RuntimeError as error:
+            raise OpenAIError(500, "store_closed", str(error))
+        return {"domain": item}
 
     @admin.delete("/domains/{host}")
     async def domain_delete(host: str, request: Request):
